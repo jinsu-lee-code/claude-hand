@@ -1,0 +1,11 @@
+{
+  "name": "com.claudehand.tools",
+  "version": "0.1.0",
+  "displayName": "Claude Hand Tools",
+  "description": "Extra tools for MCP for Unity (CoplayDev): scene snapshots with refs, cross-project object export/import, and an editor status probe for background-operation tests. Requires MCP for Unity to be installed in the same project.",
+  "unity": "2021.3",
+  "keywords": ["mcp", "claude", "multi-project"],
+  "author": {
+    "name": "claude-hand"
+  }
+}
