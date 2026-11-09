@@ -151,6 +151,35 @@ class BlenderChatAddonTests(unittest.TestCase):
         self.assertTrue(hasattr(bpy.types, "CLAUDEHAND_PT_chat"))
         self.assertEqual(self.addon.wrap("가" * 50)[0], "가" * self.addon.WRAP_WIDTH)
 
+    def test_lines_fit_the_sidebar(self):
+        """Korean is about twice as wide as Latin text; a fixed character count overflowed into "..."."""
+        addon = self.addon
+        metrics = (160.0, 11.0)  # a narrow sidebar: 160 px for text at an 11 px label font
+        measure = addon.text_measure(11.0)
+        text = "SampleScene에 큐브를 하나 만들었어요. 원점에 두었고 씬은 아직 저장하지 않았어요."
+        lines = addon.wrap(text, metrics)
+        self.assertGreater(len(lines), 2)
+        self.assertTrue(all(measure(line) <= 160 for line in lines), lines)
+        self.assertEqual(" ".join(lines), text)
+        self.assertEqual(len(addon.wrap(text, (2000.0, 11.0))), 1)  # a wide sidebar keeps it on one line
+        path = "C:/Users/me/Desktop/Unity/hand_test/Assets/Scenes/SampleScene.unity"
+        self.assertEqual("".join(addon.wrap(path, (100.0, 11.0))), path)  # no spaces: broken between characters
+        self.assertTrue(all(measure(line) <= 100 for line in addon.wrap(path, (100.0, 11.0))))
+
+    def test_long_conversation_keeps_the_input_in_reach(self):
+        addon = self.addon
+        addon._entries[:] = [{"kind": "reply", "seq": i, "text": "긴 답 " * 200} for i in range(30)]
+        shown, folded = addon.visible_entries((200.0, 11.0))
+        self.assertEqual(shown[-1][0]["seq"], 29)  # the newest is always there
+        self.assertEqual(folded, 30 - len(shown))
+        self.assertEqual(len(shown[-1][1]), 1 + addon.ENTRY_LINES)  # header + capped text
+        self.assertGreater(shown[-1][2], 0)  # the rest is behind 전체 복사
+        self.assertEqual([e["seq"] for e, _, _ in shown], sorted(e["seq"] for e, _, _ in shown))
+        addon._inbox.put(("items", [{"kind": "user", "seq": 100 + i, "text": "x"} for i in range(addon.KEPT_ENTRIES)]))
+        addon.tick()
+        self.assertEqual(len(addon._entries), addon.KEPT_ENTRIES)
+        self.assertEqual(addon._entries[-1]["seq"], 100 + addon.KEPT_ENTRIES - 1)
+
 
 
 @unittest.skipIf(bpy is None, "Blender's bpy module is not installed")

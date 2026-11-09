@@ -24,11 +24,17 @@ namespace ClaudeHand.Editor
     {
         private const double NoReplyHintSeconds = 60;
         private const double StartWaitSeconds = 120;
+        private const int KeptEntries = 100;  // recent history only: the conversation itself lives in Claude Code
+        private const int ShownStep = 40;     // entries drawn per page: IMGUI lays out every drawn label each frame
+        private const int ShownChars = 1500;  // longer messages show their start; "전체 복사" has the rest
         private static readonly HttpClient Http = new HttpClient { Timeout = TimeSpan.FromSeconds(45) };
 
         private readonly List<Entry> _entries = new List<Entry>();
         private string _input = string.Empty;
         private Vector2 _scroll;
+        private int _shownEntries = ShownStep;
+        private bool _followNewest = true;  // scrolled to the bottom: new messages keep it there; reading older ones: stay put
+        private float _contentHeight;
         private bool _includeSelection = true;
         private string _status = "연결 중...";
         private string _chatId;
@@ -172,6 +178,7 @@ namespace ClaudeHand.Editor
                     // A new supervisor session: its chat history starts empty.
                     _serverPid = server.pid;
                     _entries.Clear();
+                    _shownEntries = ShownStep;
                     _after = 0;
                     _chatId = null;
                 }
@@ -241,8 +248,9 @@ namespace ClaudeHand.Editor
                     Request = item.Value<string>("request"),
                 });
             }
+            if (_entries.Count > KeptEntries) _entries.RemoveRange(0, _entries.Count - KeptEntries);
             _after = updates.Value<long?>("next") ?? _after;
-            _scroll.y = float.MaxValue;
+            if (_followNewest) _scroll.y = float.MaxValue;
             Repaint();
         }
 
@@ -250,6 +258,7 @@ namespace ClaudeHand.Editor
         {
             var text = _input.Trim();
             if (text.Length == 0 || _sending || _pendingText != null) return;
+            _followNewest = true;  // your own message and its answer come into view even if you had scrolled up
             var context = _includeSelection ? BuildContext() : string.Empty;
             if (ReadServer() == null || _serverMissing)
             {
@@ -450,22 +459,26 @@ namespace ClaudeHand.Editor
             }
 
             _scroll = GUILayout.BeginScrollView(_scroll);
-            foreach (var entry in _entries)
+            GUILayout.BeginVertical();
+            int first = Math.Max(0, _entries.Count - _shownEntries);
+            if (first > 0 && GUILayout.Button($"이전 대화 {first}개 더 보기")) _shownEntries += ShownStep;
+            for (int i = first; i < _entries.Count; i++)
             {
+                var entry = _entries[i];
                 switch (entry.Kind)
                 {
                     case "user":
                         EditorGUILayout.LabelField("나", EditorStyles.boldLabel);
-                        EditorGUILayout.LabelField(entry.Text, EditorStyles.wordWrappedLabel);
+                        DrawText(entry.Text, entry.Text);
                         break;
                     case "reply":
                         if (entry.Origin == "desktop")
                         {
                             EditorGUILayout.LabelField("데스크톱 앱에서", EditorStyles.boldLabel);
-                            if (!string.IsNullOrEmpty(entry.Request)) EditorGUILayout.LabelField(entry.Request, EditorStyles.wordWrappedMiniLabel);
+                            if (!string.IsNullOrEmpty(entry.Request)) EditorGUILayout.LabelField(Shorten(entry.Request, 300), EditorStyles.wordWrappedMiniLabel);
                         }
                         EditorGUILayout.LabelField("Claude", EditorStyles.boldLabel);
-                        EditorGUILayout.LabelField(entry.Text, EditorStyles.wordWrappedLabel);
+                        DrawText(entry.Text, string.IsNullOrEmpty(entry.Request) ? entry.Text : entry.Request + "\n\n" + entry.Text);
                         break;
                     case "permission":
                         DrawPermission(entry);
@@ -484,7 +497,13 @@ namespace ClaudeHand.Editor
                 EditorGUILayout.HelpBox("1분 넘게 답이 없습니다. 감독 세션을 start-supervisor.cmd(채널을 켜고 시작)로 열었는지, " +
                                         "Claude Code 창에 확인을 기다리는 질문이 없는지 봐 주세요.", MessageType.Info);
             }
+            GUILayout.EndVertical();
+            if (Event.current.type == EventType.Repaint) _contentHeight = GUILayoutUtility.GetLastRect().height;
             GUILayout.EndScrollView();
+            if (Event.current.type == EventType.Repaint)
+            {
+                _followNewest = _scroll.y + GUILayoutUtility.GetLastRect().height >= _contentHeight - 30f;
+            }
 
             var e = Event.current;
             bool submit = e.type == EventType.KeyDown && e.keyCode == KeyCode.Return && (e.control || e.command);
@@ -501,6 +520,21 @@ namespace ClaudeHand.Editor
             GUI.enabled = true;
             GUILayout.EndHorizontal();
         }
+
+        /// <summary>A message, or its first ShownChars characters and a button that copies all of it.</summary>
+        private static void DrawText(string text, string copy)
+        {
+            text = text ?? string.Empty;
+            EditorGUILayout.LabelField(Shorten(text, ShownChars), EditorStyles.wordWrappedLabel);
+            if (text.Length <= ShownChars) return;
+            GUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField($"…{text.Length - ShownChars}자 더 있음", EditorStyles.miniLabel);
+            if (GUILayout.Button("전체 복사", EditorStyles.miniButton, GUILayout.Width(70))) GUIUtility.systemCopyBuffer = copy;
+            GUILayout.EndHorizontal();
+        }
+
+        private static string Shorten(string text, int max) =>
+            string.IsNullOrEmpty(text) || text.Length <= max ? text ?? string.Empty : text.Substring(0, max) + "…";
 
         private void DrawPermission(Entry entry)
         {

@@ -207,13 +207,19 @@ class Stage2HubTests(unittest.TestCase):
 
 
 class MinimizeTests(unittest.TestCase):
-    def test_only_on_windows_and_in_a_separate_process(self):
-        runs = []
-        self.assertFalse(cc.minimize_console(1234, run=lambda *a, **kw: runs.append(a), platform="linux"))
-        self.assertTrue(cc.minimize_console(1234, run=lambda cmd, **kw: runs.append(cmd), platform="win32"))
-        self.assertEqual(runs[0][-1], "1234")
-        self.assertIn("AttachConsole", runs[0][2])
-        compile(cc.MINIMIZE_SCRIPT, "minimize", "exec")
+    def test_only_on_windows_and_only_the_supervisor_console(self):
+        shown, asked = [], []
+        find = lambda owners: asked.append(owners) or [111]
+        self.assertFalse(cc.minimize_console({7}, find=find, show=shown.append, platform="linux"))
+        self.assertTrue(cc.minimize_console({7, 8}, find=find, show=shown.append, platform="win32"))
+        self.assertEqual((asked, shown), ([{7, 8}], [111]))
+        self.assertFalse(cc.minimize_console({7}, find=lambda owners: [], show=shown.append, platform="win32"))
+        # The console window belongs to the cmd.exe that runs start-supervisor, the parent of Claude Code (8).
+        self.assertEqual(cc.console_owners(AncestorTests.TABLE, 8), {8, 7})
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows console windows")
+    def test_finds_no_window_for_unknown_owners(self):
+        self.assertEqual(cc.console_windows({0}), [])
 
     def test_config_switch(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -354,6 +360,14 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(json.loads((self.server_file.parent / "status.json").read_text(encoding="utf-8"))["mode"], "serving")
         self.assertTrue(self.http("GET", "/v1/status")["ok"])
 
+
+
+class LongTextTests(unittest.TestCase):
+    def test_long_text_is_cut_visibly(self):
+        self.assertEqual(cc.clip("짧은 답", cc.MAX_TEXT), "짧은 답")
+        cut = cc.clip("가" * (cc.MAX_TEXT + 500), cc.MAX_TEXT)
+        self.assertEqual(len(cut), cc.MAX_TEXT)
+        self.assertTrue(cut.endswith(f"앞의 {cc.MAX_TEXT}자만 보냅니다)"))
 
 
 class ModeTests(unittest.TestCase):

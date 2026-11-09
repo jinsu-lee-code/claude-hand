@@ -88,6 +88,12 @@ START_SCRIPT = REPO_ROOT / ("start-supervisor.cmd" if sys.platform == "win32" el
 SHORTCUT_NAME = "Claude Hand"
 REMOTE_CONTROL_NAME = "Claude Hand"
 LAUNCH_ARGS_FILE = REPO_ROOT / ".launch-args"  # extra `claude` arguments start-supervisor reads (written by preflight)
+# Variables a Claude Code session (and the Claude desktop app) sets for the programs it runs: its session id,
+# "child session", the app's messaging socket, host-managed login. start-supervisor clears them (preflight
+# writes the names next to .launch-args) so a supervisor started from such a session is a session of its own.
+SESSION_ENV_NAMES = ("CLAUDECODE", "CLAUDE_PID")
+SESSION_ENV_PREFIXES = ("CLAUDE_CODE_", "CLAUDE_AGENT_SDK_", "CLAUDE_PREVIEW_")
+USER_ENV_PREFIXES = ("CLAUDE_CODE_USE_", "CLAUDE_CODE_GIT_BASH_PATH", "CLAUDE_CODE_OAUTH_TOKEN")  # settings, not session state
 
 
 # --------------------------------------------------------------------------- data
@@ -1465,6 +1471,31 @@ def remote_control_wanted(config: dict) -> bool:
     return config.get("remote_control", True) is not False
 
 
+def persistent_env_names(platform=sys.platform) -> set[str]:
+    """Names in the user's or the machine's saved environment (Windows): set on purpose, so kept."""
+    if platform != "win32":
+        return set()
+    import winreg
+    names = set()
+    for root, path in ((winreg.HKEY_CURRENT_USER, "Environment"),
+                       (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")):
+        try:
+            with winreg.OpenKey(root, path) as key:
+                for index in range(winreg.QueryInfoKey(key)[1]):
+                    names.add(winreg.EnumValue(key, index)[0].upper())
+        except OSError:
+            continue
+    return names
+
+
+def inherited_session_env(env=os.environ, persistent: set[str] | None = None) -> list[str]:
+    """Claude Code session variables this process inherited (none when started from Explorer or a plain shell)."""
+    persistent = persistent_env_names() if persistent is None else persistent
+    return sorted(name for name in env
+                  if (name.upper() in SESSION_ENV_NAMES or name.upper().startswith(SESSION_ENV_PREFIXES))
+                  and not name.upper().startswith(USER_ENV_PREFIXES) and name.upper() not in persistent)
+
+
 def launch_args(config: dict, env=os.environ) -> str:
     """Extra arguments for the supervisor's `claude` command, one line, as start-supervisor pastes it.
     Remote Control is left out when this login cannot use it (it would only print an error at start)."""
@@ -1562,7 +1593,11 @@ def cmd_preflight(args: argparse.Namespace) -> int:
         install_skill(Path.home() / ".claude" / "skills")
     config = read_user_config(home)
     LAUNCH_ARGS_FILE.write_text(launch_args(config) + "\n", encoding="utf-8")
+    inherited = inherited_session_env()
+    LAUNCH_ARGS_FILE.with_name(".launch-unset").write_text("".join(f"{name}\n" for name in inherited), encoding="utf-8")
     print(BANNER)
+    if inherited:
+        print(f" 다른 Claude Code 세션에서 켜져서, 그 세션의 표시 변수 {len(inherited)}개를 지우고 따로 시작합니다.")
     if remote_control_wanted(config):
         problems = remote_control_problems()
         if problems:

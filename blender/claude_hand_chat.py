@@ -11,13 +11,14 @@ Install: `uv run tools/claude_hand.py blender-install-chat` (or Preferences > Ad
 bl_info = {
     "name": "Claude Hand Chat",
     "author": "claude-hand",
-    "version": (0, 2, 0),
+    "version": (0, 2, 1),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar (N) > Claude Hand",
     "description": "Chat with this Blender window's claude-hand subagent",
     "category": "Interface",
 }
 
+import functools
 import json
 import os
 import queue
@@ -26,6 +27,7 @@ import sys
 import textwrap
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -41,6 +43,12 @@ CONTEXT_REFRESH = 60.0       # resend even when nothing changed
 CONTEXT_ITEMS = 20
 VISIBLE_ENTRIES = 12
 WRAP_WIDTH = 38
+KEPT_ENTRIES = 60       # recent history only: the conversation itself lives in Claude Code
+PANEL_LINES = 40        # history lines drawn; older entries fold so the input box stays within reach
+ENTRY_LINES = 14        # lines of one message; the rest is behind "전체 복사"
+PANEL_MARGIN_PX = 50.0  # category tabs, box and label padding at UI scale 1
+LABEL_HEADROOM = 1.2    # blf's width at the label size can come out a little narrower than the drawn label
+CHAR_PX = 6.0           # without blf: width of a narrow character at 11 px (wide ones such as Korean count twice)
 
 _entries = []            # main thread only
 _status = ["연결 중..."]  # main thread only
@@ -312,6 +320,7 @@ def apply_event(event, payload):
             if item.get("kind") == "reply" and item.get("origin") != "desktop":
                 _last_user[0] = 0.0
             _entries.append(dict(item))
+        del _entries[:-KEPT_ENTRIES]
 
 
 def tick():
@@ -386,6 +395,22 @@ class CLAUDEHAND_OT_permission(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CLAUDEHAND_OT_copy(bpy.types.Operator):
+    bl_idname = "claude_hand.chat_copy"
+    bl_label = "전체 복사"
+    bl_description = "Copy the whole message to the clipboard (the panel shows only its start)"
+
+    seq: bpy.props.IntProperty()
+
+    def execute(self, context):
+        entry = next((e for e in _entries if e.get("seq") == self.seq), None)
+        if entry is None:
+            return {"CANCELLED"}
+        context.window_manager.clipboard = "\n\n".join(filter(None, [entry.get("request"), entry_text(entry)]))
+        self.report({"INFO"}, "메시지 전체를 클립보드에 복사했습니다")
+        return {"FINISHED"}
+
+
 class CLAUDEHAND_PT_chat(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -394,7 +419,8 @@ class CLAUDEHAND_PT_chat(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        for line in wrap(_status[0]):
+        width = panel_metrics(context)
+        for line in wrap(_status[0], width):
             layout.label(text=line)
         if _server_missing[0]:
             opening = starting()
@@ -404,27 +430,23 @@ class CLAUDEHAND_PT_chat(bpy.types.Panel):
             row.operator(CLAUDEHAND_OT_start.bl_idname, text="여는 중... 새 창을 확인하세요" if opening else "Claude Hand 시작", icon="PLAY")
             hint = ("Claude Hand 창에서 확인을 눌러 주세요. 세션이 일을 시작하면 그 창은 저절로 최소화됩니다. 닫지는 마세요."
                     if opening else "Claude Hand(감독 세션)가 꺼져 있습니다. 버튼을 누르거나 메시지를 보내면 켜집니다.")
-            for line in wrap(hint):
+            for line in wrap(hint, width):
                 layout.label(text=line)
         box = layout.box()
         if not _entries and _pending[0] is None:
             box.label(text="아직 대화가 없습니다.")
-        for entry in _entries[-VISIBLE_ENTRIES:]:
-            kind = entry.get("kind")
+        shown, folded = visible_entries(width)
+        if folded:
+            box.label(text=f"이전 대화 {folded}개는 접어 두었습니다", icon="TRIA_UP")
+        for entry, rows, hidden in shown:
             col = box.column(align=True)
-            if kind == "reply" and entry.get("origin") == "desktop":
-                col.label(text="데스크톱 앱에서", icon="WINDOW")
-                for line in wrap(entry.get("request", "")):
-                    if line:
-                        col.label(text=line)
-            if kind in ("user", "reply"):
-                col.label(text="나" if kind == "user" else "Claude", icon="USER" if kind == "user" else "INFO")
-                for line in wrap(entry.get("text", "")):
-                    col.label(text=line)
-            elif kind == "permission":
-                col.label(text=f"'{entry.get('tool_name')}' 실행 허락 요청", icon="ERROR")
-                for line in wrap(" ".join(filter(None, [entry.get("description"), entry.get("input_preview")]))):
-                    col.label(text=line)
+            for text, icon in rows:
+                col.label(text=text, icon=icon)
+            if hidden:
+                row = col.row(align=True)
+                row.label(text=f"…{hidden}줄 더 있음")
+                row.operator(CLAUDEHAND_OT_copy.bl_idname, text="전체 복사", icon="COPYDOWN").seq = int(entry.get("seq") or 0)
+            if entry.get("kind") == "permission":
                 if entry.get("behavior"):
                     col.label(text="→ 허용됨" if entry["behavior"] == "allow" else "→ 거부됨")
                 else:
@@ -436,10 +458,10 @@ class CLAUDEHAND_PT_chat(bpy.types.Panel):
         if _pending[0] is not None:
             col = box.column(align=True)
             col.label(text="나 (Claude Hand가 켜지면 보냅니다)", icon="TIME")
-            for line in wrap(_pending[0][0]):
+            for line in wrap(_pending[0][0], width)[:ENTRY_LINES]:
                 col.label(text=line)
         if _last_user[0] and time.time() - _last_user[0] > NO_REPLY_HINT_SECONDS:
-            for line in wrap("1분 넘게 답이 없습니다. 감독 세션을 start-supervisor.cmd로 열었는지, Claude Code 창에 확인을 기다리는 질문이 없는지 봐 주세요."):
+            for line in wrap("1분 넘게 답이 없습니다. 감독 세션을 start-supervisor.cmd로 열었는지, Claude Code 창에 확인을 기다리는 질문이 없는지 봐 주세요.", width):
                 layout.label(text=line)
         wm = context.window_manager
         layout.prop(wm, "claude_hand_chat_input", text="")
@@ -448,14 +470,116 @@ class CLAUDEHAND_PT_chat(bpy.types.Panel):
         row.operator(CLAUDEHAND_OT_send.bl_idname, text="보내기", icon="PLAY")
 
 
-def wrap(text):
+def panel_metrics(context):
+    """(text width in pixels, label font size in pixels) for this sidebar, or None outside a UI context."""
+    try:
+        prefs = context.preferences
+        scale = prefs.system.ui_scale or 1.0
+        width = context.region.width - PANEL_MARGIN_PX * scale
+        points = getattr(getattr(prefs.ui_styles[0], "widget", None), "points", 0) or 11
+    except (AttributeError, IndexError):
+        return None
+    return (max(80.0, float(width)), float(points * scale))
+
+
+def char_units(ch):
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def text_measure(font_px):
+    """Pixel width of label text: Blender's own font metrics (blf) when it can measure, else an estimate."""
+    try:
+        import blf
+        blf.size(0, font_px)
+        if blf.dimensions(0, "가a")[0] > 0:
+            return lambda text: blf.dimensions(0, text)[0] * LABEL_HEADROOM
+    except Exception:  # no font in this Blender (background) or an older blf.size signature
+        pass
+    return lambda text: sum(char_units(ch) for ch in text) * CHAR_PX * font_px / 11.0
+
+
+def wrap(text, metrics=None):
+    """Label lines for `text`. With `metrics` (from panel_metrics) each line fits the sidebar instead of being
+    cut with "..."; without them, WRAP_WIDTH characters."""
+    return list(_wrap(str(text), metrics))
+
+
+@functools.lru_cache(maxsize=1024)  # the panel redraws often; messages and the sidebar width rarely change
+def _wrap(text, metrics):
+    if metrics is None:
+        return tuple(line for paragraph in text.splitlines() or [""] for line in textwrap.wrap(paragraph, WRAP_WIDTH) or [""])
+    width, font_px = metrics
+    measure = text_measure(font_px)
     lines = []
-    for paragraph in str(text).splitlines() or [""]:
-        lines += textwrap.wrap(paragraph, WRAP_WIDTH) or [""]
-    return lines
+    for paragraph in text.splitlines() or [""]:
+        line = ""
+        for word in paragraph.split(" "):
+            candidate = f"{line} {word}" if line else word
+            if measure(candidate) <= width:
+                line = candidate
+                continue
+            if line:
+                lines.append(line)
+                line = ""
+            if measure(word) <= width:
+                line = word
+                continue
+            for ch in word:  # wider than the sidebar (a path, a long run without spaces): break between characters
+                if line and measure(line + ch) > width:
+                    lines.append(line)
+                    line = ""
+                line += ch
+        lines.append(line)
+    return tuple(lines)
 
 
-CLASSES = (CLAUDEHAND_OT_send, CLAUDEHAND_OT_start, CLAUDEHAND_OT_permission, CLAUDEHAND_PT_chat)
+def entry_text(entry):
+    if entry.get("kind") == "permission":
+        return " ".join(filter(None, [entry.get("description"), entry.get("input_preview")]))
+    return entry.get("text", "")
+
+
+def entry_rows(entry, width):
+    """(rows, hidden): the (text, icon) label rows of one entry, at most ENTRY_LINES lines of its text, and how
+    many lines were left out. No rows for kinds the panel does not show."""
+    kind = entry.get("kind")
+    if kind not in ("user", "reply", "permission"):
+        return [], 0
+    rows = []
+    if kind == "reply" and entry.get("origin") == "desktop":
+        rows.append(("데스크톱 앱에서", "WINDOW"))
+        rows += [(line, "NONE") for line in wrap(entry.get("request", ""), width)[:3] if line]
+    if kind == "permission":
+        rows.append((f"'{entry.get('tool_name')}' 실행 허락 요청", "ERROR"))
+    else:
+        rows.append(("나" if kind == "user" else "Claude", "USER" if kind == "user" else "INFO"))
+    body = wrap(entry_text(entry), width)
+    rows += [(line, "NONE") for line in body[:ENTRY_LINES]]
+    return rows, max(0, len(body) - ENTRY_LINES)
+
+
+def visible_entries(width):
+    """([(entry, rows, hidden)], folded): the newest entries that fit PANEL_LINES (always the newest one),
+    oldest first, so a long conversation never pushes the input box out of reach; folded counts the rest."""
+    shown, used, total, full = [], 0, 0, False
+    for entry in reversed(_entries):
+        if entry.get("kind") not in ("user", "reply", "permission"):
+            continue
+        total += 1
+        if full:
+            continue
+        rows, hidden = entry_rows(entry, width)
+        cost = len(rows) + (1 if hidden else 0) + (1 if entry.get("kind") == "permission" else 0)
+        if shown and (used + cost > PANEL_LINES or len(shown) >= VISIBLE_ENTRIES):
+            full = True  # older entries stay folded, even short ones, so the history has no gaps
+            continue
+        shown.append((entry, rows, hidden))
+        used += cost
+    shown.reverse()
+    return shown, total - len(shown)
+
+
+CLASSES = (CLAUDEHAND_OT_send, CLAUDEHAND_OT_start, CLAUDEHAND_OT_permission, CLAUDEHAND_OT_copy, CLAUDEHAND_PT_chat)
 
 
 def register():

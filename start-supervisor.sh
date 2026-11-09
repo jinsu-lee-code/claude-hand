@@ -17,6 +17,12 @@ uv run -q --no-project tools/claude_hand.py preflight
 status=$?
 if [ "$status" -eq 3 ]; then pause; exit 0; fi
 
+# Started from another Claude Code session ("Claude Hand 켜줘", or a Unity/Blender it launched): drop that
+# session's variables (listed by preflight) so this one is not taken for its child.
+if [ -f .launch-unset ]; then
+  while IFS= read -r name; do [ -n "$name" ] && unset "$name"; done < .launch-unset
+fi
+
 # Only the session started here serves the chat panels (see tools/chat_channel.py).
 export CLAUDE_HAND_SUPERVISOR=1
 # Give the channel server time to start on a slow first run (milliseconds; default is 30 s).

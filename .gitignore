@@ -6,3 +6,4 @@ Thumbs.db
 /.mcp.json
 /.claude/settings.local.json
 /.launch-args
+/.launch-unset

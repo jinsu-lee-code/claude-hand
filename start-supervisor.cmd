@@ -25,6 +25,10 @@ if errorlevel 3 (
   exit /b 0
 )
 
+rem Started from another Claude Code session ("Claude Hand 켜줘", or a Unity/Blender it launched): drop that
+rem session's variables (listed by preflight) so this one is not taken for its child.
+if exist ".launch-unset" for /f "usebackq delims=" %%v in (".launch-unset") do set "%%v="
+
 rem Only the session started here serves the chat panels (see tools/chat_channel.py).
 set CLAUDE_HAND_SUPERVISOR=1
 rem Give the channel server time to start on a slow first run (milliseconds; default is 30 s).

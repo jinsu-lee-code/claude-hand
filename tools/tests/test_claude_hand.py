@@ -869,6 +869,21 @@ class RemoteControlTests(unittest.TestCase):
         self.assertIn('set /p CH_ARGS=<".launch-args"', cmd)
         self.assertIn("%CH_ARGS% %*", cmd)
         self.assertIn("$CH_ARGS", (ch.REPO_ROOT / "start-supervisor.sh").read_text(encoding="utf-8"))
+        self.assertIn('in (".launch-unset") do set "%%v="', cmd)
+        self.assertIn("< .launch-unset", (ch.REPO_ROOT / "start-supervisor.sh").read_text(encoding="utf-8"))
+        self.assertLess(cmd.index(".launch-unset"), cmd.index("claude --dangerously"))
+
+    def test_a_parent_sessions_variables_are_dropped(self):
+        """Started from a Claude desktop app session (`start`), the supervisor inherited its session id,
+        CLAUDE_CODE_CHILD_SESSION and the app's messaging socket; settings the user made stay."""
+        env = {"CLAUDECODE": "1", "CLAUDE_PID": "10600", "CLAUDE_CODE_SESSION_ID": "x", "CLAUDE_CODE_CHILD_SESSION": "1",
+               "CLAUDE_CODE_MESSAGING_SOCKET": r"\\.\pipe\x", "CLAUDE_AGENT_SDK_VERSION": "0.3", "CLAUDE_CODE_ENTRYPOINT": "claude-desktop",
+               "CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDE_CODE_GIT_BASH_PATH": "C:/Git/bin/bash.exe", "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "9",
+               "CLAUDE_HAND_HOME": "C:/h", "ANTHROPIC_BASE_URL": "https://api.anthropic.com", "PATH": "C:/bin"}
+        dropped = ch.inherited_session_env(env, persistent={"CLAUDE_CODE_MAX_OUTPUT_TOKENS"})
+        self.assertEqual(dropped, ["CLAUDECODE", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT",
+                                   "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID"])
+        self.assertEqual(ch.inherited_session_env({"PATH": "C:/bin"}, persistent=set()), [])
 
     @unittest.skipIf(sys.platform == "win32", "POSIX shell")
     def test_shell_keeps_the_quoted_name_together(self):

@@ -62,7 +62,7 @@ MAX_TEXT = 8000
 MAX_CONTEXT = 3000
 MAX_WAIT_SECONDS = 30
 MAX_CONTEXT_ITEMS = 20  # selected objects / assets kept per window
-LOG_LIMIT = 500  # items kept per chat
+LOG_LIMIT = 100  # items kept per chat: panels show recent history; the conversation itself lives in Claude Code
 AUTO_SYNC_INTERVAL = 20.0  # seconds between automatic subagent refreshes for the same window
 
 INSTRUCTIONS = (
@@ -109,6 +109,14 @@ CONTEXT_TOOL = {
                    "it was last used. Use it to tell which window 'this', 'the selected one' or 'here' means.",
     "inputSchema": {"type": "object", "properties": {}},
 }
+
+
+def clip(text: str, limit: int) -> str:
+    """`text` cut to `limit` characters, saying so, so neither the panel nor Claude mistakes it for the whole."""
+    if len(text) <= limit:
+        return text
+    note = f"\n…(너무 길어 앞의 {limit}자만 보냅니다)"
+    return text[:limit - len(note)] + note
 
 
 def log(*parts) -> None:
@@ -420,9 +428,12 @@ class StdioMcp:
         origin = "desktop" if args.get("origin") == "desktop" else "panel"
         if not text.strip():
             return {"isError": True, "content": [{"type": "text", "text": "text is empty"}]}
-        if not self.hub.reply(chat_id, text[:MAX_TEXT], origin, str(args.get("request", ""))):
+        if not self.hub.reply(chat_id, clip(text, MAX_TEXT), origin, clip(str(args.get("request", "")), MAX_CONTEXT)):
             return {"isError": True, "content": [{"type": "text", "text": f"Unknown chat_id {chat_id!r}. Use the chat_id from the "
                                                   "<channel> tag, or a window's chat_id from current_context."}]}
+        if len(text) > MAX_TEXT:
+            return {"content": [{"type": "text", "text": f"sent, but cut at {MAX_TEXT} characters: the panel shows only the "
+                                                         "start. Send long results as a short summary, or in several replies."}]}
         return {"content": [{"type": "text", "text": "sent"}]}
 
     def serve(self) -> None:
@@ -512,7 +523,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             if app not in ("unity", "blender") or not text:
                 self._json(400, {"ok": False, "error": "app must be unity or blender, text must not be empty"})
                 return
-            result = self.hub.post_user_message(app, str(body.get("window", ""))[:200], text[:MAX_TEXT],
+            result = self.hub.post_user_message(app, str(body.get("window", ""))[:200], clip(text, MAX_TEXT),
                                                 pin=str(body.get("pin", ""))[:200], context=str(body.get("context", ""))[:MAX_CONTEXT])
             self._json(200, {"ok": True, **result})
         elif path == "/v1/permission":
@@ -666,20 +677,43 @@ def supervisor_decision(env=os.environ, table_fn=process_table, pid: int | None 
     return False, "채널 플래그 없이 연 Claude Code 세션 (감독 세션은 start-supervisor.cmd로 여세요)"
 
 
-# Run in a separate, windowless Python: it detaches from its own console, attaches to the console of the
-# Claude Code process (the "Claude Hand" cmd window) and minimizes that window. Doing it in this process
-# would detach the channel server from its console.
-MINIMIZE_SCRIPT = r"""
-import ctypes, sys
-kernel32, user32 = ctypes.windll.kernel32, ctypes.windll.user32
-kernel32.GetConsoleWindow.restype = ctypes.c_void_p
-kernel32.FreeConsole()
-if kernel32.AttachConsole(int(sys.argv[1])):
-    hwnd = kernel32.GetConsoleWindow()
-    if hwnd:
-        user32.ShowWindow(ctypes.c_void_p(hwnd), 6)  # SW_MINIMIZE
-    kernel32.FreeConsole()
-"""
+SW_MINIMIZE = 6
+
+
+def console_owners(table: dict[int, tuple[int, str]], claude_pid: int, levels: int = 2) -> set[int]:
+    """Claude Code and the processes above it. Windows reports a console window as belonging to the first
+    process of that console, i.e. the cmd.exe running start-supervisor, not Claude Code itself."""
+    owners, current = set(), claude_pid
+    for _ in range(levels):
+        if not current:
+            break
+        owners.add(current)
+        current = table.get(current, (0, ""))[0]
+    return owners
+
+
+def console_windows(owners: set[int]) -> list[int]:
+    """Visible top-level classic console windows (not Windows Terminal, whose window holds other tabs too) owned
+    by one of `owners`. Hidden ones are skipped: minimizing a hidden console would put it on the taskbar.
+    Only calls that never wait on the window's thread."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    found = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def visit(hwnd, _):
+        name = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(hwnd, name, 64)
+        if name.value == "ConsoleWindowClass" and user32.IsWindowVisible(hwnd):
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value in owners:
+                found.append(hwnd)
+        return True
+
+    user32.EnumWindows(visit, 0)
+    return found
 
 
 def minimize_after_start(home: Path) -> bool:
@@ -690,13 +724,19 @@ def minimize_after_start(home: Path) -> bool:
         return True
 
 
-def minimize_console(claude_pid: int, run=subprocess.run, platform=sys.platform) -> bool:
-    """Minimize the console window Claude Code runs in (Windows only; elsewhere the terminal is left alone)."""
-    if platform != "win32" or not claude_pid:
+def minimize_console(owners: set[int], find=console_windows, show=None, platform=sys.platform) -> bool:
+    """Minimize the console window Claude Code runs in (Windows only; elsewhere the terminal is left alone).
+    ShowWindowAsync only posts the request: attaching to that console and calling ShowWindow from a helper
+    process hung for the full timeout under Claude Code on Windows 10 and never minimized anything."""
+    if platform != "win32" or not owners:
         return False
-    run([sys.executable, "-c", MINIMIZE_SCRIPT, str(claude_pid)], timeout=15, capture_output=True,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    return True
+    windows = find(owners)
+    if show is None:
+        import ctypes
+        show = lambda hwnd: ctypes.windll.user32.ShowWindowAsync(hwnd, SW_MINIMIZE)
+    for hwnd in windows:
+        show(hwnd)
+    return bool(windows)
 
 
 def write_status(home: Path, mode: str, reason: str, port: int | None = None) -> Path:
@@ -773,9 +813,10 @@ def main(argv: list[str] | None = None) -> int:
         # Not at start: Claude Code may still be showing its development-channel confirmation in that window.
         # The first tool call or permission request means the session is past it.
         def minimize() -> None:
-            claude_pid = claude_ancestor_pid(process_table(), os.getpid())
-            if claude_pid:
-                minimize_console(claude_pid)
+            table = process_table()
+            claude_pid = claude_ancestor_pid(table, os.getpid())
+            if claude_pid and not minimize_console(console_owners(table, claude_pid)):
+                log("Claude Hand 창을 찾지 못해 최소화하지 않았습니다 (Windows Terminal 탭이면 그대로 둡니다)")
         mcp.hub.on_first_use = lambda: threading.Thread(target=minimize, daemon=True).start()
     token = secrets.token_urlsafe(32)
     env_port = os.environ.get("CLAUDE_HAND_CHAT_PORT")
