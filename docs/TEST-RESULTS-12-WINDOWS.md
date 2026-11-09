@@ -94,3 +94,14 @@
 | 9. 테스트 cp949 경고 | `encoding="utf-8"` |
 | 10. Unity 6.3 경고 | `ChCompat`(DESIGN 결정 5) |
 
+### 참고: 과제 1의 원인은 Python 3.14
+
+같은 PC에서 이어서 원인을 찾았습니다. MCP for Unity 서버는 stdio에서도 Unity가 알려 준 커스텀 도구를 등록하려 하지만, Python 3.14에서 실패합니다.
+
+- 서버 로그 `%LOCALAPPDATA%\UnityMCP\Logs\unity_mcp_server.log`: `Failed to register custom tool 'ch_editor_status' globally: 'echo'` (6개 모두, 각 도구의 첫 매개변수 이름). 바로 뒤 `Registered 6 custom tool(s) from Unity via stdio sync`는 실패와 상관없이 찍힘.
+- `services/custom_tool_service.py`의 `_build_global_tool_handler`가 처리기에 `__signature__`·`__annotations__`를 단 뒤 `log_execution`·`telemetry_tool`(`functools.wraps`)로 감싼다. Python 3.14의 `functools.wraps`는 `__annotations__` 대신 `__annotate__`를 복사해서 감싼 함수에는 매개변수 타입이 없고, FastMCP가 만드는 pydantic 스키마가 `KeyError: 'echo'`를 낸다. 감싸지 않은 처리기는 등록된다(서버 환경의 Python으로 직접 재현).
+- 이 PC에서 uvx가 고른 Python은 3.14.7이었음. Python 3.12로 띄워 비교하려 했지만 uv가 pywin32 설치 중 `os error 32`(파일 잠김)로 실패해 확인하지 못함.
+- 그동안 쓸 수 있던 우회: `execute_code`로 `ClaudeHand.Editor.ChEditorStatus.HandleCommand(JObject)`를 직접 부르면 됨(`ch_editor_status`, `ch_scene_snapshot` 확인).
+
+`ChBridge` 통로는 이 문제와 상관없이 동작하므로 그대로 두면 됩니다. MCP for Unity에는 "Python 3.14에서 커스텀 도구 전역 등록 실패(`functools.wraps`가 `__annotations__`를 복사하지 않음)"로 보고할 만합니다.
+
