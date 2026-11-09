@@ -85,7 +85,9 @@ INSTRUCTIONS = (
     "finishes, also call reply for each window it changed, with that window's chat_id from current_context, "
     "origin \"desktop\" and request set to a one-line summary of what was asked, so the window's chat panel keeps its whole history. "
     "Claude Hand resumes this same conversation when it is restarted, but subagents started before a restart may be gone: "
-    "if SendMessage to one fails, hand the window's request to its subagent anew."
+    "if SendMessage to one fails, hand the window's request to its subagent anew. "
+    "The panel shows each Unity/Blender action a subagent takes as a bar above its input. For a request with several clear "
+    "steps (say, export from Blender, import into Unity, place it), also call progress with step and total as each step starts."
 )
 HISTORY_KINDS = ("user", "reply")  # what a panel shows again after a restart; permission prompts do not outlive it
 
@@ -104,6 +106,24 @@ REPLY_TOOL = {
         "required": ["chat_id", "text"],
     },
 }
+
+PROGRESS_TOOL = {
+    "name": "progress",
+    "description": "Show how far a request with several clear steps is, as a bar above that chat panel's input (step of total "
+                   "and what is happening). Call it as each step starts, after your first short reply. Without it the panel "
+                   "still shows each Unity/Blender action the window's subagent takes. The next reply to that chat_id clears the bar.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "chat_id": {"type": "string", "description": "The chat (window) the request belongs to"},
+            "step": {"type": "integer", "minimum": 0, "description": "Steps started so far"},
+            "total": {"type": "integer", "minimum": 1, "description": "All steps of this request"},
+            "label": {"type": "string", "description": "What this step does, in the user's language"},
+        },
+        "required": ["chat_id", "step", "total"],
+    },
+}
+PROGRESS_TTL = 300.0  # seconds without news after which a panel stops showing a bar (a long import is one action)
 
 CONTEXT_TOOL = {
     "name": "current_context",
@@ -197,6 +217,8 @@ class ChatHub:
         self.in_use = False  # Claude has called a tool or asked a permission: the session is past its start-up prompts
         self.on_first_use = None  # callable(): run once when in_use becomes true (minimizes the Claude Hand window)
         self.history_dir: Path | None = None  # where each chat's recent messages are kept across restarts
+        self.progress: dict[str, dict] = {}  # chat_id -> what its subagent is doing now (shown as a bar in the panel)
+        self.progress_rev: dict[str, int] = {}  # bumped on every change, so a waiting panel wakes up
 
     def use_history(self, directory: Path) -> None:
         """Keep each chat's recent messages in `directory` and show the saved ones again, so a panel still has its
@@ -295,6 +317,8 @@ class ChatHub:
             item.update(origin="desktop", request=request[:500])
         with self.cond:
             self._append(chat_id, item)
+            if self.progress.pop(chat_id, None) is not None:  # the answer is in: the bar goes away
+                self._bump_progress(chat_id)
         return True
 
     def _touch(self, chat_id: str, app: str, window: str, agent: str | None) -> None:
@@ -389,16 +413,61 @@ class ChatHub:
         return True
 
     def updates(self, chat_id: str, after: int, wait: float) -> list[dict]:
+        return self.poll(chat_id, after, wait)["items"]
+
+    def poll(self, chat_id: str, after: int, wait: float, progress_rev: int | None = None) -> dict:
+        """New items after `after`, and the progress bar; returns early when either changes (the bar only for
+        a panel that says which revision it has)."""
         deadline = time.time() + max(0.0, min(wait, MAX_WAIT_SECONDS))
         with self.cond:
             if chat_id and chat_id not in self.logs:
                 self.logs[chat_id] = []  # an open panel that has not sent anything yet still gets permission prompts
             while True:
                 items = [i for i in self.logs.get(chat_id, []) if i["seq"] > after]
+                rev = self.progress_rev.get(chat_id, 0)
                 remaining = deadline - time.time()
-                if items or remaining <= 0:
-                    return items
+                if items or (progress_rev is not None and rev != progress_rev) or remaining <= 0:
+                    return {"items": items, "progress": self._current_progress(chat_id), "progress_rev": rev}
                 self.cond.wait(remaining)
+
+    def _progress_entry(self, chat_id: str, now: float) -> dict:
+        entry = self.progress.get(chat_id)
+        if entry is None or now - entry["updated"] > PROGRESS_TTL:  # a new request
+            entry = self.progress[chat_id] = {"agent": chat_id, "started": now, "actions": 0, "updated": now}
+        return entry
+
+    def _bump_progress(self, chat_id: str) -> None:
+        self.progress_rev[chat_id] = self.progress_rev.get(chat_id, 0) + 1
+        self.cond.notify_all()
+
+    def report_action(self, app: str, pin: str, tool: str, detail: str) -> str | None:
+        """A window's subagent is about to run a Unity/Blender tool (its guard hook says so): show it in that
+        window's panel. Returns the chat_id, or None for a pin no generated subagent has."""
+        agent = next((a for a in load_agents(self.agents_dir) if a.app == app and a.pin == pin), None)
+        if agent is None:
+            return None
+        with self.cond:
+            entry = self._progress_entry(agent.name, time.time())
+            entry.update(tool=tool[:80], detail=detail[:120], actions=entry["actions"] + 1, updated=time.time())
+            self._bump_progress(agent.name)
+        return agent.name
+
+    def set_progress(self, chat_id: str, step: int, total: int, label: str) -> bool:
+        """The supervisor's own count of a multi-step request: makes the panel's bar fill step / total."""
+        if not self.known_chat(chat_id):
+            return False
+        with self.cond:
+            entry = self._progress_entry(chat_id, time.time())
+            entry.update(step=max(0, min(step, total)), total=max(1, total), label=label[:120], updated=time.time())
+            self._bump_progress(chat_id)
+        return True
+
+    def _current_progress(self, chat_id: str) -> dict | None:
+        entry = self.progress.get(chat_id)
+        now = time.time()
+        if entry is None or now - entry["updated"] > PROGRESS_TTL:
+            return None
+        return {**entry, "elapsed": round(now - entry["started"])}
 
     def status(self) -> dict:
         with self.cond:
@@ -441,7 +510,7 @@ class StdioMcp:
         elif method == "ping":
             self.send({"jsonrpc": "2.0", "id": msg_id, "result": {}})
         elif method == "tools/list":
-            self.send({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": [REPLY_TOOL, CONTEXT_TOOL]}})
+            self.send({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": [REPLY_TOOL, CONTEXT_TOOL, PROGRESS_TOOL]}})
         elif method == "tools/call":
             self.send({"jsonrpc": "2.0", "id": msg_id, "result": self.call_tool(params)})
         elif method == "notifications/claude/channel/permission_request":
@@ -452,12 +521,21 @@ class StdioMcp:
 
     def call_tool(self, params: dict) -> dict:
         name = params.get("name")
-        if name not in ("reply", CONTEXT_TOOL["name"]):
+        if name not in ("reply", CONTEXT_TOOL["name"], PROGRESS_TOOL["name"]):
             return {"isError": True, "content": [{"type": "text", "text": f"Unknown tool {name!r}"}]}
         self.hub.mark_in_use()
         if name == CONTEXT_TOOL["name"]:
             return {"content": [{"type": "text", "text": json.dumps(self.hub.current_context(), ensure_ascii=False)}]}
         args = params.get("arguments") or {}
+        if name == PROGRESS_TOOL["name"]:
+            try:
+                step, total = int(args.get("step", 0)), int(args.get("total", 1))
+            except (TypeError, ValueError):
+                return {"isError": True, "content": [{"type": "text", "text": "step and total must be whole numbers"}]}
+            if not self.hub.set_progress(str(args.get("chat_id", "")), step, total, str(args.get("label", ""))):
+                return {"isError": True, "content": [{"type": "text", "text": "Unknown chat_id; use the one from the <channel> tag "
+                                                      "or current_context."}]}
+            return {"content": [{"type": "text", "text": "shown"}]}
         chat_id, text = str(args.get("chat_id", "")), str(args.get("text", ""))
         origin = "desktop" if args.get("origin") == "desktop" else "panel"
         if not text.strip():
@@ -535,11 +613,12 @@ class PanelHandler(BaseHTTPRequestHandler):
         elif url.path == "/v1/updates":
             try:
                 after, wait = int(q.get("after", "0")), float(q.get("wait", "0"))
+                prev = int(q["prev"]) if "prev" in q else None  # the progress revision the panel already shows
             except ValueError:
-                self._json(400, {"ok": False, "error": "after and wait must be numbers"})
+                self._json(400, {"ok": False, "error": "after, wait and prev must be numbers"})
                 return
-            items = self.hub.updates(q.get("chat_id", ""), after, wait)
-            self._json(200, {"ok": True, "items": items, "next": max([after] + [i["seq"] for i in items])})
+            result = self.hub.poll(q.get("chat_id", ""), after, wait, prev)
+            self._json(200, {"ok": True, **result, "next": max([after] + [i["seq"] for i in result["items"]])})
         else:
             self._json(404, {"ok": False, "error": "not found"})
 
@@ -570,6 +649,10 @@ class PanelHandler(BaseHTTPRequestHandler):
                 return
             chat_id = self.hub.update_context(app, str(body.get("window", ""))[:200], str(body.get("pin", ""))[:200], context)
             self._json(200, {"ok": True, "chat_id": chat_id})
+        elif path == "/v1/progress":  # a subagent's guard hook, just before each Unity/Blender tool call
+            chat_id = self.hub.report_action(str(body.get("app", "")), str(body.get("pin", ""))[:200],
+                                             str(body.get("tool", "")), str(body.get("detail", "")))
+            self._json(200 if chat_id else 404, {"ok": chat_id is not None, "chat_id": chat_id})
         else:
             self._json(404, {"ok": False, "error": "not found"})
 

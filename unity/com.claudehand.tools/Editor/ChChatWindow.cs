@@ -27,12 +27,17 @@ namespace ClaudeHand.Editor
         private const int KeptEntries = 100;  // recent history only: the conversation itself lives in Claude Code
         private const int ShownStep = 40;     // entries drawn per page: IMGUI lays out every drawn label each frame
         private const int ShownChars = 1500;  // longer messages show their start; "전체 복사" has the rest
+        private const double ProgressStaleSeconds = 300;  // as the server's PROGRESS_TTL
         private static readonly HttpClient Http = new HttpClient { Timeout = TimeSpan.FromSeconds(45) };
 
         private readonly List<Entry> _entries = new List<Entry>();
         private string _input = string.Empty;
         private Vector2 _scroll;
         private int _shownEntries = ShownStep;
+        private JObject _progress;          // what this project's subagent is doing now; null when idle
+        private long _progressRev = -1;     // the server's revision of it, so polling wakes on changes
+        private double _progressReceivedAt;
+        private double _lastBusyRepaint;
         private bool _followNewest = true;  // scrolled to the bottom: new messages keep it there; reading older ones: stay put
         private float _contentHeight;
         private bool _includeSelection = true;
@@ -88,6 +93,7 @@ namespace ClaudeHand.Editor
         private void OnDisable()
         {
             _polling?.Cancel();
+            EditorApplication.update -= RepaintWhileBusy;
         }
 
         // ------------------------------------------------------------------ server
@@ -179,6 +185,7 @@ namespace ClaudeHand.Editor
                     _serverPid = server.pid;
                     _entries.Clear();
                     _shownEntries = ShownStep;
+                    SetProgress(null, -1);
                     _after = 0;
                     _chatId = null;
                 }
@@ -200,7 +207,7 @@ namespace ClaudeHand.Editor
                     if (_pendingText != null) SendPending();
 
                     var updates = await Call(server, HttpMethod.Get,
-                        $"/v1/updates?chat_id={Uri.EscapeDataString(_chatId)}&after={_after}&wait=20", null, token);
+                        $"/v1/updates?chat_id={Uri.EscapeDataString(_chatId)}&after={_after}&prev={_progressRev}&wait=20", null, token);
                     if (updates.Value<bool?>("ok") == false)
                     {
                         _serverPid = 0; // token changed or server restarted: read server.json again
@@ -224,6 +231,8 @@ namespace ClaudeHand.Editor
 
         private void Apply(JObject updates)
         {
+            var rev = updates.Value<long?>("progress_rev");
+            if (rev.HasValue && rev.Value != _progressRev) SetProgress(updates["progress"] as JObject, rev.Value);
             var items = updates["items"] as JArray;
             if (items == null) return;
             foreach (var item in items.OfType<JObject>())
@@ -504,6 +513,7 @@ namespace ClaudeHand.Editor
             {
                 _followNewest = _scroll.y + GUILayoutUtility.GetLastRect().height >= _contentHeight - 30f;
             }
+            DrawProgress();
 
             var e = Event.current;
             bool submit = e.type == EventType.KeyDown && e.keyCode == KeyCode.Return && (e.control || e.command);
@@ -519,6 +529,59 @@ namespace ClaudeHand.Editor
             }
             GUI.enabled = true;
             GUILayout.EndHorizontal();
+        }
+
+        private void SetProgress(JObject progress, long rev)
+        {
+            _progress = progress;
+            _progressRev = rev;
+            _progressReceivedAt = EditorApplication.timeSinceStartup;
+            EditorApplication.update -= RepaintWhileBusy;
+            if (progress != null) EditorApplication.update += RepaintWhileBusy;  // the bar moves and the seconds count up
+        }
+
+        private void RepaintWhileBusy()
+        {
+            if (EditorApplication.timeSinceStartup - _lastBusyRepaint < 0.1) return;
+            _lastBusyRepaint = EditorApplication.timeSinceStartup;
+            Repaint();
+        }
+
+        /// <summary>
+        /// A bar just above the input while this project's subagent works: it fills by step / total when the supervisor
+        /// gave the steps, otherwise a block moves along it. The text says what is being done; the reply removes it.
+        /// </summary>
+        private void DrawProgress()
+        {
+            if (_progress == null) return;
+            if (EditorApplication.timeSinceStartup - _progressReceivedAt > ProgressStaleSeconds)
+            {
+                SetProgress(null, _progressRev);  // no news for a long while: the supervisor never answered
+                return;
+            }
+            int? total = _progress.Value<int?>("total");
+            int step = _progress.Value<int?>("step") ?? 0;
+            int actions = _progress.Value<int?>("actions") ?? 0;
+            double elapsed = (_progress.Value<double?>("elapsed") ?? 0) + EditorApplication.timeSinceStartup - _progressReceivedAt;
+            var parts = new List<string>();
+            if (total.HasValue) parts.Add($"{step}/{total} {_progress.Value<string>("label")}".Trim());
+            var tool = _progress.Value<string>("tool");
+            if (!string.IsNullOrEmpty(tool)) parts.Add($"{tool} {_progress.Value<string>("detail")}".Trim());
+            if (actions > 0) parts.Add($"{actions}번째 동작");
+            parts.Add($"{(int)elapsed}초");
+            var text = string.Join(" · ", parts);
+
+            var rect = GUILayoutUtility.GetRect(0, 20, GUILayout.ExpandWidth(true));
+            if (total.HasValue)
+            {
+                EditorGUI.ProgressBar(rect, Mathf.Clamp01((float)step / total.Value), text);
+                return;
+            }
+            EditorGUI.DrawRect(rect, new Color(0f, 0f, 0f, 0.18f));
+            float t = Mathf.PingPong((float)EditorApplication.timeSinceStartup * 0.8f, 1f);
+            EditorGUI.DrawRect(new Rect(rect.x + rect.width * 0.75f * t, rect.y, rect.width * 0.25f, rect.height),
+                               new Color(0.3f, 0.6f, 1f, 0.55f));
+            GUI.Label(rect, text, new GUIStyle(EditorStyles.miniLabel) { alignment = TextAnchor.MiddleCenter });
         }
 
         /// <summary>A message, or its first ShownChars characters and a button that copies all of it.</summary>

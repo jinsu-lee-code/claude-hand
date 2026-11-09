@@ -85,6 +85,7 @@ CHAT_ADDON_MODULE = "claude_hand_chat"
 SUPERVISOR_COMMAND = f"claude --dangerously-load-development-channels server:{CHAT_SERVER_NAME}"
 CHAT_REPLY_RULE = f"mcp__{CHAT_SERVER_NAME}__reply"
 CHAT_CONTEXT_RULE = f"mcp__{CHAT_SERVER_NAME}__current_context"  # read-only: what is selected in each window
+CHAT_PROGRESS_RULE = f"mcp__{CHAT_SERVER_NAME}__progress"  # only draws a bar in a panel
 MIN_CLAUDE_FOR_PERMISSION_RELAY = (2, 1, 234)
 THIRD_PARTY_PROVIDER_ENV = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
 START_SCRIPT = REPO_ROOT / ("start-supervisor.cmd" if sys.platform == "win32" else "start-supervisor.sh")
@@ -823,13 +824,45 @@ def guard_decision(event: dict, pin: str, server: str, transport: str, app: str 
     return None
 
 
+def action_summary(tool_input: dict) -> str:
+    """A few words on what a Unity/Blender tool call does, for the progress bar ("create Cube")."""
+    parts = [str(tool_input[key]).strip() for key in ("action", "name", "target", "search_term", "tool_name", "path")
+             if isinstance(tool_input.get(key), (str, int, float)) and str(tool_input[key]).strip()]
+    code = tool_input.get("code")
+    if not parts and isinstance(code, str):  # execute_code: its first statement
+        parts = [next((line.strip() for line in code.splitlines()
+                       if line.strip() and not line.strip().startswith(("#", "//", "import ", "from ", "using "))), "")]
+    return " ".join(parts)[:120]
+
+
+def report_progress(event: dict, pin: str, server: str, app: str, home: Path | None = None, post=None) -> None:
+    """Tell the chat channel what this subagent is about to do, so its window's panel can show it. Best effort:
+    no Claude Hand, a slow server or any error just skips it; the tool call itself never waits more than a moment."""
+    tool = str(event.get("tool_name", ""))
+    short = next((tool[len(prefix):] for prefix in (f"mcp__{server}_ch__", f"mcp__{server}__") if tool.startswith(prefix)), "")
+    if not short:
+        return
+    try:
+        info, _ = read_chat_files((home or claude_hand_home()) / "chat")
+        if not info:
+            return
+        body = json.dumps({"app": app, "pin": pin, "tool": short, "detail": action_summary(event.get("tool_input") or {})})
+        req = urllib.request.Request(f"http://127.0.0.1:{info['port']}/v1/progress", data=body.encode("utf-8"), method="POST",
+                                     headers={"X-Claude-Hand-Token": info.get("token", ""), "Content-Type": "application/json"})
+        (post or (lambda r: urllib.request.urlopen(r, timeout=0.5).close()))(req)
+    except Exception:  # progress is a nicety; the guard's answer must not depend on it
+        pass
+
+
 def run_guard(args: argparse.Namespace, stdin=None, stdout=None) -> int:
     stdin, stdout = stdin or sys.stdin, stdout or sys.stdout
     try:
         event = json.loads(stdin.read() or "{}")
         reason = guard_decision(event, args.pin, args.server, args.transport, args.app)
     except Exception as exc:  # fail closed: a broken guard must not let calls through
-        reason = f"claude-hand guard 오류로 호출을 막았습니다: {exc}"
+        event, reason = {}, f"claude-hand guard 오류로 호출을 막았습니다: {exc}"
+    if not reason:
+        report_progress(event, args.pin, args.server, args.app)
     if reason:
         json.dump({
             "hookSpecificOutput": {
@@ -1231,7 +1264,7 @@ def plan_chat_config(root: Path = REPO_ROOT, runner: str = "uv run -q --no-proje
     settings = read_json_file(settings_path)
     changed = False
     allow = settings.setdefault("permissions", {}).setdefault("allow", [])
-    for rule in (CHAT_REPLY_RULE, CHAT_CONTEXT_RULE):
+    for rule in (CHAT_REPLY_RULE, CHAT_CONTEXT_RULE, CHAT_PROGRESS_RULE):
         if rule not in allow:
             allow.append(rule)
             changed = True

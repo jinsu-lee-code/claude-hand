@@ -244,11 +244,37 @@ class GuardTests(unittest.TestCase):
         self.assertTrue(decision["permissionDecisionReason"])
 
     def test_allowed_call_prints_nothing(self):
-        out = io.StringIO()
+        out, reported = io.StringIO(), []
         event = json.dumps({"tool_name": "mcp__unity_mygame__ch_editor_status", "tool_input": {}})
         args = ch.build_parser().parse_args(["guard", "--pin", self.PIN, "--server", self.SERVER])
-        ch.run_guard(args, io.StringIO(event), out)
+        with unittest.mock.patch.object(ch, "report_progress", lambda *a, **kw: reported.append(a)):
+            ch.run_guard(args, io.StringIO(event), out)
         self.assertEqual(out.getvalue(), "")
+        self.assertEqual(len(reported), 1)  # an allowed call is shown in the window's panel
+
+    def test_allowed_calls_are_reported_to_the_panel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / "chat").mkdir()
+            (home / "chat" / "server.json").write_text(json.dumps({"port": 8765, "token": "t"}), encoding="utf-8")
+            sent = []
+            post = lambda req: sent.append((req.full_url, req.headers.get("X-claude-hand-token"), json.loads(req.data)))
+            event = {"tool_name": "mcp__unity_mygame__manage_gameobject", "tool_input": {"action": "create", "name": "Cube"}}
+            ch.report_progress(event, self.PIN, self.SERVER, "unity", home=home, post=post)
+            ch.report_progress({"tool_name": "mcp__unity_mygame_ch__ch_scene_snapshot", "tool_input": {"depth": 2}},
+                               self.PIN, self.SERVER, "unity", home=home, post=post)
+            ch.report_progress({"tool_name": "Read", "tool_input": {}}, self.PIN, self.SERVER, "unity", home=home, post=post)
+            ch.report_progress(event, self.PIN, self.SERVER, "unity", home=home, post=lambda req: 1 / 0)  # never raises
+        self.assertEqual(sent[0], ("http://127.0.0.1:8765/v1/progress", "t",
+                                   {"app": "unity", "pin": self.PIN, "tool": "manage_gameobject", "detail": "create Cube"}))
+        self.assertEqual(sent[1][2]["tool"], "ch_scene_snapshot")
+        self.assertEqual(len(sent), 2)  # not for tools outside the subagent's own servers
+
+    def test_action_summary(self):
+        self.assertEqual(ch.action_summary({"action": "create", "name": "Cube", "position": [0, 0, 0]}), "create Cube")
+        self.assertEqual(ch.action_summary({"code": "import bpy\n\nbpy.ops.mesh.primitive_uv_sphere_add()"}),
+                         "bpy.ops.mesh.primitive_uv_sphere_add()")
+        self.assertEqual(ch.action_summary({}), "")
 
     def test_broken_input_fails_closed(self):
         out = io.StringIO()
@@ -558,7 +584,8 @@ class ChatSetupTests(unittest.TestCase):
             self.assertEqual(entry["args"][:3], ["run", "-q", "--no-project"])
             self.assertTrue(entry["args"][-1].endswith("/tools/chat_channel.py") and Path(entry["args"][-1]).is_absolute())
             settings = json.loads((root / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
-            self.assertEqual(settings["permissions"]["allow"], ["Bash(git status)", ch.CHAT_REPLY_RULE, ch.CHAT_CONTEXT_RULE])
+            self.assertEqual(settings["permissions"]["allow"],
+                             ["Bash(git status)", ch.CHAT_REPLY_RULE, ch.CHAT_CONTEXT_RULE, ch.CHAT_PROGRESS_RULE])
             self.assertEqual(settings["enabledMcpjsonServers"], [ch.CHAT_SERVER_NAME])
             self.assertEqual(settings["model"], "keep-me")
             self.assertEqual(ch.plan_chat_config(root, "uv run -q --no-project", direct_servers=[]), {})  # second run changes nothing

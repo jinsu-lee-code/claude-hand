@@ -11,7 +11,7 @@ Install: `uv run tools/claude_hand.py blender-install-chat` (or Preferences > Ad
 bl_info = {
     "name": "Claude Hand Chat",
     "author": "claude-hand",
-    "version": (0, 2, 1),
+    "version": (0, 2, 2),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar (N) > Claude Hand",
     "description": "Chat with this Blender window's claude-hand subagent",
@@ -46,6 +46,7 @@ WRAP_WIDTH = 38
 KEPT_ENTRIES = 60       # recent history only: the conversation itself lives in Claude Code
 PANEL_LINES = 40        # history lines drawn; older entries fold so the input box stays within reach
 ENTRY_LINES = 14        # lines of one message; the rest is behind "전체 복사"
+PROGRESS_STALE = 300.0  # seconds without progress news after which the bar is no longer shown (a long import is one action)
 PANEL_MARGIN_PX = 50.0  # category tabs, box and label padding at UI scale 1
 LABEL_HEADROOM = 1.2    # blf's width at the label size can come out a little narrower than the drawn label
 CHAR_PX = 6.0           # without blf: width of a narrow character at 11 px (wide ones such as Korean count twice)
@@ -56,6 +57,7 @@ _last_user = [0.0]       # main thread only
 _server_missing = [False]  # main thread only
 _start_requested = [0.0]   # main thread only
 _pending = [None]          # main thread only: (text, context) typed while Claude Hand was off
+_progress = [None]         # main thread only: (what the subagent is doing, when it arrived) while it works
 _context_sent = {"time": 0.0, "signature": None, "server_pid": None, "busy": False}  # main thread only
 _inbox = queue.Queue()   # (event, payload) from worker threads
 _identity = {"window": None, "pin": None}  # written on the main thread, read by the poller
@@ -119,7 +121,7 @@ def call(server, method, path, body=None, timeout=10):
 
 def poll_loop():
     """Background thread: long-polls the channel for this window's replies and permission prompts."""
-    chat_id, agent, after, server_pid = None, None, 0, None
+    chat_id, agent, after, server_pid, progress_rev = None, None, 0, None, -1
     while not _stop.is_set():
         server = read_server()
         with _identity_lock:
@@ -130,7 +132,7 @@ def poll_loop():
             _stop.wait(1)
             continue
         if server.get("pid") != server_pid:  # a new supervisor session starts with an empty history
-            server_pid, chat_id, agent, after = server.get("pid"), None, None, 0
+            server_pid, chat_id, agent, after, progress_rev = server.get("pid"), None, None, 0, -1
             _inbox.put(("reset", None))
         try:
             if chat_id is None or agent is None:
@@ -143,7 +145,7 @@ def poll_loop():
                 chat_id, agent = resolved.get("chat_id"), resolved.get("agent")
                 _inbox.put(("status", f"담당: {agent}" if agent else
                             "이 Blender 창의 하위 세션이 없습니다. uv run tools/claude_hand.py sync 를 실행하세요."))
-            query = urllib.parse.urlencode({"chat_id": chat_id, "after": after, "wait": POLL_WAIT_SECONDS})
+            query = urllib.parse.urlencode({"chat_id": chat_id, "after": after, "prev": progress_rev, "wait": POLL_WAIT_SECONDS})
             _inbox.put(("missing", False))
             updates = call(server, "GET", f"/v1/updates?{query}", timeout=POLL_WAIT_SECONDS + 15)
             if updates.get("ok") is False:
@@ -152,6 +154,9 @@ def poll_loop():
                 continue
             if updates.get("items"):
                 _inbox.put(("items", updates["items"]))
+            if "progress_rev" in updates and updates["progress_rev"] != progress_rev:
+                progress_rev = updates["progress_rev"]
+                _inbox.put(("progress", updates.get("progress")))
             after = updates.get("next", after)
         except (OSError, ValueError) as exc:
             _inbox.put(("missing", True))
@@ -305,6 +310,9 @@ def apply_event(event, payload):
             _context_sent["server_pid"] = None  # try again on the next change
     elif event == "reset":
         _entries.clear()
+        _progress[0] = None
+    elif event == "progress":
+        _progress[0] = (payload, time.time()) if payload else None
     elif event == "sent":
         if not payload.get("ok"):
             _status[0] = "보내지 못했습니다: " + str(payload.get("error", "알 수 없는 오류"))
@@ -337,12 +345,16 @@ def tick():
         apply_event(event, payload)
         changed = True
     report_context()
-    if changed or (_last_user[0] and time.time() - _last_user[0] > NO_REPLY_HINT_SECONDS):
+    if _progress[0] is not None and time.time() - _progress[0][1] > PROGRESS_STALE:
+        _progress[0] = None
+        changed = True
+    busy = _progress[0] is not None
+    if changed or busy or (_last_user[0] and time.time() - _last_user[0] > NO_REPLY_HINT_SECONDS):
         for window_ in getattr(bpy.context.window_manager, "windows", []):
             for area in window_.screen.areas:
                 if area.type == "VIEW_3D":
                     area.tag_redraw()
-    return 0.5
+    return 0.15 if busy else 0.5  # while the bar moves
 
 
 def _on_input_update(self, context):
@@ -463,11 +475,45 @@ class CLAUDEHAND_PT_chat(bpy.types.Panel):
         if _last_user[0] and time.time() - _last_user[0] > NO_REPLY_HINT_SECONDS:
             for line in wrap("1분 넘게 답이 없습니다. 감독 세션을 start-supervisor.cmd로 열었는지, Claude Code 창에 확인을 기다리는 질문이 없는지 봐 주세요.", width):
                 layout.label(text=line)
+        draw_progress(layout, width)
         wm = context.window_manager
         layout.prop(wm, "claude_hand_chat_input", text="")
         row = layout.row()
         row.prop(wm, "claude_hand_chat_context", text="선택 항목 함께")
         row.operator(CLAUDEHAND_OT_send.bl_idname, text="보내기", icon="PLAY")
+
+
+def progress_view(progress, received_at, now):
+    """(bar factor, bar text, caption) for what the subagent is doing: the bar fills by step / total when the supervisor
+    gave the steps, otherwise it goes back and forth while work goes on (no made-up percentage)."""
+    seconds = int(progress.get("elapsed", 0) + now - received_at)
+    total = progress.get("total")
+    if total:
+        factor, bar = max(0.0, min(1.0, progress.get("step", 0) / total)), f"{progress.get('step', 0)}/{total} · {seconds}초"
+    else:
+        factor, bar = abs((now * 0.8) % 2.0 - 1.0), f"작업 중 · {seconds}초"
+    caption = [progress.get("label") or "", f"{progress.get('tool', '')} {progress.get('detail', '')}".strip()]
+    if progress.get("actions"):
+        caption.append(f"{progress['actions']}번째 동작")
+    return factor, bar, " · ".join(part for part in caption if part)
+
+
+def draw_progress(layout, width):
+    """The bar just above the input while this window's subagent works; the reply removes it."""
+    if _progress[0] is None:
+        return
+    progress, received_at = _progress[0]
+    now = time.time()
+    if now - received_at > PROGRESS_STALE:  # no news for a long while: the supervisor never answered
+        return
+    factor, bar, caption = progress_view(progress, received_at, now)
+    col = layout.column(align=True)
+    for line in wrap(caption, width)[:3] if caption else []:
+        col.label(text=line, icon="NONE")
+    if hasattr(col, "progress"):  # Blender 4.0+
+        col.progress(factor=factor, type="BAR", text=bar)
+    else:
+        col.label(text=bar, icon="TIME")
 
 
 def panel_metrics(context):

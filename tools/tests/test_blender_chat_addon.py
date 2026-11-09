@@ -151,6 +151,22 @@ class BlenderChatAddonTests(unittest.TestCase):
         self.assertTrue(hasattr(bpy.types, "CLAUDEHAND_PT_chat"))
         self.assertEqual(self.addon.wrap("가" * 50)[0], "가" * self.addon.WRAP_WIDTH)
 
+    def test_progress_bar_while_the_subagent_works(self):
+        addon = self.addon
+        pin = next(a.pin for a in cc.load_agents(Path(self.tmp.name) / "agents") if a.app == "blender")
+        self.assertTrue(wait_for(lambda: addon._status[0].startswith("담당"), addon))
+        chat_id = self.hub.report_action("blender", pin, "execute_code", "bpy.ops.mesh.primitive_uv_sphere_add()")
+        self.assertTrue(wait_for(lambda: addon._progress[0] is not None, addon))
+        factor, bar, caption = addon.progress_view(*addon._progress[0], time.time())
+        self.assertTrue(bar.startswith("작업 중") and 0.0 <= factor <= 1.0)
+        self.assertIn("primitive_uv_sphere_add", caption)
+        self.hub.set_progress(chat_id, 2, 4, "Unity로 가져오는 중")
+        self.assertTrue(wait_for(lambda: (addon._progress[0] or ({}, 0))[0].get("total") == 4, addon))
+        factor, bar, caption = addon.progress_view(*addon._progress[0], time.time())
+        self.assertEqual((factor, bar.split(" ")[0]), (0.5, "2/4"))
+        self.hub.reply(chat_id, "다 했어요")
+        self.assertTrue(wait_for(lambda: addon._progress[0] is None, addon))
+
     def test_lines_fit_the_sidebar(self):
         """Korean is about twice as wide as Latin text; a fixed character count overflowed into "..."."""
         addon = self.addon

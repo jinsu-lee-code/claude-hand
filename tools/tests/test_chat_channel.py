@@ -252,7 +252,7 @@ class McpTests(unittest.TestCase):
         self.assertEqual(init["protocolVersion"], "2025-06-18")
         self.assertEqual(init["capabilities"]["experimental"], {"claude/channel": {}, "claude/channel/permission": {}})
         self.assertIn("reply tool", init["instructions"])
-        self.assertEqual([t["name"] for t in replies[1]["result"]["tools"]], ["reply", "current_context"])
+        self.assertEqual([t["name"] for t in replies[1]["result"]["tools"]], ["reply", "current_context", "progress"])
         self.assertEqual(replies[2], {"jsonrpc": "2.0", "id": 3, "result": {}})
         self.assertEqual(replies[3]["error"]["code"], -32601)
 
@@ -360,6 +360,48 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(json.loads((self.server_file.parent / "status.json").read_text(encoding="utf-8"))["mode"], "serving")
         self.assertTrue(self.http("GET", "/v1/status")["ok"])
 
+
+
+class ProgressTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.agents = Path(self.tmp.name) / "agents"
+        write_agents(self.agents)
+        self.hub = cc.ChatHub(lambda message: None, self.agents)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_subagent_actions_show_until_the_reply(self):
+        self.assertIsNone(self.hub.report_action("unity", "Other@ffff0000", "manage_scene", ""))  # not a generated subagent
+        self.assertEqual(self.hub.report_action("unity", "MyGame@aaaa1111", "manage_gameobject", "create Cube"), "unity-mygame")
+        self.hub.report_action("unity", "MyGame@aaaa1111", "manage_scene", "save")
+        state = self.hub.poll("unity-mygame", 0, 0)
+        self.assertEqual((state["progress"]["tool"], state["progress"]["detail"], state["progress"]["actions"]),
+                         ("manage_scene", "save", 2))
+        self.hub.reply("unity-mygame", "다 했어요")
+        self.assertIsNone(self.hub.poll("unity-mygame", 0, 0)["progress"])
+
+    def test_supervisor_steps_fill_the_bar(self):
+        self.assertTrue(self.hub.set_progress("unity-mygame", 2, 3, "Unity로 가져오는 중"))
+        progress = self.hub.poll("unity-mygame", 0, 0)["progress"]
+        self.assertEqual((progress["step"], progress["total"], progress["label"]), (2, 3, "Unity로 가져오는 중"))
+        self.assertFalse(self.hub.set_progress("nobody", 1, 2, ""))
+
+    def test_a_waiting_panel_wakes_on_progress(self):
+        rev = self.hub.poll("unity-mygame", 0, 0)["progress_rev"]
+        timer = threading.Timer(0.2, lambda: self.hub.report_action("unity", "MyGame@aaaa1111", "manage_scene", "save"))
+        timer.start()
+        started = time.time()
+        state = self.hub.poll("unity-mygame", 0, 5, progress_rev=rev)
+        timer.join()
+        self.assertLess(time.time() - started, 3)
+        self.assertEqual(state["progress"]["tool"], "manage_scene")
+
+    def test_stale_progress_disappears(self):
+        self.hub.report_action("unity", "MyGame@aaaa1111", "manage_scene", "save")
+        self.hub.progress["unity-mygame"]["updated"] -= cc.PROGRESS_TTL + 1
+        self.assertIsNone(self.hub.poll("unity-mygame", 0, 0)["progress"])
 
 
 class HistoryTests(unittest.TestCase):
