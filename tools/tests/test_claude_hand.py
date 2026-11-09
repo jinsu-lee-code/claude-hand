@@ -774,6 +774,7 @@ class EverydayStartTests(unittest.TestCase):
              unittest.mock.patch.object(ch, "supervisor_running", lambda home=None, fetch=None: running), \
              unittest.mock.patch.object(ch, "plan_chat_config", lambda root=None, runner=None: {}), \
              unittest.mock.patch.object(ch, "refresh_agents", lambda **kw: refreshed.append(kw) or ch.SyncResult()), \
+             unittest.mock.patch.object(ch, "LAUNCH_ARGS_FILE", Path(tmp) / ".launch-args"), \
              unittest.mock.patch("sys.stdout", out):
             code = ch.main(["preflight"])
         return code, out.getvalue(), refreshed, home
@@ -816,6 +817,47 @@ class EverydayStartTests(unittest.TestCase):
             self.assertTrue(os.access(created[0], os.X_OK))
             ch.main(["shortcut", "--remove"])
             self.assertEqual(list((Path(tmp) / "Desktop").iterdir()), [])
+
+
+
+class RemoteControlTests(unittest.TestCase):
+    def test_launch_args(self):
+        self.assertEqual(ch.launch_args({}), "")
+        self.assertEqual(ch.launch_args({"remote_control": True}), '--remote-control --name "Claude Hand"')
+
+    def test_problems(self):
+        self.assertEqual(ch.remote_control_problems({}), [])
+        self.assertEqual(len(ch.remote_control_problems({"ANTHROPIC_API_KEY": "x", "CLAUDE_CODE_USE_BEDROCK": "1"})), 2)
+        self.assertIn("ANTHROPIC_BASE_URL", ch.remote_control_problems({"ANTHROPIC_BASE_URL": "http://proxy"})[0])
+
+    def test_on_off_and_preflight_args(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with unittest.mock.patch.dict("os.environ", {"CLAUDE_HAND_HOME": str(home)}), \
+                 unittest.mock.patch.object(ch, "supervisor_running", lambda home=None, fetch=None: False), \
+                 unittest.mock.patch("sys.stdout", io.StringIO()):
+                ch.main(["remote-control", "on"])
+                self.assertTrue(ch.read_user_config(home)["remote_control"])
+                self.assertIn("start_script", ch.read_user_config(home))
+                runner = EverydayStartTests()
+                _, text, _, _ = runner.run_preflight(tmp)
+                self.assertEqual((Path(tmp) / ".launch-args").read_text(encoding="utf-8").strip(), ch.launch_args({"remote_control": True}))
+                ch.main(["remote-control", "off"])
+                self.assertFalse(ch.read_user_config(home)["remote_control"])
+        self.assertIn("Code 탭", text)
+
+    def test_start_scripts_pass_the_launch_args(self):
+        cmd = (ch.REPO_ROOT / "start-supervisor.cmd").read_text(encoding="utf-8")
+        self.assertIn('set /p CH_ARGS=<".launch-args"', cmd)
+        self.assertIn("%CH_ARGS% %*", cmd)
+        self.assertIn("$CH_ARGS", (ch.REPO_ROOT / "start-supervisor.sh").read_text(encoding="utf-8"))
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX shell")
+    def test_shell_keeps_the_quoted_name_together(self):
+        import subprocess
+        script = 'CH_ARGS=\'--remote-control --name "Claude Hand"\'; set -- --resume x; eval "set -- $CH_ARGS \\"\\$@\\""; printf "[%s]" "$@"'
+        out = subprocess.run(["sh", "-c", script], capture_output=True, text=True).stdout
+        self.assertEqual(out, "[--remote-control][--name][Claude Hand][--resume][x]")
 
 
 if __name__ == "__main__":

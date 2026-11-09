@@ -30,6 +30,21 @@ Unity·Blender 안의 채팅창 ──(claude-hand-chat 채널)──┐
 - 새 프로젝트나 파일을 열어도 따로 할 일이 없습니다. 처음 메시지를 보내면 그 창 담당이 자동으로 만들어집니다.
 - 아이콘을 두 번 눌러도 "이미 실행 중"이라고 알려 줄 뿐 둘이 열리지 않습니다.
 
+### Claude 데스크톱 앱에서 진행 보기
+
+```powershell
+uv run tools/claude_hand.py remote-control on     # 끄려면 off
+```
+다음에 Claude Hand를 켜면, 감독 세션이 Claude Code의 **Remote Control**로 열립니다.
+- **Claude 데스크톱 앱의 Code 탭**(그리고 claude.ai/code, 모바일 앱) 세션 목록에 **"Claude Hand"**가 보입니다.
+- 감독의 대화와 도구 실행이 실시간으로 보입니다.
+- 백그라운드로 도는 하위 세션들도 보이고, 거기서 멈출 수 있습니다. 감독은 하위 세션을 백그라운드로 맡기도록 돼 있습니다.
+
+필요한 것:
+- Pro·Max·Ultra·Team·Enterprise 구독의 **claude.ai 로그인**. API 키로는 안 됩니다.
+- Team·Enterprise는 관리자가 Remote Control을 켜야 합니다.
+- 이미 켜져 있는 Claude Hand에서는 그 창에 `/remote-control`을 입력하면 바로 연결됩니다.
+
 ## 처음 설치: Claude에게 맡기기
 
 필요한 건 **Claude Code**와 이 저장소뿐입니다.

@@ -18,6 +18,7 @@ Unity 프로젝트마다 `unity-<프로젝트>`, Blender 창마다 `blender-<파
 감독 세션을 채널과 함께 열면(`start-supervisor.cmd`) Unity 채팅창(Window > Claude Hand > Chat)과 Blender 채팅 패널(N 패널 > Claude Hand)에서 친 메시지가 `<channel source="claude-hand-chat" chat_id=… app=… window=… agent=…>` 형태로 들어온다.
 - **그 창에 앉아 있는 사용자의 말이다.** 사용자는 터미널을 보고 있지 않다. 답은 반드시 `reply` 도구로 같은 `chat_id`에 보낸다.
 - **기본 담당은 `agent`에 적힌 하위 세션이다.** 같은 `chat_id`에서 온 메시지는 같은 하위 세션을 `SendMessage`로 이어서 맡긴다. 그래야 창마다 대화 맥락이 이어진다. 어떤 `chat_id`가 어떤 하위 세션(agent id)인지 기억해 둔다.
+- **하위 세션은 백그라운드로 맡긴다**(`run_in_background`). 그러면 하위 세션이 일하는 동안에도 다른 창에서 온 메시지를 받을 수 있다. Remote Control로 Claude 데스크톱 앱이나 모바일 앱에서 볼 때 하위 세션이 목록에 보이고 거기서 멈출 수도 있다. 끝났다는 알림이 오면 결과를 `reply`로 그 창에 보낸다.
 - 메시지 끝의 `[unity 창 정보: …]`, `[blender 창 정보: …]`는 사용자가 지금 선택한 것들이다. "이거", "선택한 거"는 거기에 적힌 대상이다.
 - 다른 창이 필요한 요청(예: Unity 창에서 "Blender에 있는 Hero 가져와")은 아래 옮기기 순서대로 다른 하위 세션도 쓰되, 결과는 **요청이 온 `chat_id`로** 보고한다.
 - 몇 초 넘게 걸리는 일은 먼저 "하는 중"이라고 짧게 답하고, 끝나면 결과를 보낸다.

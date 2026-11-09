@@ -45,7 +45,7 @@ Unity 프로젝트 경로를 알면 `--unity-project "<경로>"`를 붙인다. �
 - 5단계: Unity 에디터 환경설정
 - 6단계: `~/.claude/agents`, `~/.claude/skills`
 - 7단계: 이 폴더의 `.mcp.json`과 `.claude/settings.local.json`(채팅 채널 등록, 답장 도구 허용, 채널 서버 사전 승인), Blender 애드온 폴더(채팅 애드온), 선택하면 하위 세션 도구 허용 규칙
-- 8단계: 바탕화면과 시작 메뉴의 "Claude Hand" 바로가기, 선택하면 Windows 시작프로그램
+- 8단계: 바탕화면과 시작 메뉴의 "Claude Hand" 바로가기, 선택하면 Windows 시작프로그램, 선택하면 Claude 데스크톱 앱에서 진행 보기(Remote Control)
 
 ## 1. 기본 도구 (빠진 것만)
 
@@ -184,6 +184,19 @@ uv run tools/claude_hand.py shortcut
   - 채팅 설정 맞추기
   - 이미 켜져 있는지 확인
   - 처음 한 번 안내
+
+## 8-1. Claude 데스크톱 앱에서 진행 보기 (사용자가 원할 때)
+
+감독 세션과 하위 세션이 하는 일을 Claude 데스크톱 앱이나 모바일 앱에서 보고 싶은지 물어본다. 원하면 이 명령을 실행한다.
+```
+uv run tools/claude_hand.py remote-control on
+```
+- 다음부터 Claude Hand가 Remote Control(`--remote-control --name "Claude Hand"`)로 열린다. 데스크톱 앱의 **Code 탭** 세션 목록에 "Claude Hand"로 보인다(claude.ai/code, 모바일도 같다). 대화, 도구 실행, 백그라운드 하위 세션이 보이고, 하위 세션은 거기서 멈출 수 있다.
+- 조건을 먼저 확인해 알린다.
+  - Pro·Max·Ultra·Team·Enterprise 구독의 claude.ai 로그인이 필요하고, API 키로는 안 된다.
+  - Team·Enterprise는 관리자가 켜야 한다.
+  - 명령이 `ANTHROPIC_API_KEY`나 `ANTHROPIC_BASE_URL`, Bedrock·Vertex 사용을 발견하면 "주의"로 알려 준다.
+- Channels 옵션과 같이 쓰는 것은 문서로 확인되지 않았다. Claude Hand가 이상하게 시작되면 `remote-control off`로 끄고 다시 켜 보게 한다.
 
 ## 9. 마무리
 

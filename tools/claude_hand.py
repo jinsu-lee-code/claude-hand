@@ -29,6 +29,8 @@ Everyday start (so nobody has to open a terminal):
   preflight            Run by start-supervisor each time: refresh subagents, check nothing is
                        already running, explain the first-run prompts.
   shortcut             Put a "Claude Hand" icon on the Desktop and in the Start menu.
+  remote-control       on/off/status: show the supervisor and its subagents in the Claude
+                       desktop app (Code tab), claude.ai/code and the mobile app.
 
 Run with uv (already installed for MCP for Unity) or any Python 3.10+:
   uv run tools/claude_hand.py list
@@ -76,6 +78,8 @@ MIN_CLAUDE_FOR_PERMISSION_RELAY = (2, 1, 234)
 THIRD_PARTY_PROVIDER_ENV = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
 START_SCRIPT = REPO_ROOT / ("start-supervisor.cmd" if sys.platform == "win32" else "start-supervisor.sh")
 SHORTCUT_NAME = "Claude Hand"
+REMOTE_CONTROL_NAME = "Claude Hand"
+LAUNCH_ARGS_FILE = REPO_ROOT / ".launch-args"  # extra `claude` arguments start-supervisor reads (written by preflight)
 
 
 # --------------------------------------------------------------------------- data
@@ -1102,6 +1106,10 @@ def doctor_checks(projects: list[Path], blender_ports: list[int], version=tool_v
     skill = Path.home() / ".claude" / "skills" / "claude-hand" / "SKILL.md"
     add("claude-hand", "감독 스킬", skill.exists(), str(skill) if skill.exists() else "없음",
         "" if skill.exists() else "uv run tools/claude_hand.py sync")
+    if read_user_config().get("remote_control"):
+        problems = remote_control_problems()
+        add("데스크톱 앱에서 보기", "Remote Control을 쓸 수 있는 로그인", not problems, "; ".join(problems) or "문제 없음",
+            "" if not problems else "claude.ai 계정(Pro·Max·Team 등)으로 /login 하세요")
     progress("이전 버전 흔적 확인 중...")
     entry = claude_mcp_get() if claude else None
     if entry is not None and entry.exists and entry.scope == "local":
@@ -1365,6 +1373,32 @@ def write_user_config(home: Path | None = None, root: Path = REPO_ROOT, start_sc
     return path
 
 
+def read_user_config(home: Path | None = None) -> dict:
+    return read_json_file((home or claude_hand_home()) / "config.json")
+
+
+def launch_args(config: dict) -> str:
+    """Extra arguments for the supervisor's `claude` command, one line, as start-supervisor pastes it."""
+    if config.get("remote_control"):
+        # Remote Control: the session (and the subagents it runs) shows up in the Claude desktop app's Code tab,
+        # claude.ai/code and the mobile app under this name.
+        return f'--remote-control --name "{REMOTE_CONTROL_NAME}"'
+    return ""
+
+
+def remote_control_problems(env=os.environ) -> list[str]:
+    """Documented reasons Remote Control cannot work for this login."""
+    problems = []
+    provider = [name for name in THIRD_PARTY_PROVIDER_ENV if env.get(name, "").lower() in ("1", "true")]
+    if provider:
+        problems.append("Bedrock/Vertex/Foundry(" + ", ".join(provider) + ")에서는 Remote Control을 쓸 수 없습니다")
+    if env.get("ANTHROPIC_BASE_URL"):
+        problems.append("ANTHROPIC_BASE_URL이 설정돼 있으면 Remote Control을 쓸 수 없습니다")
+    if env.get("ANTHROPIC_API_KEY"):
+        problems.append("ANTHROPIC_API_KEY가 설정돼 있습니다. Remote Control은 API 키로는 안 되고 claude.ai 로그인(Pro·Max·Team 등)이 필요합니다")
+    return problems
+
+
 def supervisor_running(home: Path | None = None, fetch=None) -> bool:
     server, _ = read_chat_files((home or claude_hand_home()) / "chat")
     if not server:
@@ -1434,7 +1468,13 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     skill = Path.home() / ".claude" / "skills" / "claude-hand" / "SKILL.md"
     if not skill.exists() or skill.read_text(encoding="utf-8") != SKILL_SOURCE.read_text(encoding="utf-8"):
         install_skill(Path.home() / ".claude" / "skills")
+    config = read_user_config(home)
+    LAUNCH_ARGS_FILE.write_text(launch_args(config) + "\n", encoding="utf-8")
     print(BANNER)
+    if config.get("remote_control"):
+        print(f" 진행 보기: Claude 데스크톱 앱의 Code 탭(또는 claude.ai/code, 모바일 앱)에서 '{REMOTE_CONTROL_NAME}' 세션을 여세요.")
+        for problem in remote_control_problems():
+            print(f" 주의: {problem}")
     marker = home / "first-run-done"
     if not marker.exists():
         print(FIRST_RUN_GUIDE)
@@ -1468,6 +1508,27 @@ def shortcut_files(platform=sys.platform, home: Path | None = None) -> dict[Path
     return {home / "Desktop" / "claude-hand.desktop": (
         "[Desktop Entry]\nType=Application\nName=Claude Hand\n"
         f"Exec={script}\nTerminal=true\nComment=Start the Claude Hand supervisor\n")}
+
+
+def cmd_remote_control(args: argparse.Namespace) -> int:
+    home = claude_hand_home()
+    path = home / "config.json"
+    config = read_user_config(home)
+    if args.action in ("on", "off"):
+        config["remote_control"] = args.action == "on"
+        write_json_files({path: config})
+        write_user_config(home)
+    on = bool(config.get("remote_control"))
+    print(f"Remote Control: {'켜짐' if on else '꺼짐'}")
+    if on:
+        print(f"  다음에 Claude Hand를 켤 때부터 Claude 데스크톱 앱의 Code 탭(또는 claude.ai/code, 모바일 앱)에 "
+              f"'{REMOTE_CONTROL_NAME}' 세션이 보입니다. 감독의 대화와 도구 실행, 백그라운드로 도는 하위 세션이 보입니다.")
+        print("  필요한 것: Pro·Max·Ultra·Team·Enterprise 구독의 claude.ai 로그인(API 키는 안 됨). Team·Enterprise는 관리자가 켜야 합니다.")
+        for problem in remote_control_problems():
+            print(f"  주의: {problem}")
+        if supervisor_running(home):
+            print("  지금 켜져 있는 Claude Hand에는 적용되지 않습니다. 그 창에서 /remote-control 을 입력하거나, 닫고 다시 켜세요.")
+    return 0
 
 
 def cmd_shortcut(args: argparse.Namespace) -> int:
@@ -1890,6 +1951,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_pre.add_argument("--runner", default="uv run -q --no-project")
     p_pre.add_argument("--blender-ports", default=DEFAULT_BLENDER_PORTS)
     p_pre.set_defaults(func=cmd_preflight)
+
+    p_rc = sub.add_parser("remote-control", help="show the supervisor in the Claude desktop app (Remote Control)")
+    p_rc.add_argument("action", nargs="?", choices=["on", "off", "status"], default="status")
+    p_rc.set_defaults(func=cmd_remote_control)
 
     p_sc = sub.add_parser("shortcut", help='put a "Claude Hand" icon on the Desktop and in the Start menu')
     p_sc.add_argument("--startup", action="store_true", help="also start Claude Hand when Windows starts")

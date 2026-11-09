@@ -5,3 +5,4 @@ Thumbs.db
 # written on each machine by `claude_hand.py chat-setup` / `sync --allow-tools`
 /.mcp.json
 /.claude/settings.local.json
+/.launch-args

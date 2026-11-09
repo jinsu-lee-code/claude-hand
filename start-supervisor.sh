@@ -21,4 +21,8 @@ if [ "$status" -eq 3 ]; then pause; exit 0; fi
 export CLAUDE_HAND_SUPERVISOR=1
 # Give the channel server time to start on a slow first run (milliseconds; default is 30 s).
 export MCP_TIMEOUT="${MCP_TIMEOUT:-60000}"
+# Extra arguments from preflight, e.g. --remote-control to show this session in the Claude desktop app.
+CH_ARGS=""
+[ -f .launch-args ] && CH_ARGS=$(cat .launch-args)
+eval "set -- $CH_ARGS \"\$@\""
 claude --dangerously-load-development-channels server:claude-hand-chat "$@" || pause

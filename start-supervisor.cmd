@@ -29,5 +29,8 @@ rem Only the session started here serves the chat panels (see tools/chat_channel
 set CLAUDE_HAND_SUPERVISOR=1
 rem Give the channel server time to start on a slow first run (milliseconds; default is 30 s).
 if not defined MCP_TIMEOUT set MCP_TIMEOUT=60000
-claude --dangerously-load-development-channels server:claude-hand-chat %*
+rem Extra arguments from preflight, e.g. --remote-control to show this session in the Claude desktop app.
+set "CH_ARGS="
+if exist ".launch-args" set /p CH_ARGS=<".launch-args"
+claude --dangerously-load-development-channels server:claude-hand-chat %CH_ARGS% %*
 if errorlevel 1 pause
