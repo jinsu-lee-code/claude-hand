@@ -38,6 +38,7 @@ namespace ClaudeHand.Editor
         private long _progressRev = -1;     // the server's revision of it, so polling wakes on changes
         private double _progressReceivedAt;
         private double _lastBusyRepaint;
+        [SerializeField] private string _undoNote;  // goes along with the next message after "되돌리기"
         private bool _followNewest = true;  // scrolled to the bottom: new messages keep it there; reading older ones: stay put
         private float _contentHeight;
         private bool _includeSelection = true;
@@ -88,12 +89,14 @@ namespace ClaudeHand.Editor
             _chatId = null;
             _polling = new CancellationTokenSource();
             PollLoop(_polling.Token);
+            ChCheckpoint.Changed += Repaint;
         }
 
         private void OnDisable()
         {
             _polling?.Cancel();
             EditorApplication.update -= RepaintWhileBusy;
+            ChCheckpoint.Changed -= Repaint;
         }
 
         // ------------------------------------------------------------------ server
@@ -269,6 +272,11 @@ namespace ClaudeHand.Editor
             if (text.Length == 0 || _sending || _pendingText != null) return;
             _followNewest = true;  // your own message and its answer come into view even if you had scrolled up
             var context = _includeSelection ? BuildContext() : string.Empty;
+            if (!string.IsNullOrEmpty(_undoNote))  // so Claude does not assume its last changes are still there
+            {
+                context = string.IsNullOrEmpty(context) ? _undoNote : _undoNote + "\n" + context;
+                _undoNote = null;
+            }
             if (ReadServer() == null || _serverMissing)
             {
                 // Claude Hand is off (or its server.json is left over from a crash): keep the message,
@@ -492,6 +500,9 @@ namespace ClaudeHand.Editor
                     case "permission":
                         DrawPermission(entry);
                         break;
+                    case "notice":  // shown only here, not sent anywhere
+                        EditorGUILayout.HelpBox(entry.Text, MessageType.Info);
+                        break;
                 }
                 GUILayout.Space(6);
             }
@@ -514,6 +525,7 @@ namespace ClaudeHand.Editor
                 _followNewest = _scroll.y + GUILayoutUtility.GetLastRect().height >= _contentHeight - 30f;
             }
             DrawProgress();
+            DrawUndo();
 
             var e = Event.current;
             bool submit = e.type == EventType.KeyDown && e.keyCode == KeyCode.Return && (e.control || e.command);
@@ -529,6 +541,29 @@ namespace ClaudeHand.Editor
             }
             GUI.enabled = true;
             GUILayout.EndHorizontal();
+        }
+
+        /// <summary>
+        /// "Undo the last request": back to the undo point the subagent's guard set before its first action. Not while
+        /// it is still working, and only after a confirmation that says edits made by hand since then go too.
+        /// </summary>
+        private void DrawUndo()
+        {
+            var marks = ChCheckpoint.Marks;
+            if (marks.Count == 0 || _progress != null) return;
+            var mark = marks[marks.Count - 1];
+            if (!GUILayout.Button($"되돌리기: {mark.label} ({mark.time})", EditorStyles.miniButton)) return;
+            var ok = EditorUtility.DisplayDialog("Claude Hand 되돌리기",
+                $"'{mark.label}' 요청({mark.time}) 이후 이 Unity에서 바뀐 것을 모두 되돌립니다.\n" +
+                "그 뒤에 직접 고친 것도 함께 되돌아갑니다. 저장해 둔 씬 파일은 다시 저장해야 바뀝니다.", "되돌리기", "취소");
+            if (!ok) return;
+            var undone = ChCheckpoint.UndoLast();
+            if (undone == null) return;
+            _entries.Add(new Entry { Kind = "notice", Text = $"되돌렸어요: '{undone.label}' ({undone.time}) 이후의 변경" });
+            _undoNote = $"[사용자가 채팅창에서 '{undone.label}' ({undone.time}) 요청 이후의 Unity 변경을 Undo로 되돌렸음]";
+            _followNewest = true;
+            _scroll.y = float.MaxValue;
+            GUIUtility.ExitGUI();  // the dialog and the undo changed things mid-frame
         }
 
         private void SetProgress(JObject progress, long rev)

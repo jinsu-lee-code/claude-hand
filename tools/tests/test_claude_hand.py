@@ -130,6 +130,16 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(ch.pinned_args(args, "MyGame@aaaa1111"),
                          ["--from", "x", "--transport", "stdio", "--default-instance", "MyGame@aaaa1111"])
 
+    def test_agents_point_at_their_notes(self):
+        unity = ch.render_agent(self.a, "unity-mygame", ch.ServerConfig(transport="stdio"), "uv run", allowlist=True, focus_nudge=False)
+        self.assertIn("`C:/Projects/MyGame/ClaudeHand/NOTES.md`", unity)
+        self.assertNotIn("메모", ch.render_agent(self.b, "unity-props-lib", ch.ServerConfig(transport="stdio"), "uv run",
+                                                 allowlist=True, focus_nudge=False))  # no known path: nothing to point at
+        blender = ch.render_blender_prompt(ch.BlenderInstance(port=9877, filepath="C:/Art/character.blend"), "blender_character")
+        self.assertIn("`C:/Art/character.claude-hand.md`", blender)
+        self.assertNotIn("__NOTES__", ch.render_blender_prompt(ch.BlenderInstance(port=9877, filepath=""), "blender_x"))
+        self.assertEqual(ch.unity_notes_path("C:\\Projects\\MyGame\\"), "C:\\Projects\\MyGame/ClaudeHand/NOTES.md")
+
     def test_stdio_agent_file(self):
         server = ch.ServerConfig(transport="stdio")
         text = ch.render_agent(self.a, "unity-mygame", server, "uv run -q --no-project", allowlist=True, focus_nudge=False)
@@ -269,6 +279,29 @@ class GuardTests(unittest.TestCase):
                                    {"app": "unity", "pin": self.PIN, "tool": "manage_gameobject", "detail": "create Cube"}))
         self.assertEqual(sent[1][2]["tool"], "ch_scene_snapshot")
         self.assertEqual(len(sent), 2)  # not for tools outside the subagent's own servers
+
+    def test_first_unity_action_of_a_request_sets_an_undo_point(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / "chat").mkdir()
+            (home / "chat" / "server.json").write_text(json.dumps({"port": 8765, "token": "t"}), encoding="utf-8")
+            marks = []
+            event = {"tool_name": "mcp__unity_mygame__manage_gameobject", "tool_input": {"action": "create", "name": "Cube"}}
+            for reply in ({"new_request": True, "label": "큐브 만들어줘"}, {"new_request": False}, None):
+                ch.report_progress(event, self.PIN, self.SERVER, "unity", home=home, post=lambda req, r=reply: r,
+                                   mark=lambda pin, label: marks.append((pin, label)))
+            ch.report_progress(event, "props@9876", "blender_props", "blender", home=home,
+                               post=lambda req: {"new_request": True, "label": "x"}, mark=lambda pin, label: marks.append(pin))
+        self.assertEqual(marks, [(self.PIN, "큐브 만들어줘")])  # once per request, Unity only
+
+    def test_undo_point_goes_through_the_bridge(self):
+        calls = []
+        with unittest.mock.patch.dict(sys.modules, {"unity_bridge": unittest.mock.Mock(
+                find_project=lambda hash_: {"hash": hash_, "port": 1} if hash_ == "aaaa1111" else None)}):
+            sys.modules["unity_bridge"].request = lambda entry, tool, params, timeout: calls.append((entry["hash"], tool, params))
+            ch.mark_checkpoint(self.PIN, "큐브 만들어줘")
+            ch.mark_checkpoint("Other@ffff0000", "x")  # not open: nothing to mark
+        self.assertEqual(calls, [("aaaa1111", "ch_checkpoint", {"action": "mark", "label": "큐브 만들어줘"})])
 
     def test_action_summary(self):
         self.assertEqual(ch.action_summary({"action": "create", "name": "Cube", "position": [0, 0, 0]}), "create Cube")
@@ -606,6 +639,30 @@ class ChatSetupTests(unittest.TestCase):
             self.assertEqual(ch.plan_tool_allow(root, ["unity_mygame", "blender_props"]), {})
             ch.write_json_files(ch.plan_tool_allow(root, ["unity_mygame"], prune=True))
             self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["permissions"]["allow"], ["mcp__unity_mygame__*"])
+
+    def test_notes_allow_rules(self):
+        # Windows paths as Claude Code matches them (checked with claude -p 2.1.319: //c/... allows Read, Edit and Write).
+        self.assertEqual(ch.permission_path("C:\\Projects\\MyGame/ClaudeHand/NOTES.md"), "//c/Projects/MyGame/ClaudeHand/NOTES.md")
+        self.assertEqual(ch.permission_path("/home/me/art/a.claude-hand.md"), "//home/me/art/a.claude-hand.md")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            notes = [ch.unity_notes_path("C:/Projects/MyGame"), ch.blender_notes_path(""), ch.blender_notes_path("D:/Art/prop.blend")]
+            ch.write_json_files(ch.plan_notes_allow(root, notes))
+            rules = json.loads((root / ".claude" / "settings.local.json").read_text(encoding="utf-8"))["permissions"]["allow"]
+            self.assertEqual(rules, ["Read(//c/Projects/MyGame/ClaudeHand/NOTES.md)", "Edit(//c/Projects/MyGame/ClaudeHand/NOTES.md)",
+                                     "Read(//d/Art/prop.claude-hand.md)", "Edit(//d/Art/prop.claude-hand.md)"])
+            self.assertEqual(ch.plan_notes_allow(root, notes), {})  # unsaved .blend: no rule; second run changes nothing
+
+    def test_sync_writes_notes_rules_only_when_asked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, agents = Path(tmp) / "repo", Path(tmp) / "agents"
+            server = ch.ServerConfig(transport="stdio")
+            game = ch.Instance(name="MyGame", hash="aaaa1111", path="C:/Projects/MyGame")
+            ch.sync_agents([game], agents, server, "uv run")
+            self.assertFalse((root / ".claude" / "settings.local.json").exists())
+            ch.sync_agents([game], agents, server, "uv run", notes_root=root)
+            text = (root / ".claude" / "settings.local.json").read_text(encoding="utf-8")
+            self.assertIn("Edit(//c/Projects/MyGame/ClaudeHand/NOTES.md)", text)
 
     def test_prewarm_reads_the_check_result(self):
         class Done:

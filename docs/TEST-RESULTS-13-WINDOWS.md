@@ -70,6 +70,21 @@
 - 실제 확인: Unity 큐브 3개, Blender 실린더 작업에서 막대가 잘 보임(사용자). **단계 막대는 안 쓰였음**: Blender→Unity 2단계 요청에서 감독이 `progress`를 부르지 않음(지침이 채널 설명에만 있었음) → 감독 스킬의 채팅창 규칙에 "단계가 둘 이상이면 '하는 중' 답 뒤 단계마다 progress"를 추가. 다시 확인 필요.
 - 덤: 다시 켠 뒤에도 감독이 이전 하위 세션을 `SendMessage`로 이어 씀(14단계 D 보강).
 
+## 16단계: 이번 요청 되돌리기 (같은 날 추가, Unity만)
+
+- `ch_checkpoint`(Unity 패키지, 새 도구): `mark`가 새 Undo 그룹을 열고 이름을 붙여 SessionState에 둠(20개, 스크립트 다시 불러와도 남고 에디터를 끄면 사라짐 — Undo 기록과 같음). `undo`는 가장 최근 지점까지 `Undo.RevertAllDownToGroup`, `list`.
+- 채널 서버: 동작 보고(`/v1/progress`)가 그 요청의 첫 동작이면 `new_request`와 요청 앞부분(40자)을 돌려줌. 하위 세션의 guard가 그때 Claude Hand Tools 통로로 `ch_checkpoint mark`를 부름(첫 동작 전에, 실패하면 건너뜀).
+- Unity 채팅창: 일이 끝나면 입력칸 위에 "되돌리기: <요청> (시각)" 버튼. 확인창 뒤 되돌리고 "되돌렸어요" 안내, 다음 메시지에 "되돌렸음"을 같이 보내 감독이 알게 함.
+- 하위 세션 지침: `execute_code`로 바꿀 때 Undo에 남기기, "방금 거 취소해줘"면 `ch_checkpoint undo`.
+- 실제 Unity 확인(스크립트로): mark → MCP for Unity `manage_gameobject create` → undo에 오브젝트 없어짐. 경계: 요청 A·B 뒤 undo 한 번에 B만, 두 번에 A까지. 확인용 오브젝트는 지움. **채팅창 버튼은 사용자 확인 전.**
+- Blender는 아직 없음(Blender Undo는 다른 방식이라 따로 해야 함).
+
+## 17단계: 프로젝트·파일 메모 (같은 날 추가)
+
+- 메모 자리: Unity `<프로젝트>/ClaudeHand/NOTES.md`(Assets 밖이라 Unity가 가져오지 않음), Blender `<파일>.claude-hand.md`(저장 안 된 파일은 없음). 하위 세션 정의에 경로와 "시작할 때 읽고 지킨다", 감독 스킬에 "앞으로도 지킬 규칙이면 날짜와 한 줄로 더한다".
+- 허락: 메모는 이 폴더 밖이라 Read·Edit가 매번 허락을 물음(`claude -p`로 확인: 규칙 없으면 `DENIED`). sync·update·채팅 시작 때 창마다 그 메모 파일 하나만 `Read(//c/…)`·`Edit(//c/…)`로 미리 허용. 같은 방식으로 읽기·고치기·새로 만들기(폴더 없을 때도)까지 허락 없이 되는 것을 확인.
+- 테스트 177개 OK. **실제 사용은 사용자 확인 전.**
+
 ## 남은 것·참고
 
 - **`Bash(uv run *)` 미리 허용**: 새 `settings.local.json`이 이 폴더 세션의 `uv run …`을 허락 없이 실행하게 함. 12단계 E에서 본 `list` 같은 확인창은 이제 안 뜸. `uv run`은 아무 스크립트나 돌릴 수 있어 범위가 넓음.

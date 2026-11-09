@@ -374,13 +374,20 @@ class ProgressTests(unittest.TestCase):
 
     def test_subagent_actions_show_until_the_reply(self):
         self.assertIsNone(self.hub.report_action("unity", "Other@ffff0000", "manage_scene", ""))  # not a generated subagent
-        self.assertEqual(self.hub.report_action("unity", "MyGame@aaaa1111", "manage_gameobject", "create Cube"), "unity-mygame")
-        self.hub.report_action("unity", "MyGame@aaaa1111", "manage_scene", "save")
+        self.hub.initialized = True
+        self.hub.post_user_message("unity", "MyGame", "큐브 세 개를   일렬로 놓아줘")
+        first = self.hub.report_action("unity", "MyGame@aaaa1111", "manage_gameobject", "create Cube")
+        self.assertEqual(first, {"chat_id": "unity-mygame", "new_request": True, "label": "큐브 세 개를 일렬로 놓아줘"})
+        self.assertFalse(self.hub.report_action("unity", "MyGame@aaaa1111", "manage_scene", "save")["new_request"])
         state = self.hub.poll("unity-mygame", 0, 0)
         self.assertEqual((state["progress"]["tool"], state["progress"]["detail"], state["progress"]["actions"]),
                          ("manage_scene", "save", 2))
         self.hub.reply("unity-mygame", "다 했어요")
         self.assertIsNone(self.hub.poll("unity-mygame", 0, 0)["progress"])
+        # the next request (here asked in the Claude app, so no panel text) gets its own undo point
+        self.hub.set_progress("unity-mygame", 1, 2, "가져오는 중")  # a step before any action keeps the point pending
+        self.assertEqual(self.hub.report_action("unity", "MyGame@aaaa1111", "manage_scene", "get_hierarchy"),
+                         {"chat_id": "unity-mygame", "new_request": True, "label": ""})
 
     def test_supervisor_steps_fill_the_bar(self):
         self.assertTrue(self.hub.set_progress("unity-mygame", 2, 3, "Unity로 가져오는 중"))

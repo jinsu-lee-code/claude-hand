@@ -440,24 +440,36 @@ class ChatHub:
         self.progress_rev[chat_id] = self.progress_rev.get(chat_id, 0) + 1
         self.cond.notify_all()
 
-    def report_action(self, app: str, pin: str, tool: str, detail: str) -> str | None:
+    def report_action(self, app: str, pin: str, tool: str, detail: str) -> dict | None:
         """A window's subagent is about to run a Unity/Blender tool (its guard hook says so): show it in that
-        window's panel. Returns the chat_id, or None for a pin no generated subagent has."""
+        window's panel. new_request is true for the first action of a request (the guard sets an undo point then),
+        with label: the panel message it answers, if any. None for a pin no generated subagent has."""
         agent = next((a for a in load_agents(self.agents_dir) if a.app == app and a.pin == pin), None)
         if agent is None:
             return None
         with self.cond:
             entry = self._progress_entry(agent.name, time.time())
-            entry.update(tool=tool[:80], detail=detail[:120], actions=entry["actions"] + 1, updated=time.time())
+            first = not entry.get("marked")
+            entry.update(tool=tool[:80], detail=detail[:120], actions=entry["actions"] + 1, updated=time.time(), marked=True)
             self._bump_progress(agent.name)
-        return agent.name
+            label = self._open_request(agent.name) if first else ""
+        return {"chat_id": agent.name, "new_request": first, "label": label}
+
+    def _open_request(self, chat_id: str) -> str:
+        """The panel message not answered yet, in a few words ("" when the request came from elsewhere)."""
+        for item in reversed(self.logs.get(chat_id, [])):
+            if item.get("kind") == "reply":
+                return ""
+            if item.get("kind") == "user":
+                return " ".join(str(item.get("text", "")).split())[:40]
+        return ""
 
     def set_progress(self, chat_id: str, step: int, total: int, label: str) -> bool:
         """The supervisor's own count of a multi-step request: makes the panel's bar fill step / total."""
         if not self.known_chat(chat_id):
             return False
         with self.cond:
-            entry = self._progress_entry(chat_id, time.time())
+            entry = self._progress_entry(chat_id, time.time())  # "marked" stays as it is: the undo point waits for an action
             entry.update(step=max(0, min(step, total)), total=max(1, total), label=label[:120], updated=time.time())
             self._bump_progress(chat_id)
         return True
@@ -650,9 +662,9 @@ class PanelHandler(BaseHTTPRequestHandler):
             chat_id = self.hub.update_context(app, str(body.get("window", ""))[:200], str(body.get("pin", ""))[:200], context)
             self._json(200, {"ok": True, "chat_id": chat_id})
         elif path == "/v1/progress":  # a subagent's guard hook, just before each Unity/Blender tool call
-            chat_id = self.hub.report_action(str(body.get("app", "")), str(body.get("pin", ""))[:200],
-                                             str(body.get("tool", "")), str(body.get("detail", "")))
-            self._json(200 if chat_id else 404, {"ok": chat_id is not None, "chat_id": chat_id})
+            result = self.hub.report_action(str(body.get("app", "")), str(body.get("pin", ""))[:200],
+                                            str(body.get("tool", "")), str(body.get("detail", "")))
+            self._json(200 if result else 404, {"ok": result is not None, **(result or {})})
         else:
             self._json(404, {"ok": False, "error": "not found"})
 

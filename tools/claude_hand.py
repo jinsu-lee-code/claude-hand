@@ -509,6 +509,27 @@ def render_agent(inst: Instance, name: str, server: ServerConfig, runner: str, a
     return "\n".join(lines) + "\n"
 
 
+def unity_notes_path(project_path: str) -> str:
+    """Where a Unity project's lasting rules live (next to Assets/, so Unity does not import it)."""
+    root = project_path.rstrip("/\\")
+    return f"{root}/ClaudeHand/NOTES.md" if root else ""
+
+
+def blender_notes_path(filepath: str) -> str:
+    """Where a .blend file's lasting rules live: <name>.claude-hand.md beside it."""
+    return Path(filepath).with_suffix(".claude-hand.md").as_posix() if filepath else ""
+
+
+def notes_section(path: str, what: str) -> str:
+    if not path:
+        return ""
+    return f"""
+## 이 {what} 메모
+- 시작할 때 `{path}`가 있으면 Read로 읽고, 거기 적힌 규칙(이름 규칙, 재질·렌더 설정, 폴더, 하지 말 것 등)을 지킨다. 없으면 넘어간다.
+- 이 파일은 감독이 관리한다. 사용자가 이 {what}에 대해 앞으로도 지킬 규칙을 말했는데 메모에 없으면, 보고 끝에 "메모에 남길 것: …"으로 적는다.
+"""
+
+
 def render_agent_prompt(inst: Instance, key: str, transport: str) -> str:
     first_step = (
         f'- 첫 Unity 호출 전에 `set_active_instance(instance="{inst.id}")`를 호출한다. 다른 값은 안전장치가 막는다.\n'
@@ -525,7 +546,9 @@ def render_agent_prompt(inst: Instance, key: str, transport: str) -> str:
 - Unity 도구는 두 서버에 있다. `ch_*` 도구(스냅샷, 옮기기, 설정)는 `{key}_ch` 서버, 나머지 MCP for Unity 도구는 `{key}` 서버다. 다른 서버의 도구는 쓰지 않는다. 호출에 `unity_instance`를 넣지 않는다.
 - 다른 프로젝트 일을 받으면 하지 말고, 그 프로젝트 담당(unity-…)에게 넘겨야 한다고 감독에게 돌려준다.
 - 씬 저장(`manage_scene`의 `save`)은 요청받았을 때만 한다.
-
+- 요청마다 첫 동작 직전에 되돌리기 지점이 저절로 찍힌다(채팅창의 [되돌리기]). `execute_code`로 씬을 바꿀 때는 Undo에 남긴다(`Undo.RegisterCreatedObjectUndo`, `Undo.RecordObject`, `Undo.DestroyObjectImmediate`). 그래야 되돌리기가 그 변경까지 되돌린다. MCP for Unity 도구와 `ch_import_*`는 알아서 남긴다.
+- 사용자가 방금 한 일을 취소해 달라고 하면 `ch_checkpoint(action="undo")`로 되돌리고 무엇을 되돌렸는지 보고한다.
+{notes_section(unity_notes_path(inst.path), "프로젝트")}
 ## 작업 순서: 스냅샷 → ref → 행동 → 확인
 1. `ch_scene_snapshot`으로 씬을 보고 대상의 ref(`@s1a2b3c4:e5` 형태)를 고른다. 씬이 크면 `depth`를 낮추고 `root=<ref>`로 파고든다.
 2. `ch_*` 도구에는 ref를, MCP for Unity 기본 도구에는 노드의 `path`나 `instance_id`를 넘긴다.
@@ -604,7 +627,7 @@ BLENDER_PROMPT = r'''# Blender 전담: __NAME__
 - Blender 도구는 `__KEY__` 서버 것만 쓴다.
 - 다른 Blender 파일이나 Unity 프로젝트 일을 받으면 하지 말고, 그 담당(blender-… / unity-…)에게 넘겨야 한다고 감독에게 돌려준다.
 - .blend 저장(`bpy.ops.wm.save_mainfile()`)은 요청받았을 때만 한다.
-
+__NOTES__
 ## 작업 순서: 보기 → 행동 → 확인
 1. `get_scene_info`나 `get_object_info`로 대상 오브젝트의 정확한 이름을 확인한다. Blender에서는 오브젝트 이름이 곧 ID다.
 2. 바꿀 때는 `execute_code`로 bpy 코드를 실행하고, 실행한 뒤 같은 도구로 결과를 다시 확인한다.
@@ -693,7 +716,8 @@ def render_blender_prompt(inst: BlenderInstance, key: str) -> str:
             .replace("__NAME__", inst.name)
             .replace("__FILE__", inst.filepath or "저장 안 된 파일")
             .replace("__PORT__", str(inst.port))
-            .replace("__KEY__", key))
+            .replace("__KEY__", key)
+            .replace("__NOTES__", notes_section(blender_notes_path(inst.filepath), "파일")))
 
 
 @dataclass
@@ -749,8 +773,13 @@ def write_agent_files(files: dict[str, str], agents_dir: Path, prune: bool = Fal
 
 def sync_agents(instances: list[Instance], agents_dir: Path, server: ServerConfig, runner: str,
                 allowlist: bool = True, focus_nudge: bool = False, prune: bool = False, dry_run: bool = False,
-                blender: list[BlenderInstance] | None = None, blender_server: ServerConfig | None = None) -> SyncResult:
+                blender: list[BlenderInstance] | None = None, blender_server: ServerConfig | None = None,
+                notes_root: Path | None = None) -> SyncResult:
+    """notes_root: also pre-allow each window's notes file in that folder's settings.local.json."""
     files = build_agent_files(instances, server, blender or [], blender_server, runner, allowlist, focus_nudge)
+    if notes_root is not None and not dry_run:
+        paths = [unity_notes_path(i.path) for i in instances] + [blender_notes_path(b.filepath) for b in blender or []]
+        write_json_files(plan_notes_allow(notes_root, paths))
     return write_agent_files(files, agents_dir, prune=prune, dry_run=dry_run)
 
 
@@ -835,9 +864,10 @@ def action_summary(tool_input: dict) -> str:
     return " ".join(parts)[:120]
 
 
-def report_progress(event: dict, pin: str, server: str, app: str, home: Path | None = None, post=None) -> None:
-    """Tell the chat channel what this subagent is about to do, so its window's panel can show it. Best effort:
-    no Claude Hand, a slow server or any error just skips it; the tool call itself never waits more than a moment."""
+def report_progress(event: dict, pin: str, server: str, app: str, home: Path | None = None, post=None, mark=None) -> None:
+    """Tell the chat channel what this subagent is about to do, so its window's panel can show it, and on the first
+    Unity action of a request set an undo point there (the chat window's "되돌리기"). Best effort: no Claude Hand,
+    a slow server or any error just skips it; the tool call itself never waits more than a moment."""
     tool = str(event.get("tool_name", ""))
     short = next((tool[len(prefix):] for prefix in (f"mcp__{server}_ch__", f"mcp__{server}__") if tool.startswith(prefix)), "")
     if not short:
@@ -849,9 +879,19 @@ def report_progress(event: dict, pin: str, server: str, app: str, home: Path | N
         body = json.dumps({"app": app, "pin": pin, "tool": short, "detail": action_summary(event.get("tool_input") or {})})
         req = urllib.request.Request(f"http://127.0.0.1:{info['port']}/v1/progress", data=body.encode("utf-8"), method="POST",
                                      headers={"X-Claude-Hand-Token": info.get("token", ""), "Content-Type": "application/json"})
-        (post or (lambda r: urllib.request.urlopen(r, timeout=0.5).close()))(req)
+        reply = (post or (lambda r: json.loads(urllib.request.urlopen(r, timeout=0.5).read() or b"{}")))(req) or {}
+        if app == "unity" and reply.get("new_request"):
+            (mark or mark_checkpoint)(pin, str(reply.get("label") or ""))
     except Exception:  # progress is a nicety; the guard's answer must not depend on it
         pass
+
+
+def mark_checkpoint(pin: str, label: str, request=None) -> None:
+    """Set an undo point in the subagent's Unity editor through Claude Hand Tools' own bridge (ch_checkpoint)."""
+    import unity_bridge
+    entry = unity_bridge.find_project(hash_=pin.rpartition("@")[2])
+    if entry:
+        (request or unity_bridge.request)(entry, "ch_checkpoint", {"action": "mark", "label": label}, timeout=8.0)
 
 
 def run_guard(args: argparse.Namespace, stdin=None, stdout=None) -> int:
@@ -1304,6 +1344,28 @@ def plan_tool_allow(root: Path, server_keys: list[str], prune: bool = False) -> 
     return {path: settings}
 
 
+def permission_path(path: str) -> str:
+    """An absolute path as permission rules spell it: //abs/path, and on Windows C:/x becomes //c/x."""
+    path = path.replace("\\", "/")
+    if re.match(r"^[A-Za-z]:/", path):
+        return f"//{path[0].lower()}{path[2:]}"
+    return f"/{path}" if path.startswith("/") else path
+
+
+def plan_notes_allow(root: Path, notes_paths: list[str]) -> dict[Path, dict]:
+    """Let the supervisor keep, and its subagents read, the windows' notes files without a prompt: those files
+    sit in the user's project folders, outside this one, where Read and Edit otherwise ask every time."""
+    path = root / ".claude" / "settings.local.json"
+    settings = read_json_file(path)
+    allow = settings.setdefault("permissions", {}).setdefault("allow", [])
+    new = [f"{tool}({permission_path(p)})" for p in notes_paths if p for tool in ("Read", "Edit")]
+    new = [rule for rule in dict.fromkeys(new) if rule not in allow]
+    if not new:
+        return {}
+    allow += new
+    return {path: settings}
+
+
 def write_json_files(plan: dict[Path, dict]) -> None:
     for path, data in plan.items():
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1622,7 +1684,7 @@ def refresh_agents(agents_dir: Path | None = None, runner: str = "uv run -q --no
     if not unity and not blender:
         return SyncResult()
     return sync_agents(unity, agents_dir, server, runner, blender=blender,
-                       blender_server=detect_blender_config() if blender else None)
+                       blender_server=detect_blender_config() if blender else None, notes_root=REPO_ROOT)
 
 
 BANNER = """\
@@ -1946,7 +2008,7 @@ def cmd_update(args: argparse.Namespace) -> int:
     blender = list({b.port: b for b in [*blender, *live_blender]}.values())
     blender_server = detect_blender_config() if blender else None
     result = sync_agents(unity, agents_dir, server, args.runner, prune=False, dry_run=args.dry_run,
-                         blender=blender, blender_server=blender_server)
+                         blender=blender, blender_server=blender_server, notes_root=REPO_ROOT)
     print(f"{prefix}하위 세션: 고침 {len(result.written)}개, 그대로 {len(result.unchanged)}개")
 
     # 2. Supervisor skill (and the folder name the first version used).
@@ -2206,7 +2268,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
     agents_dir = Path(args.agents_dir).expanduser()
     result = sync_agents(instances, agents_dir, server, args.runner, allowlist=not args.no_allowlist,
                          focus_nudge=args.keep_focus_nudge, prune=args.prune, dry_run=args.dry_run,
-                         blender=blender, blender_server=blender_server)
+                         blender=blender, blender_server=blender_server, notes_root=REPO_ROOT)
     prefix = "(dry run) " if args.dry_run else ""
     if args.allow_tools:
         keys = [server_key(Path(name).stem) for name in build_agent_files(instances, server, blender, blender_server, args.runner)]
