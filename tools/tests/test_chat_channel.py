@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -402,6 +403,78 @@ class ProgressTests(unittest.TestCase):
         self.hub.report_action("unity", "MyGame@aaaa1111", "manage_scene", "save")
         self.hub.progress["unity-mygame"]["updated"] -= cc.PROGRESS_TTL + 1
         self.assertIsNone(self.hub.poll("unity-mygame", 0, 0)["progress"])
+
+
+class PreviewTests(unittest.TestCase):
+    """A request made in one window that changed another: the reply gets a picture of the other window."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        write_agents(root / "agents")
+        self.hub = cc.ChatHub(lambda message: None, root / "agents")
+        self.hub.initialized = True
+        self.shots = []
+
+        def capture(app, pin, path):
+            self.shots.append((app, pin))
+            Path(path).write_bytes(b"png")
+            return path
+        self.hub.capture, self.hub.images_dir = capture, root / "images"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def images(self, chat_id, count=1):
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            found = [i for i in self.hub.logs.get(chat_id, []) if i["kind"] == "image"]
+            if len(found) >= count:
+                return found
+            time.sleep(0.05)
+        return [i for i in self.hub.logs.get(chat_id, []) if i["kind"] == "image"]
+
+    def test_the_reply_shows_the_other_window_that_changed(self):
+        self.hub.post_user_message("blender", "props", "의자를 Unity로 보내줘", pin="props@9877")
+        self.hub.reply("blender-props", "보내는 중이에요")  # nothing changed elsewhere yet
+        self.hub.report_action("blender", "props@9877", "execute_code", "export")  # this window: the user sees it
+        self.hub.report_action("unity", "MyGame@aaaa1111", "ch_import_model", "")
+        self.hub.reply("blender-props", "Unity에 놓았어요")
+        [image] = self.images("blender-props")
+        self.assertEqual(self.shots, [("unity", "MyGame@aaaa1111")])
+        self.assertEqual((image["app"], image["window"], image["caption"]), ("unity", "MyGame", "MyGame (Unity) 지금 모습"))
+        self.assertTrue(Path(image["path"]).exists())
+        self.hub.reply("blender-props", "더 필요한 게 있으면 말해 주세요")  # nothing new since the last picture
+        time.sleep(0.3)
+        self.assertEqual(len(self.shots), 1)
+
+    def test_no_picture_without_a_capture_or_for_desktop_replies(self):
+        self.hub.post_user_message("blender", "props", "Unity 씬 저장해줘", pin="props@9877")
+        self.hub.report_action("unity", "MyGame@aaaa1111", "manage_scene", "save")
+        self.hub.reply("unity-mygame", "저장했어요", origin="desktop", request="Unity 씬 저장")  # the changed window itself
+        self.hub.capture = lambda app, pin, path: None  # the window closed meanwhile
+        self.hub.reply("blender-props", "저장했어요")
+        time.sleep(0.3)
+        self.assertEqual(self.images("blender-props"), [])
+        self.assertEqual(self.images("unity-mygame"), [])
+
+    def test_pictures_are_kept_with_the_history_and_old_files_go(self):
+        history = Path(self.tmp.name) / "history"
+        self.hub.use_history(history)
+        self.hub.post_user_message("unity", "MyGame", "Blender 의자를 빨갛게", pin="MyGame@aaaa1111")
+        self.hub.report_action("blender", "props@9877", "execute_code", "material")
+        with unittest.mock.patch.object(cc, "IMAGES_KEPT", 1):
+            for name in ("old-1.png", "old-2.png"):
+                (self.hub.images_dir / name).parent.mkdir(parents=True, exist_ok=True)
+                (self.hub.images_dir / name).write_bytes(b"x")
+                os.utime(self.hub.images_dir / name, (1, 1))
+            self.hub.reply("unity-mygame", "빨갛게 했어요")
+            [image] = self.images("unity-mygame")
+            time.sleep(0.2)
+        self.assertEqual(sorted(p.name for p in self.hub.images_dir.glob("*.png")), [Path(image["path"]).name])
+        restarted = cc.ChatHub(lambda message: None, Path(self.tmp.name) / "agents")
+        restarted.use_history(history)
+        self.assertEqual([i["kind"] for i in restarted.logs["unity-mygame"]], ["user", "reply", "image"])
 
 
 class HistoryTests(unittest.TestCase):

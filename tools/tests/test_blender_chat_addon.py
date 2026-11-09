@@ -242,6 +242,29 @@ class BlenderChatAddonTests(unittest.TestCase):
         self.assertIn("$parentId = 4321", script)
         self.assertNotIn("Remove-Item", script)  # the title goes in as base64, not as script text
 
+    def test_result_preview_of_another_window_shows_here(self):
+        addon = self.addon
+        self.assertTrue(wait_for(lambda: addon._status[0].startswith("담당"), addon))
+        png = Path(self.tmp.name) / "unity.png"
+        image = bpy.data.images.new("shot", 32, 24)
+        image.filepath_raw, image.file_format = str(png), "PNG"
+        image.save()
+        bpy.data.images.remove(image)
+        self.hub.capture, self.hub.images_dir = lambda app, pin, path: str(png), Path(self.tmp.name) / "images"
+        self.hub.post_user_message("blender", "props", "의자를 Unity로 보내줘", pin=addon.window_identity()[1])
+        root = Path(self.tmp.name)
+        ch.write_agent_files(ch.build_agent_files([ch.Instance(name="MyGame", hash="aaaa1111")], ch.ServerConfig(transport="stdio"),
+                                                  [ch.BlenderInstance(port=9876, filepath=str(root / "props.blend"))], None, "uv run"),
+                             root / "agents")
+        self.hub.acted["unity-mygame"] = time.time() + 1  # its subagent worked after the request
+        self.hub.reply("blender-props", "Unity에 놓았어요")
+        self.assertTrue(wait_for(lambda: any(e.get("kind") == "image" for e in addon._entries), addon))
+        entry = next(e for e in addon._entries if e.get("kind") == "image")
+        self.assertEqual(addon.entry_rows(entry, None)[0], [("MyGame (Unity) 지금 모습", "IMAGE_DATA")])
+        self.assertIs(addon.visible_entries(None)[0][-1][0], entry)
+        self.assertIsNotNone(addon.image_preview(entry["path"]))
+        self.assertIsNone(addon.image_preview(str(Path(self.tmp.name) / "gone.png")))
+
     def test_lines_fit_the_sidebar(self):
         """Korean is about twice as wide as Latin text; a fixed character count overflowed into "..."."""
         addon = self.addon

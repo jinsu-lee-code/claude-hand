@@ -52,7 +52,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from claude_hand import GENERATED_MARKER, refresh_agents, slug, supervisor_running  # noqa: E402
+from claude_hand import GENERATED_MARKER, capture_window, refresh_agents, slug, supervisor_running  # noqa: E402
 
 SERVER_NAME = "claude-hand-chat"
 SERVER_VERSION = "0.1.0"
@@ -87,7 +87,9 @@ INSTRUCTIONS = (
     "Claude Hand resumes this same conversation when it is restarted, but subagents started before a restart may be gone: "
     "if SendMessage to one fails, hand the window's request to its subagent anew."
 )
-HISTORY_KINDS = ("user", "reply")  # what a panel shows again after a restart; permission prompts do not outlive it
+HISTORY_KINDS = ("user", "reply", "image")  # what a panel shows again after a restart; permission prompts do not outlive it
+PREVIEW_SIZE = 640  # longest side of a result preview, in pixels
+IMAGES_KEPT = 60    # preview files kept on disk; older ones are deleted
 
 REPLY_TOOL = {
     "name": "reply",
@@ -201,6 +203,10 @@ class ChatHub:
         self.history_dir: Path | None = None  # where each chat's recent messages are kept across restarts
         self.progress: dict[str, dict] = {}  # chat_id -> what its subagent is doing now (shown as a bar in the panel)
         self.progress_rev: dict[str, int] = {}  # bumped on every change, so a waiting panel wakes up
+        self.acted: dict[str, float] = {}  # chat_id -> when its window's subagent last ran a Unity/Blender tool
+        self.previewed: dict[str, float] = {}  # chat_id -> when its replies last looked for other windows to show
+        self.capture = None  # callable(app, pin, path) -> path or None: a picture of what a window shows now
+        self.images_dir: Path | None = None  # where result previews are kept (None: no previews)
 
     def use_history(self, directory: Path) -> None:
         """Keep each chat's recent messages in `directory` and show the saved ones again, so a panel still has its
@@ -301,7 +307,50 @@ class ChatHub:
             self._append(chat_id, item)
             if self.progress.pop(chat_id, None) is not None:  # the answer is in: the bar goes away
                 self._bump_progress(chat_id)
+            others = self._changed_elsewhere(chat_id) if origin != "desktop" else []
+        if others:
+            threading.Thread(target=self._attach_previews, args=(chat_id, others), daemon=True).start()
         return True
+
+    def _changed_elsewhere(self, chat_id: str) -> list[str]:
+        """Other windows whose subagents worked since this chat's request (or its previous reply): the user asked
+        here and cannot see them, so the reply gets a picture of each. Called with the lock held."""
+        if self.capture is None or self.images_dir is None:
+            return []
+        asked = max((i["ts"] for i in self.logs.get(chat_id, []) if i.get("kind") == "user"), default=0.0)
+        since = max(asked, self.previewed.get(chat_id, 0.0))
+        self.previewed[chat_id] = time.time()
+        return sorted(other for other, when in self.acted.items() if other != chat_id and when > since)
+
+    def _attach_previews(self, chat_id: str, others: list[str]) -> None:
+        """Background thread: capture each window and add the picture to the chat (no Claude involved, no tokens)."""
+        agents = {a.name: a for a in load_agents(self.agents_dir)}
+        for other in others:
+            agent = agents.get(other)
+            if agent is None:
+                continue
+            path = self.images_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{re.sub(r'[^\w.-]', '_', other)}.png"
+            try:
+                self.images_dir.mkdir(parents=True, exist_ok=True)
+                captured = self.capture(agent.app, agent.pin, str(path))
+            except Exception as exc:  # a preview is a nicety
+                log("could not capture", other, exc)
+                captured = None
+            if not captured:
+                continue
+            with self.cond:
+                window = (self.contexts.get(other) or self.windows.get(other) or {}).get("window") or agent.pin.rpartition("@")[0]
+                self._append(chat_id, {"kind": "image", "path": Path(captured).as_posix(), "app": agent.app, "window": window,
+                                       "caption": f"{window} ({'Unity' if agent.app == 'unity' else 'Blender'}) 지금 모습"})
+        self._prune_images()
+
+    def _prune_images(self) -> None:
+        try:
+            files = sorted(self.images_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+            for old in files[IMAGES_KEPT:]:
+                old.unlink()
+        except OSError:
+            pass
 
     def _touch(self, chat_id: str, app: str, window: str, agent: str | None) -> None:
         entry = self.contexts.setdefault(chat_id, {"chat_id": chat_id})
@@ -430,6 +479,7 @@ class ChatHub:
         if agent is None:
             return None
         with self.cond:
+            self.acted[agent.name] = time.time()
             entry = self._progress_entry(agent.name, time.time())
             first = not entry.get("marked")
             entry.update(tool=tool[:80], detail=detail[:120], actions=entry["actions"] + 1, updated=time.time(), marked=True)
@@ -902,6 +952,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     mcp.hub.auto_sync = lambda agents_dir: refresh_agents(agents_dir=agents_dir)
     mcp.hub.use_history(home / "chat" / "history")
+    mcp.hub.capture = lambda app, pin, path: capture_window(app, pin, path, PREVIEW_SIZE)
+    mcp.hub.images_dir = home / "chat" / "images"
     if sys.platform == "win32" and minimize_after_start(home):
         # Not at start: Claude Code may still be showing its development-channel confirmation in that window.
         # The first tool call or permission request means the session is past it.

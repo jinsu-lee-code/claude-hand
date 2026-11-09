@@ -11,7 +11,7 @@ Install: `uv run tools/claude_hand.py blender-install-chat` (or Preferences > Ad
 bl_info = {
     "name": "Claude Hand Chat",
     "author": "claude-hand",
-    "version": (0, 4, 0),
+    "version": (0, 5, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar (N) > Claude Hand",
     "description": "Chat with this Blender window's claude-hand subagent",
@@ -35,6 +35,7 @@ import urllib.request
 from pathlib import Path
 
 import bpy
+import bpy.utils.previews
 
 POLL_WAIT_SECONDS = 20
 NO_REPLY_HINT_SECONDS = 60
@@ -51,7 +52,8 @@ PROGRESS_STALE = 300.0  # seconds without progress news after which "작업 중"
 PANEL_MARGIN_PX = 50.0  # category tabs, box and label padding at UI scale 1
 LABEL_HEADROOM = 1.2    # blf's width at the label size can come out a little narrower than the drawn label
 CHAR_PX = 6.0           # without blf: width of a narrow character at 11 px (wide ones such as Korean count twice)
-SHOWN_KINDS = ("user", "reply", "permission", "notice")
+SHOWN_KINDS = ("user", "reply", "permission", "notice", "image")
+IMAGE_LINES = 8         # what a result preview counts for when the panel decides how much history fits
 UNDO_KEPT = 20          # undo points kept for the newest requests
 UNDO_PROP = "claude_hand_undo"  # on every scene: "<this run>:<newest undo point set before this state>"
 
@@ -73,6 +75,7 @@ _mark_seq = [0]           # main thread only
 _undo_note = [""]         # main thread only: goes along with the next message after "되돌리기"
 _undo_run = f"{os.getpid()}-{int(time.time())}"  # undo points of another Blender run never match
 _native_input = [None]    # main thread only: the Windows input box (a PowerShell process) while it is open
+_previews = [None]        # main thread only: thumbnails of result previews (bpy.utils.previews), by file path
 
 
 # --------------------------------------------------------------------------- server access (any thread)
@@ -679,6 +682,24 @@ class CLAUDEHAND_OT_copy(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CLAUDEHAND_OT_open_image(bpy.types.Operator):
+    bl_idname = "claude_hand.chat_open_image"
+    bl_label = "크게 보기"
+    bl_description = "Open the result preview full size in the system's image viewer"
+
+    path: bpy.props.StringProperty()
+
+    def execute(self, context):
+        if not os.path.exists(self.path):
+            self.report({"WARNING"}, "그림 파일이 지워졌습니다")
+            return {"CANCELLED"}
+        if sys.platform == "win32":
+            os.startfile(self.path)
+        else:
+            subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", self.path])
+        return {"FINISHED"}
+
+
 class CLAUDEHAND_OT_native_input(bpy.types.Operator):
     bl_idname = "claude_hand.chat_native_input"
     bl_label = "한글 입력창"
@@ -745,6 +766,8 @@ class CLAUDEHAND_PT_chat(bpy.types.Panel):
             col = box.column(align=True)
             for text, icon in rows:
                 col.label(text=text, icon=icon)
+            if entry.get("kind") == "image":
+                draw_image(col, entry, width)
             if hidden:
                 row = col.row(align=True)
                 row.label(text=f"…{hidden}줄 더 있음")
@@ -799,6 +822,26 @@ def draw_progress(layout, width):
     col = layout.column(align=True)
     for i, line in enumerate(wrap(progress_view(progress, received_at, now), width)[:3]):
         col.label(text=line, icon="TIME" if i == 0 else "NONE")
+
+
+def image_preview(path):
+    """The thumbnail of a result preview file, loaded once; None when the file is gone."""
+    previews = _previews[0]
+    if previews is None or not path or not os.path.exists(path):
+        return None
+    return previews.get(path) or previews.load(path, path, "IMAGE")
+
+
+def draw_image(layout, entry, width):
+    """A picture of another window that a request made here changed (Unity's Scene view, say), attached by the chat
+    channel when the reply came. Thumbnails are square, so a wide picture shows letterboxed; 크게 보기 opens the file."""
+    preview = image_preview(entry.get("path", ""))
+    if preview is None:
+        layout.label(text="(그림 파일이 지워졌습니다)")
+        return
+    width_px, font_px = width or (WRAP_WIDTH * CHAR_PX, 11.0)
+    layout.template_icon(icon_value=preview.icon_id, scale=max(4.0, min(16.0, width_px / (20.0 * font_px / 11.0))))
+    layout.operator(CLAUDEHAND_OT_open_image.bl_idname, text="크게 보기", icon="ZOOM_IN").path = entry["path"]
 
 
 def panel_metrics(context):
@@ -879,6 +922,8 @@ def entry_rows(entry, width):
     if kind == "notice":  # from this panel itself, e.g. after 되돌리기
         lines = wrap(entry_text(entry), width)[:ENTRY_LINES]
         return [(line, "LOOP_BACK" if i == 0 else "NONE") for i, line in enumerate(lines)], 0
+    if kind == "image":  # the picture itself is drawn after these rows (draw_image)
+        return [(entry.get("caption") or "결과 미리보기", "IMAGE_DATA")], 0
     rows = []
     if kind == "reply" and entry.get("origin") == "desktop":
         rows.append(("데스크톱 앱에서", "WINDOW"))
@@ -903,7 +948,8 @@ def visible_entries(width):
         if full:
             continue
         rows, hidden = entry_rows(entry, width)
-        cost = len(rows) + (1 if hidden else 0) + (1 if entry.get("kind") == "permission" else 0)
+        cost = len(rows) + (1 if hidden else 0) + (1 if entry.get("kind") == "permission" else 0) + \
+            (IMAGE_LINES if entry.get("kind") == "image" else 0)
         if shown and (used + cost > PANEL_LINES or len(shown) >= VISIBLE_ENTRIES):
             full = True  # older entries stay folded, even short ones, so the history has no gaps
             continue
@@ -914,7 +960,7 @@ def visible_entries(width):
 
 
 CLASSES = (CLAUDEHAND_OT_send, CLAUDEHAND_OT_start, CLAUDEHAND_OT_permission, CLAUDEHAND_OT_copy, CLAUDEHAND_OT_undo,
-           CLAUDEHAND_OT_native_input, CLAUDEHAND_PT_chat)
+           CLAUDEHAND_OT_native_input, CLAUDEHAND_OT_open_image, CLAUDEHAND_PT_chat)
 
 
 def register():
@@ -928,6 +974,8 @@ def register():
     setattr(bpy.types.Scene, UNDO_PROP, bpy.props.StringProperty(options={"HIDDEN"}))
     if _forget_undo_points not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_forget_undo_points)
+    if _previews[0] is None:
+        _previews[0] = bpy.utils.previews.new()
     _stop.clear()
     if not bpy.app.timers.is_registered(tick):
         bpy.app.timers.register(tick, first_interval=0.5, persistent=True)
@@ -939,6 +987,9 @@ def register():
 def unregister():
     _stop.set()
     close_native_input()
+    if _previews[0] is not None:
+        bpy.utils.previews.remove(_previews[0])
+        _previews[0] = None
     if bpy.app.timers.is_registered(tick):
         bpy.app.timers.unregister(tick)
     if _forget_undo_points in bpy.app.handlers.load_post:

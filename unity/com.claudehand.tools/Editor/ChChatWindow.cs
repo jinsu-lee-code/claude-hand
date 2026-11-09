@@ -67,7 +67,11 @@ namespace ClaudeHand.Editor
             public string Behavior;
             public string Origin;
             public string Request;
+            public string ImagePath;  // "image": a result preview of another window, made by the chat channel
+            public string Caption;
         }
+
+        private readonly Dictionary<string, Texture2D> _images = new Dictionary<string, Texture2D>();  // by file; null = gone
 
         internal sealed class ServerInfo // filled from server.json by Json.NET
         {
@@ -97,6 +101,8 @@ namespace ClaudeHand.Editor
             _polling?.Cancel();
             EditorApplication.update -= RepaintWhileBusy;
             ChCheckpoint.Changed -= Repaint;
+            foreach (var texture in _images.Values.Where(t => t != null)) DestroyImmediate(texture);
+            _images.Clear();
         }
 
         // ------------------------------------------------------------------ server
@@ -258,6 +264,8 @@ namespace ClaudeHand.Editor
                     Preview = item.Value<string>("input_preview"),
                     Origin = item.Value<string>("origin"),
                     Request = item.Value<string>("request"),
+                    ImagePath = item.Value<string>("path"),
+                    Caption = item.Value<string>("caption"),
                 });
             }
             if (_entries.Count > KeptEntries) _entries.RemoveRange(0, _entries.Count - KeptEntries);
@@ -503,6 +511,9 @@ namespace ClaudeHand.Editor
                     case "notice":  // shown only here, not sent anywhere
                         EditorGUILayout.HelpBox(entry.Text, MessageType.Info);
                         break;
+                    case "image":
+                        DrawImage(entry);
+                        break;
                 }
                 GUILayout.Space(6);
             }
@@ -601,6 +612,55 @@ namespace ClaudeHand.Editor
             if (!string.IsNullOrEmpty(tool)) parts.Add($"{tool} {_progress.Value<string>("detail")}".Trim());
             if (actions > 0) parts.Add($"{actions}번째 동작");
             EditorGUILayout.LabelField(string.Join(" · ", parts), EditorStyles.wordWrappedMiniLabel);
+        }
+
+        /// <summary>
+        /// A picture of another window that a request made here changed (Blender's viewport, say), attached by the chat
+        /// channel when the reply came; clicking it opens the file full size.
+        /// </summary>
+        private void DrawImage(Entry entry)
+        {
+            EditorGUILayout.LabelField(entry.Caption ?? "결과 미리보기", EditorStyles.boldLabel);
+            var texture = LoadImage(entry.ImagePath);
+            if (texture == null)
+            {
+                EditorGUILayout.LabelField("(그림 파일이 지워졌습니다)", EditorStyles.miniLabel);
+                return;
+            }
+            float width = Mathf.Min(texture.width, position.width - 30);
+            float height = width * texture.height / texture.width;
+            if (height > 360)
+            {
+                width *= 360 / height;
+                height = 360;
+            }
+            var rect = GUILayoutUtility.GetRect(width, height, GUILayout.Width(width), GUILayout.Height(height));
+            GUI.DrawTexture(rect, texture, ScaleMode.ScaleToFit);
+            EditorGUIUtility.AddCursorRect(rect, MouseCursor.Zoom);
+            if (Event.current.type == EventType.MouseDown && rect.Contains(Event.current.mousePosition))
+            {
+                EditorUtility.OpenWithDefaultApp(entry.ImagePath);
+                Event.current.Use();
+            }
+            EditorGUILayout.LabelField("누르면 크게 봅니다", EditorStyles.miniLabel);
+        }
+
+        private Texture2D LoadImage(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return null;
+            if (_images.TryGetValue(path, out var cached)) return cached;
+            Texture2D texture = null;
+            if (File.Exists(path))
+            {
+                texture = new Texture2D(2, 2) { hideFlags = HideFlags.HideAndDontSave };
+                if (!texture.LoadImage(File.ReadAllBytes(path)))
+                {
+                    DestroyImmediate(texture);
+                    texture = null;
+                }
+            }
+            _images[path] = texture;
+            return texture;
         }
 
         /// <summary>A message, or its first ShownChars characters and a button that copies all of it.</summary>

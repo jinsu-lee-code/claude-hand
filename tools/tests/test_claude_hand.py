@@ -322,6 +322,29 @@ class GuardTests(unittest.TestCase):
               "print": lambda *_: None})
         self.assertEqual(namespace["label"], "의자를 '빨갛게'")  # the request text arrives as it was, quotes and all
 
+    def test_previews_go_through_claude_hands_own_ways_in(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "shot.png")
+
+            def fake_unity(entry, tool, params, timeout):
+                Path(params["path"]).write_bytes(b"png")
+                return {"success": True, "data": {"path": params["path"]}}
+            with unittest.mock.patch.dict(sys.modules, {"unity_bridge": unittest.mock.Mock(
+                    find_project=lambda hash_: {"hash": hash_} if hash_ == "aaaa1111" else None)}):
+                self.assertEqual(ch.capture_window("unity", self.PIN, path, unity_request=fake_unity), path)
+                self.assertIsNone(ch.capture_window("unity", "Other@ffff0000", path, unity_request=fake_unity))  # not open
+            sent = []
+
+            def fake_blender(port, command, timeout):
+                sent.append((port, command["params"]["code"]))
+                return {"status": "success", "result": {"result": json.dumps({"path": path, "width": 640, "height": 480})}}
+            self.assertEqual(ch.capture_window("blender", "props@9876", path, blender=fake_blender), path)
+            self.assertEqual(sent[0][0], 9876)
+            self.assertIn(f"path = area.spaces.active, {path!r}", sent[0][1])
+            no_view = lambda *a: {"status": "success", "result": {"result": '{"error": "no 3D viewport is open"}'}}
+            self.assertIsNone(ch.capture_window("blender", "props@9876", path + "x", blender=no_view))
+            self.assertIsNone(ch.capture_window("blender", "props@9876", path, blender=lambda *a: 1 / 0))  # Blender closed
+
     def test_action_summary(self):
         self.assertEqual(ch.action_summary({"action": "create", "name": "Cube", "position": [0, 0, 0]}), "create Cube")
         self.assertEqual(ch.action_summary({"code": "import bpy\n\nbpy.ops.mesh.primitive_uv_sphere_add()"}),

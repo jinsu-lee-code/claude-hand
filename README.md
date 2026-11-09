@@ -107,6 +107,7 @@ Blender 패널 ─┼─ 채널 ─ 감독 ┼─ blender-props
 - 메시지에는 지금 선택한 오브젝트와 씬 정보가 함께 붙습니다. 그래서 "이거 복제해줘"처럼 말해도 됩니다. 끄는 체크박스가 있습니다.
 - 다른 창이 필요한 일도 그 창에서 말하면 됩니다. 예를 들어 Unity 창에서 "Blender props.blend의 Rock 가져와"라고 하면, 감독이 Blender 담당과 Unity 담당을 함께 써서 처리하고 결과를 그 Unity 창에 알려줍니다.
 - Claude가 도구를 실행하려고 허락을 구하면 채팅창에 **허용/거부** 버튼이 뜹니다.
+- 한 창에서 시킨 일이 다른 창을 바꾸면(Blender 창에서 "Unity로 보내줘"), 답과 함께 바뀐 창의 **지금 모습**이 그림으로 붙습니다. Claude를 거치지 않고 채널이 직접 찍어서 토큰이 들지 않습니다.
 - 일이 끝나면 입력칸 위에 **되돌리기** 버튼이 뜹니다. 그 요청이 시작되기 직전으로 Unity Undo나 Blender 실행 취소 기록을 되돌립니다. "방금 거 취소해줘"라고 해도 됩니다.
 
 준비(세팅 스킬이 대신 해 줍니다):
@@ -159,7 +160,7 @@ uv run tools/claude_hand.py update     # 하위 세션·감독 스킬·채팅 �
 | `skills/orchestrator/` | 평소에 감독 세션이 따르는 규칙(스킬)입니다. `sync`가 `~/.claude/skills/claude-hand/`에 설치합니다. |
 | `tools/claude_hand.py` | 하위 세션 생성(`list`, `sync`), 안전장치(`guard`), 세팅 도우미(`doctor`, `update`, `mode`, `unity-install`, `unity-open`, `blender-open`, `chat-setup`, `blender-install-chat`, `chat-status`, `shortcut`, `remote-control`)가 들어 있습니다. |
 | `tools/chat_channel.py` | 채팅 채널 서버입니다. Claude Code가 실행하는 MCP 서버이고, Unity·Blender 채팅창과는 로컬 HTTP로 통신합니다. |
-| `unity/com.claudehand.tools/` | Unity 패키지입니다. `ch_*` 도구 7개와 채팅창(Window > Claude Hand > Chat)을 추가합니다. `ch_*` 도구는 이 패키지가 여는 자기 통로로 불립니다(MCP for Unity 버전에 상관없이 동작). |
+| `unity/com.claudehand.tools/` | Unity 패키지입니다. `ch_*` 도구 8개와 채팅창(Window > Claude Hand > Chat)을 추가합니다. `ch_*` 도구는 이 패키지가 여는 자기 통로로 불립니다(MCP for Unity 버전에 상관없이 동작). |
 | `tools/unity_bridge.py` | 하위 세션이 그 통로로 `ch_*` 도구를 부를 때 쓰는 MCP 서버입니다. `--list`로 통로를 연 Unity를 볼 수 있습니다. |
 | `blender/claude_hand_chat.py` | Blender 채팅 패널 애드온입니다. |
 | `start-supervisor.cmd` / `.sh` | 감독 세션을 엽니다. 바탕화면 아이콘과 채팅창 버튼이 이 파일을 실행합니다. 열 때마다 `preflight`가 하위 세션과 설정을 맞추고, 이미 켜져 있으면 알려 줍니다. |
@@ -176,6 +177,7 @@ uv run tools/claude_hand.py update     # 하위 세션·감독 스킬·채팅 �
 | `ch_import_model` | Blender가 내보낸 FBX(또는 OBJ, GLB)를 `Assets/ClaudeHand/Imports/` 아래로 가져와 씬에 배치합니다. |
 | `ch_apply_settings` | Interaction Mode를 **No Throttling**으로 바꿉니다. Unity가 뒤에 있어도 명령을 처리하게 하는 설정입니다. 보기(`show`), 적용(`apply`), 되돌리기(`revert`)를 할 수 있습니다. 메뉴 **Tools > Claude Hand**에도 있습니다. |
 | `ch_checkpoint` | 요청마다 되돌리기 지점을 둡니다. 하위 세션이 그 요청의 첫 동작을 하기 직전에 저절로 찍히고, 채팅창의 **되돌리기** 버튼이나 `action=undo`로 그 지점 이후의 변경을 Unity Undo로 되돌립니다. Undo에 남는 변경만 되돌아갑니다. |
+| `ch_capture` | 씬 뷰를 지금 모습 그대로 PNG로 저장합니다(기즈모 없이). 씬은 바꾸지 않습니다. 채팅창의 결과 미리보기에 씁니다. |
 
 명령줄에서도 부를 수 있습니다. 예: `uv run tools/claude_hand.py unity-call MyGame ch_editor_status`
 
