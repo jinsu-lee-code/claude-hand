@@ -138,7 +138,7 @@ namespace ClaudeHand.Editor
 
             if (PrefabUtility.IsOutermostPrefabInstanceRoot(go))
             {
-                node["prefab"] = PrefabUtility.GetPrefabAssetPathOfNearestPrefabInstanceRoot(go);
+                node["prefab"] = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(go);
             }
 
             if (t.childCount > 0)

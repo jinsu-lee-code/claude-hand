@@ -91,6 +91,16 @@ class ConfigDetectionTests(unittest.TestCase):
         cfg = self.detect({"projects": {"C:/work": {"mcpServers": {"my-unity": {"command": "uvx", "args": ["mcp-for-unity"]}}}}})
         self.assertEqual((cfg.transport, cfg.key), ("stdio", "my-unity"))
 
+    def test_unity_ai_assistant_relay_is_skipped(self):
+        """Unity's own AI Assistant registers itself as "unity-mcp"; the MCP for Unity entry must win."""
+        cfg = self.detect({
+            "mcpServers": {"unity-mcp": {"command": "C:\\Users\\me\\.unity/relay\\relay_win.exe", "args": ["--mcp"]}},
+            "projects": {"C:/work/MyGame": {"mcpServers": {"UnityMCP": {
+                "type": "stdio", "command": "uvx", "args": ["--from", "mcpforunityserver==10.3.0", "mcp-for-unity"]}}}}})
+        self.assertEqual((cfg.transport, cfg.key, cfg.command), ("stdio", "UnityMCP", "uvx"))
+        only_relay = self.detect({"mcpServers": {"unity-mcp": {"command": "/Users/me/.unity/relay/relay_mac", "args": ["--mcp"]}}})
+        self.assertEqual(only_relay.origin, "default")
+
     def test_unrelated_servers_are_ignored(self):
         cfg = self.detect({"mcpServers": {"github": {"command": "npx", "args": ["github-mcp"]}}})
         self.assertEqual(cfg.origin, "default")
@@ -495,7 +505,8 @@ class SetupHelperTests(unittest.TestCase):
                  unittest.mock.patch.object(ch, "candidate_config_files", lambda cwd=None: []), \
                  unittest.mock.patch.object(ch, "discover_blender", lambda ports, request=None: []), \
                  unittest.mock.patch.object(ch, "find_blender_executables", lambda **kw: []), \
-                 unittest.mock.patch.object(ch, "chat_server_registered", lambda **kw: False):
+                 unittest.mock.patch.object(ch, "chat_server_registered", lambda **kw: False), \
+                 unittest.mock.patch.object(ch, "plan_chat_config", lambda root, runner="": {root / ".mcp.json": {}}):
                 checks = ch.doctor_checks([project], [9876], version=lambda *cmd: versions[cmd[0]])
         by_item = {c.item: c for c in checks}
         self.assertTrue(by_item["Claude Code CLI (claude 명령)"].ok)

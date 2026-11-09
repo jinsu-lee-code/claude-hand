@@ -249,6 +249,17 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(json.loads((self.server_file.parent / "status.json").read_text(encoding="utf-8"))["mode"], "stopped")
         self.proc.stdin = open(os.devnull, "w")  # tearDown closes it again
 
+    def test_second_start_leaves_a_live_supervisor_alone(self):
+        root = Path(self.tmp.name)
+        env = {**os.environ, "CLAUDE_HAND_HOME": str(root / "home"), "CLAUDE_HAND_AGENTS_DIR": str(root / "agents"),
+               "CLAUDE_HAND_CHAT_PORT": "18765", "CLAUDE_HAND_SUPERVISOR": "1"}
+        proc = subprocess.run([sys.executable, str(TOOL)], input="", capture_output=True, text=True, encoding="utf-8",
+                              env=env, timeout=30)
+        self.assertIn("passive", proc.stderr)
+        self.assertEqual(json.loads(self.server_file.read_text(encoding="utf-8")), self.server)
+        self.assertEqual(json.loads((self.server_file.parent / "status.json").read_text(encoding="utf-8"))["mode"], "serving")
+        self.assertTrue(self.http("GET", "/v1/status")["ok"])
+
 
 
 class ModeTests(unittest.TestCase):
@@ -274,6 +285,17 @@ class ModeTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, result)
         self.assertTrue(result["ok"] and result["port_ok"] and result["home_ok"])
         self.assertFalse(served)
+
+    def test_busy_port_is_not_shared(self):
+        hub = cc.ChatHub(lambda message: None, Path("."))
+        first = cc.start_http(hub, "a", 18795)
+        second = cc.start_http(hub, "b", 18795)
+        try:
+            self.assertNotEqual(first.server_address[1], second.server_address[1])
+        finally:
+            for httpd in (first, second):
+                httpd.shutdown()
+                httpd.server_close()
 
     def test_is_supervisor(self):
         self.assertTrue(cc.is_supervisor({"CLAUDE_HAND_SUPERVISOR": "1"}))
@@ -338,6 +360,23 @@ class AncestorTests(unittest.TestCase):
         serving, reason = cc.supervisor_decision(env={}, table_fn=broken)
         self.assertFalse(serving)
         self.assertIn("no ps", reason)
+        self.assertTrue(cc.supervisor_decision(env={"CLAUDE_HAND_SUPERVISOR": "1"}, table_fn=broken)[0])
+
+    def test_status_check_inside_the_supervisor_stays_passive(self):
+        """chat-status, doctor and update run `claude mcp get`, which starts this server once and passes the
+        supervisor's CLAUDE_HAND_SUPERVISOR=1 on to it; that copy must not take the panels over."""
+        table = {
+            20: (19, "python tools/chat_channel.py"),
+            19: (18, "uv run -q --no-project tools/chat_channel.py"),
+            18: (17, '"C:\\Users\\me\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   '
+                     "mcp get claude-hand-chat"),
+            17: (8, 'C:\\Windows\\system32\\cmd.exe /c "C:\\Users\\me\\AppData\\Roaming\\npm\\claude.CMD" mcp get claude-hand-chat'),
+            **self.TABLE,
+        }
+        supervisor_env = {"CLAUDE_HAND_SUPERVISOR": "1"}
+        self.assertEqual(cc.supervisor_decision(env=supervisor_env, table_fn=lambda: table, pid=20),
+                         (False, cc.HEALTH_CHECK_REASON))
+        self.assertTrue(cc.supervisor_decision(env=supervisor_env, table_fn=lambda: table, pid=10)[0])
 
 
 if __name__ == "__main__":

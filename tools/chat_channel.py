@@ -24,7 +24,10 @@ Only the supervisor session serves the panels. It counts as the supervisor when
   - a parent process is Claude Code started with this server as a channel
     (`--dangerously-load-development-channels server:claude-hand-chat`), however it was launched.
 Any other Claude Code session opened in this folder also starts this server (it is in .mcp.json)
-but stays passive, so a session without the channel cannot swallow panel messages. Every start
+but stays passive, so a session without the channel cannot swallow panel messages. So does a copy
+started by `claude mcp get/list` to show its status (chat-status, doctor and update run that, and
+inside the supervisor it inherits CLAUDE_HAND_SUPERVISOR=1), and so does any start while another
+supervisor still answers: replacing a live server.json would cut the panels off. Every start
 writes ~/.claude-hand/chat/status.json (serving / passive and why) so panels and
 `claude_hand.py chat-status` can say what is wrong.
 
@@ -49,7 +52,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from claude_hand import GENERATED_MARKER, refresh_agents, slug  # noqa: E402
+from claude_hand import GENERATED_MARKER, refresh_agents, slug, supervisor_running  # noqa: E402
 
 SERVER_NAME = "claude-hand-chat"
 SERVER_VERSION = "0.1.0"
@@ -419,12 +422,18 @@ class PanelHandler(BaseHTTPRequestHandler):
             self._json(404, {"ok": False, "error": "not found"})
 
 
+class PanelServer(ThreadingHTTPServer):
+    # On Windows SO_REUSEADDR lets a second process bind a port that is already listening, so two
+    # channel servers could share 8765 and answer each other's panels. Take the next free port instead.
+    allow_reuse_address = os.name != "nt"
+
+
 def start_http(hub: ChatHub, token: str, port: int | None = None, attempts: int = PORT_ATTEMPTS) -> ThreadingHTTPServer:
     first = port or DEFAULT_PORT
     last_error = None
     for candidate in range(first, first + attempts):
         try:
-            httpd = ThreadingHTTPServer(("127.0.0.1", candidate), PanelHandler)
+            httpd = PanelServer(("127.0.0.1", candidate), PanelHandler)
         except OSError as exc:
             last_error = exc
             continue
@@ -437,7 +446,7 @@ def start_http(hub: ChatHub, token: str, port: int | None = None, attempts: int 
 
 
 def write_server_file(home: Path, port: int, token: str) -> Path:
-    """Where the panels find this process. Newest supervisor wins; run one supervisor at a time."""
+    """Where the panels find this process. main() only gets here when no other supervisor answers."""
     chat_dir = home / "chat"
     chat_dir.mkdir(parents=True, exist_ok=True)
     target = chat_dir / "server.json"
@@ -462,6 +471,8 @@ def is_supervisor(env=os.environ) -> bool:
 
 
 CHANNEL_FLAG_RE = re.compile(r"--(dangerously-load-development-channels|channels)\b")
+HEALTH_CHECK_RE = re.compile(r"\smcp\s+(get|list)\b")  # `claude mcp get/list` starts each server once to show its status
+HEALTH_CHECK_REASON = "claude mcp get/list가 상태 확인용으로 띄운 실행"
 
 
 def process_table(run=subprocess.run, platform=sys.platform) -> dict[int, tuple[int, str]]:
@@ -501,9 +512,8 @@ def is_claude_code(cmdline: str) -> bool:
     return exe.removesuffix(".exe") in ("node", "bun") and "claude" in cmdline.lower()  # npm-installed CLI
 
 
-def channel_ancestor(table: dict[int, tuple[int, str]], pid: int, max_depth: int = 12) -> str | None:
-    """Command line of the Claude Code process that started us, if it loads this server as a channel.
-    Only the nearest Claude Code ancestor counts; uv, shells and other wrappers in between are skipped."""
+def claude_ancestor(table: dict[int, tuple[int, str]], pid: int, max_depth: int = 12) -> str | None:
+    """Command line of the nearest Claude Code process above us; uv, shells and other wrappers are skipped."""
     seen = set()
     current = table.get(pid, (0, ""))[0]
     for _ in range(max_depth):
@@ -512,20 +522,33 @@ def channel_ancestor(table: dict[int, tuple[int, str]], pid: int, max_depth: int
         seen.add(current)
         parent, cmdline = table[current]
         if is_claude_code(cmdline):
-            has_channel = f"server:{SERVER_NAME}" in cmdline and CHANNEL_FLAG_RE.search(cmdline)
-            return cmdline if has_channel else None
+            return cmdline
         current = parent
     return None
 
 
+def channel_ancestor(table: dict[int, tuple[int, str]], pid: int, max_depth: int = 12) -> str | None:
+    """Command line of the Claude Code process that started us, if it loads this server as a channel.
+    Only the nearest Claude Code ancestor counts."""
+    cmdline = claude_ancestor(table, pid, max_depth)
+    if cmdline and f"server:{SERVER_NAME}" in cmdline and CHANNEL_FLAG_RE.search(cmdline):
+        return cmdline
+    return None
+
+
 def supervisor_decision(env=os.environ, table_fn=process_table, pid: int | None = None) -> tuple[bool, str]:
+    try:
+        claude = claude_ancestor(table_fn(), pid or os.getpid())
+    except Exception as exc:  # never let the check stop the server from starting
+        if is_supervisor(env):
+            return True, "CLAUDE_HAND_SUPERVISOR=1 (start-supervisor)"
+        return False, f"채널 플래그 없이 연 세션으로 보임 (부모 프로세스 확인 실패: {exc})"
+    if claude and HEALTH_CHECK_RE.search(claude):
+        # Run inside the supervisor, `claude mcp get` passes CLAUDE_HAND_SUPERVISOR=1 on to this copy too.
+        return False, HEALTH_CHECK_REASON
     if is_supervisor(env):
         return True, "CLAUDE_HAND_SUPERVISOR=1 (start-supervisor)"
-    try:
-        found = channel_ancestor(table_fn(), pid or os.getpid())
-    except Exception as exc:  # never let the check stop the server from starting
-        return False, f"채널 플래그 없이 연 세션으로 보임 (부모 프로세스 확인 실패: {exc})"
-    if found:
+    if claude and f"server:{SERVER_NAME}" in claude and CHANNEL_FLAG_RE.search(claude):
         return True, "Claude Code가 이 서버를 채널로 불러옴"
     return False, "채널 플래그 없이 연 Claude Code 세션 (감독 세션은 start-supervisor.cmd로 여세요)"
 
@@ -586,13 +609,17 @@ def main(argv: list[str] | None = None) -> int:
     mcp = StdioMcp(sys.stdin, sys.stdout, default_agents_dir())
     home = claude_hand_home()
     serving, reason = supervisor_decision()
+    live = supervisor_running(home)
+    if serving and live:
+        serving, reason = False, "다른 감독 세션이 이미 채팅창을 받고 있음"
     if not serving:
         # Same tools, no panels: messages only reach the session that has the channel.
         log("passive:", reason)
-        try:
-            write_status(home, "passive", reason)
-        except OSError:
-            pass
+        if reason != HEALTH_CHECK_REASON and not live:  # a status check or a second session keeps the real status
+            try:
+                write_status(home, "passive", reason)
+            except OSError:
+                pass
         mcp.serve()
         return 0
     mcp.hub.auto_sync = lambda agents_dir: refresh_agents(agents_dir=agents_dir)

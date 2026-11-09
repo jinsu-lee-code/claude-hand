@@ -313,8 +313,15 @@ def _server_maps(data: dict) -> list[dict]:
     return maps
 
 
+def is_unity_ai_relay(entry: dict) -> bool:
+    """Unity's own AI Assistant server (~/.unity/relay/relay_<os> --mcp, often registered as "unity-mcp").
+    It is not MCP for Unity: it takes no --default-instance and has none of MCP for Unity's tools."""
+    command = str(entry.get("command", "")).replace("\\", "/").lower()
+    return "/.unity/relay/" in command or command.rsplit("/", 1)[-1].startswith("relay_")
+
+
 def looks_like_unity_server(key: str, entry: dict) -> bool:
-    if not isinstance(entry, dict):
+    if not isinstance(entry, dict) or is_unity_ai_relay(entry):
         return False
     blob = " ".join([key, str(entry.get("command", "")), " ".join(map(str, entry.get("args", []) or [])), str(entry.get("url", ""))]).lower()
     return "unity" in key.lower() or any(h in blob for h in UNITY_PACKAGE_HINTS)
