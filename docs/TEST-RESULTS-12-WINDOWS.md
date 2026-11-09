@@ -78,3 +78,19 @@
 8. **doctor의 git 고치기 안내**: `winget install --id Git.Git -e`인데 이 PC는 winget이 없었음(App Installer 1.0.30251.0). git-scm.com 안내를 함께 둘 것.
 9. **테스트 경고**: `test_chat_channel.py:287`에서 `encoding` 없이 한글 출력을 읽어 `UnicodeDecodeError: 'cp949' codec can't decode byte 0xed`(테스트는 통과).
 10. **Unity 6.3 경고**: `ChRefs.cs(109,22) warning CS0618: 'EditorUtility.InstanceIDToObject(int)' is obsolete`.
+
+## 후속 (남은 과제 처리)
+
+| 과제 | 처리 |
+|---|---|
+| 1. ch_* 도구 안 보임 | Claude Hand Tools가 자기 통로를 엶(`ChBridge.cs` + `tools/unity_bridge.py`, 하위 세션의 `<서버키>_ch` 서버). MCP for Unity 버전과 상관없음. DESIGN 결정 6. 확인: TEST-PLAN 1단계 3·4, 3단계 4 |
+| 2. 감독이 직접 조작 | `chat-setup`·`preflight`가 사용자 설정의 MCP for Unity·Unity AI Assistant relay·MCP for Blender 도구를 claude-hand 폴더에서 막음(`permissions.deny`). 감독 스킬에도 금지 문구. DESIGN 결정 7 |
+| 3. 첫 설정 창이 HTTP로 등록 | `list`·`sync`가 통로 등록 파일로도 Unity를 찾음. `doctor`가 두 경로 결과가 다르면 알림. 세팅 스킬·README가 Stdio를 권함 |
+| 4. 데스크톱 작업이 채팅창에 안 남음 | `reply`의 `origin: "desktop"`, `request`. 채팅창에 "데스크톱 앱에서"로 표시. TEST-PLAN 13단계 E |
+| 5. Remote Control 가짜 경고 | `https://api.anthropic.com`은 문제로 보지 않음 |
+| 6. 로그인 꼬임 안내 | 첫 실행 안내와 세팅 스킬에 `/status` → `/login` |
+| 7. HTTP 서버가 남음 | 세팅 스킬에 안내(그대로 둬도 지장 없음) |
+| 8. git 안내 | winget이 없을 때 git-scm.com(uv·Node.js도 각 공식 페이지) |
+| 9. 테스트 cp949 경고 | `encoding="utf-8"` |
+| 10. Unity 6.3 경고 | `ChCompat`(DESIGN 결정 5) |
+

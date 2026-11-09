@@ -92,6 +92,7 @@ MCP for Unity 기본 도구(씬·오브젝트·스크립트)는 MCP for Unity를
 
 - `ch_scene_snapshot`의 ref는 그 스냅샷에서만 유효하다(`@<snapshot>:e<n>`). 예전 ref나 맨 `@e5`는 거부한다.
 - 오브젝트를 찾을 때는 instance ID를 먼저 쓰고, 없으면 `GlobalObjectId`로 찾는다. 둘 다 실패하면 `STALE_REF`를 돌려준다.
+- instance ID는 `ChCompat`을 거친다. Unity 6.3은 `GetInstanceID`·`EditorUtility.InstanceIDToObject`에 사용 중단 경고(CS0618)를 내고, Unity 7 참조 소스는 이를 오류로 바꾸고 `GetEntityId`·`EntityIdToObject`를 쓰게 한다. 그래서 `UNITY_7000_0_OR_NEWER`에서는 EntityId를, 그 아래에서는 instance ID를(경고만 끄고) 쓴다. 스냅샷 파일에는 문자열 `object_id`로 저장해서 둘 다 담는다(Windows 결과 과제 10).
 - 스냅샷은 `Library/ClaudeHand/snapshots/`에 최근 20개를 보관한다. 도메인 리로드가 일어나도 남는다.
 - 노드에는 `path`와 `instance_id`도 같이 넣는다. MCP for Unity 기본 도구에 그대로 넘길 수 있다.
 

@@ -1051,14 +1051,16 @@ def doctor_checks(projects: list[Path], blender_ports: list[int], version=tool_v
     add("기본 도구", "Claude Code CLI (claude 명령)", claude is not None, claude or "없음",
         "" if claude else ("winget install Anthropic.ClaudeCode" if sys.platform == "win32" else "curl -fsSL https://claude.ai/install.sh | bash"))
     uv = versions["uv"]
-    add("기본 도구", "uv", uv is not None, uv or "없음", "" if uv else "winget install --id astral-sh.uv -e")
+    add("기본 도구", "uv", uv is not None, uv or "없음", "" if uv else
+        "winget install --id astral-sh.uv -e  (winget이 없으면 https://docs.astral.sh/uv/getting-started/installation/ 안내대로)")
     git = versions["git"]
     add("기본 도구", "git (Unity가 MCP for Unity를 받을 때 필요)", git is not None, git or "없음",
-        "" if git else "winget install --id Git.Git -e")
+        "" if git else ("winget install --id Git.Git -e  (winget이 없으면 https://git-scm.com/download/win 에서 받아 설치)"
+                        if sys.platform == "win32" else "https://git-scm.com/downloads 에서 설치"))
     node = versions["node"]
     node_ok = (node_major(node) or 0) >= 18
     add("기본 도구", "Node.js 18 이상 (agent-desktop용)", node_ok, node or "없음",
-        "" if node_ok else "winget install --id OpenJS.NodeJS.LTS -e")
+        "" if node_ok else "winget install --id OpenJS.NodeJS.LTS -e  (winget이 없으면 https://nodejs.org 에서 LTS 설치)")
 
     agent_desktop = versions["agent-desktop"]
     add("agent-desktop", "agent-desktop CLI", agent_desktop is not None, agent_desktop or "없음",

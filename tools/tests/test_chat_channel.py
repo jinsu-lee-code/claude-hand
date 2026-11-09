@@ -400,7 +400,8 @@ class ModeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env = {**os.environ, "CLAUDE_HAND_HOME": str(Path(tmp) / "home"), "CLAUDE_HAND_AGENTS_DIR": str(Path(tmp) / "a")}
             env.pop("CLAUDE_HAND_SUPERVISOR", None)
-            subprocess.run([sys.executable, str(TOOL)], input="", capture_output=True, text=True, env=env, timeout=30)
+            subprocess.run([sys.executable, str(TOOL)], input="", capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", env=env, timeout=30)
             status = json.loads((Path(tmp) / "home" / "chat" / "status.json").read_text(encoding="utf-8"))
         self.assertEqual(status["mode"], "passive")
         self.assertIn("start-supervisor", status["reason"])

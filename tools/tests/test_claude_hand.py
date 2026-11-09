@@ -512,7 +512,7 @@ class SetupHelperTests(unittest.TestCase):
         by_item = {c.item: c for c in checks}
         self.assertTrue(by_item["Claude Code CLI (claude 명령)"].ok)
         self.assertFalse(by_item["git (Unity가 MCP for Unity를 받을 때 필요)"].ok)
-        self.assertIn("winget install", by_item["git (Unity가 MCP for Unity를 받을 때 필요)"].fix)
+        self.assertIn("git-scm.com", by_item["git (Unity가 MCP for Unity를 받을 때 필요)"].fix)  # winget may be missing
         self.assertFalse(by_item["Node.js 18 이상 (agent-desktop용)"].ok)
         self.assertEqual(by_item["agent-desktop CLI"].fix, "npm install -g agent-desktop")
         self.assertIn("mcp-for-blender setup", by_item["MCP for Blender 애드온"].fix)
