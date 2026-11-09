@@ -44,3 +44,15 @@ Unity 프로젝트마다 `unity-<프로젝트>`, Blender 창마다 `blender-<파
 - Unity 연결 오류나 "No Unity instances": 그 Unity 창이 열려 있는지, Window > MCP for Unity가 Connected인지 사용자에게 확인을 부탁한다.
 - Blender 연결 오류: 그 Blender 창이 열려 있는지, MCP for Blender 서버가 켜져 있는지, 포트가 정의 파일과 같은지 확인을 부탁한다.
 - 하위 세션이 다른 대상을 건드리려다 안전장치에 막혔다면, 그 일을 맞는 담당에게 다시 맡긴다.
+
+## Unity나 Blender가 대화상자 때문에 멈췄을 때 (agent-desktop)
+
+증상: 명령이 계속 시간 초과되거나, `ch_editor_status`조차 답이 없다. Unity는 "씬을 저장할까요?", "API 업데이트", 가져오기 확인 같은 대화상자가 뜨면 그 자리에서 멈춘다.
+
+agent-desktop이 설치돼 있으면 다음 순서로 한다(`agent-desktop version`으로 확인).
+1. `agent-desktop list-windows`로 그 앱의 창 제목을 본다. 대화상자는 보통 별도 창으로 보인다. 창이 최소화돼 있으면 `restore`부터 한다.
+2. `agent-desktop snapshot --app <exe> -i`로 대화상자의 글과 버튼을 읽는다. 대화상자는 OS 기본 창이라 대개 읽힌다.
+3. **내용과 버튼을 사용자에게 그대로 보여주고, 무엇을 누를지 묻는다.** 저장·삭제·덮어쓰기에 관한 선택은 절대 혼자 정하지 않는다.
+4. 사용자가 고른 버튼만 `click <ref>`로 누르고, 다시 snapshot이나 `ch_editor_status`로 풀렸는지 확인한다.
+
+agent-desktop이 없거나 읽히지 않으면 사용자에게 그 창을 직접 확인해 달라고 한다. 처음 세팅 방법은 claude-hand 저장소의 `claude-hand-setup` 스킬을 따른다.

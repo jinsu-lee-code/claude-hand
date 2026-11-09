@@ -95,18 +95,13 @@ MCP for Unity는 테스트를 실행할 때 Unity 창을 잠깐 앞으로 끌어
 
 ### 어떤 Blender MCP를 쓰는가
 
-| | MCP for Blender (ahujasid, GitHub판) | Blender Lab 공식 서버 |
-|---|---|---|
-| 구조 | 애드온(소켓 서버) + `mcp-for-blender` MCP 서버, TCP | 애드온 + 별도 MCP 서버, TCP (2차 자료 기준) |
-| 포트 | **씬 속성**이라 .blend마다 저장된다. N 패널에서 바꾼다. 서버는 `--port` 또는 `BLENDER_PORT`로 정한다. README에 창 여러 개 예시가 있다 | 애드온 **환경설정**(Host/Port, 기본 localhost:9876, Auto Start) |
-| 여러 창 동시 연결 | 공식 문서로 지원한다. 소스에서 확인했다 | 확인하지 못했다. 환경설정이 공유라서 창마다 따로 바꿔야 할 가능성이 크다 |
-| Unity 연동 | MCP for Unity의 `blender_bridge`가 이 애드온 소켓에 직접 붙는다 | 없다 |
-| 요구 사항 | Blender 3.x 이상 | Blender 5.1 이상, 실험 기능 |
+**MCP for Blender (ahujasid/blender-mcp, GitHub판)만 쓴다.**
+- 포트가 **씬 속성**(`blendermcp_port`)이라 .blend마다 저장된다.
+- 서버는 `--port` 또는 `BLENDER_PORT`로 붙을 Blender를 정한다. 공식 README에 창 여러 개를 동시에 쓰는 예시가 있다.
+- MCP for Unity의 `blender_bridge`도 이 애드온 소켓에 붙는다.
+- Blender 3.0 이상에서 돈다.
 
-이 시제품은 **GitHub판만 연결한다.**
-- `sync`가 설정에서 다른 Blender MCP를 발견하면 경고만 하고 기본값 `uvx mcp-for-blender`를 쓴다.
-- 포트를 확인할 때 공식 애드온처럼 `ping`을 모르는 상대는 건너뛴다.
-- 공식 서버 소스(projects.blender.org)는 이 개발 환경의 네트워크 정책에서 막혀 있어 읽지 못했다.
+`sync`가 설정에서 다른 Blender MCP를 발견하면 경고만 하고 기본값 `uvx mcp-for-blender`를 쓴다. 포트를 확인할 때 `ping`을 모르는 상대는 건너뛴다.
 
 ### 구조
 
@@ -126,6 +121,43 @@ blender-<파일> (서브에이전트) ─ 인라인 stdio MCP 서버 (mcp-for-bl
   - manifest 형식은 `claude-hand/blend@1`과 `claude-hand/model@1`이다.
 - **MCP for Unity의 `blender_bridge`와의 관계:** Blender가 하나뿐이면 그 도구로 Unity에서 바로 가져와도 된다. 단 기본으로 꺼진 `asset_gen` 그룹이고, Blender 주소를 Unity 설정창에 하나만 둘 수 있다. 그래서 여러 창 구조에서는 교환 폴더 방식을 쓴다.
 
+## 처음 세팅 (claude-hand-setup 스킬)
+
+처음 쓰는 사람이 Claude Code에 "세팅해줘"라고만 하면 되게 하는 것이 목표다. 스킬은 저장소의 `.claude/skills/`에 있어서, 저장소 폴더에서 Claude Code를 열면 바로 쓸 수 있다.
+
+### 순서와 허락
+
+1. `claude_hand.py doctor`로 진단한다. 기본 도구, agent-desktop, Blender, Unity, claude-hand 항목마다 상태와 고치는 명령이 나온다.
+2. 빠진 항목만 계획으로 보여주고 `AskUserQuestion`으로 여러 개를 고르게 한다. 한 번의 허락으로 진행하고, Claude Code 자체의 도구 권한 요청이 그 위에 한 겹 더 있다.
+   다음 경우에만 따로 다시 묻는다.
+   - 마우스와 키보드를 실제로 움직이는 화면 조작
+   - 대화상자의 선택
+   - 덮어쓰기
+3. 고른 단계만 진행하고, 단계마다 결과를 확인한다.
+
+### 무엇으로 하나: 명령어 → 파일 → MCP → 화면 조작
+
+| 할 일 | 방법 | 화면 조작이 필요한 경우 |
+|---|---|---|
+| uv, git, Node.js | `winget install` | 없음 (UAC는 사용자가) |
+| agent-desktop | `npm install -g agent-desktop` | 없음. Windows는 따로 권한을 줄 필요가 없다 |
+| MCP for Blender 애드온 설치·활성화, Claude 설정 | `uvx mcp-for-blender setup --dry-run` → `--yes`. 애드온을 복사하고 Blender를 headless로 실행해 켠다 | 없음 |
+| Blender 창마다 포트 | `blender-open <파일> --port N`: `--python-expr`로 씬 포트를 바꾼 뒤 이벤트 루프가 시작돼서, 애드온 자동 시작이 새 포트를 쓴다 | 이미 열린 창을 닫을 수 없을 때만 N 패널 조작 |
+| Unity 패키지 (MCP for Unity, Claude Hand Tools) | `unity-install`: `Packages/manifest.json`을 고친다(백업 남김) | Unity가 열려 있으면 창이 앞에 와야 패키지를 받는다(사용자 클릭 또는 `focus-window`), 대화상자 |
+| Claude Code에 MCP for Unity 등록 | `claude mcp add --scope user --transport http unityMCP http://localhost:8080/mcp` (MCP for Unity 기본값 HTTP에 맞춤) | 없음 (재시작은 사용자가) |
+| Unity Interaction Mode | MCP로 `ch_apply_settings(apply)`. EditorPrefs `InteractionMode=1`, `ApplicationIdleTime=0`(UnityCsReference의 Preferences 코드와 같은 키)로 바꾸고 internal `EditorApplication.UpdateInteractionModeSettings`를 리플렉션으로 부른다. 메뉴 Tools > Claude Hand에도 있다 | MCP가 안 될 때 메뉴 클릭 |
+| 하위 세션 | `sync` | 없음 |
+
+### agent-desktop의 역할과 한계
+
+- **할 수 있는 것:** OS 접근성 트리(Windows UI Automation)로 창과 버튼을 읽고 누른다. 기본은 백그라운드(headless)라 포커스를 뺏지 않는다.
+  - 처음 세팅의 대화상자, 이미 열린 창의 설정 변경
+  - 평소에는 Unity·Blender를 멈추게 한 대화상자 처리. 감독 스킬에 순서가 있고, 무엇을 누를지는 항상 사용자에게 묻는다.
+- **할 수 없는 것**
+  - **최소화된 창.** agent-desktop의 Windows 문서에 따르면 최소화된 창의 요소는 모두 offscreen이라 조작이 실패한다. `restore`로 먼저 복원해야 한다.
+  - 접근성 정보가 없는 화면. Unity·Blender 내부 패널은 직접 그려서 거의 읽히지 않는다. 이때는 허락을 받고 `--headed`로 화면을 캡처한 뒤 좌표로 클릭한다. 실제 마우스와 키보드를 쓴다.
+- 그래서 처음 목표인 "최소화 상태에서도 조작"은 agent-desktop이 아니라 MCP 경로(Unity: MCP for Unity + No Throttling, Blender: 애드온 타이머)가 맡는다. 실측으로 확인한다(가정 6, 8).
+
 ## 아직 검증하지 않은 가정 (PC에서 확인 필요)
 
 | # | 가정 | 틀렸을 때 |
@@ -140,10 +172,13 @@ blender-<파일> (서브에이전트) ─ 인라인 stdio MCP 서버 (mcp-for-bl
 | 8 | 최소화된 Blender에서도 애드온 타이머(`bpy.app.timers`)가 명령을 처리한다 | 실측 후 대응한다 |
 | 9 | `execute_code` 안에서 `bpy.ops.export_scene.fbx`가 컨텍스트 오류 없이 돈다. 애드온의 `export_scene`도 같은 방식이다 | 컨텍스트를 덮어쓰는 방식으로 바꾼다 |
 | 10 | 사용 중인 `blender-mcp`/`mcp-for-blender` 버전이 `--port` 또는 `BLENDER_PORT`를 받는다. 둘 다 넣는다 | 패키지를 업데이트한다 |
+| 11 | `blender-open`의 `--python-expr`가 애드온 자동 시작보다 먼저 돈다(타이머는 이벤트 루프에서만 돈다) | N 패널에서 포트를 바꾸고 서버를 켠다 |
+| 12 | `UpdateInteractionModeSettings` 리플렉션 호출이 Unity 6.3에서 바로 적용된다 | Unity를 다시 시작하면 적용된다(도구가 `applied_live`로 알려준다) |
+| 13 | Unity가 열려 있을 때 `manifest.json`을 고치면 창이 앞에 올 때 패키지를 다시 받는다 | Unity를 다시 연다 |
 
 ## 다음 단계 (2단계 후보)
 
 - **세션 간 직접 대화:** Claude Code 에이전트 팀(실험 기능)을 쓰거나 Channels로 감독을 거치지 않고 메시지를 주고받는다. 지금은 감독이 중계한다.
 - **Unity 안 채팅 패널:** EditorWindow에서 감독 세션으로 말을 걸고, 지금 선택한 오브젝트와 씬 컨텍스트를 자동으로 붙인다.
-- **모달 대화상자 처리:** Unity가 OS 대화상자로 멈추면 agent-desktop으로 버튼을 누른다. OS 기본 창이라 접근성 트리에 보일 가능성이 높다.
+- **모달 대화상자 자동 감지:** 지금은 감독이 시간 초과를 보고 agent-desktop으로 확인한다. 하위 세션의 시간 초과를 감독에게 바로 알리는 장치를 넣는다.
 - **백그라운드 보완:** 실측 결과 Windows에서 막히면 Unity 쪽에서 메인 루프를 깨우는 장치를 넣는다.

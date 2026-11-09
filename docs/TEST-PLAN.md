@@ -3,9 +3,29 @@
 순서대로 해 주시고, 각 단계의 **결과(성공/실패, 오류 문구)**를 알려주시면 이어서 고칠게요.
 Unity 프로젝트는 두 개를 준비합니다. 예: `A` = 작업 중인 프로젝트, `B` = 빈 테스트 프로젝트.
 
+## 0. 처음 세팅 (Claude에게 맡기기)
+
+이미 손으로 설치해 둔 것이 있어도 괜찮아요. 세팅 스킬은 빠진 것만 하도록 돼 있어요.
+
+1. claude-hand 폴더에서 Claude Code를 열고 "claude-hand 세팅해줘"라고 합니다.
+2. 기대 결과:
+   - `doctor` 진단표가 먼저 나와요.
+   - 할 단계를 고르는 질문이 하나 와요. 각 선택지에 무엇이 바뀌는지 적혀 있어요.
+   - 고른 단계만 진행되고, Claude Code의 명령 실행 허락 요청이 단계마다 와요.
+   - UAC나 방화벽 창은 Claude가 누르지 않고 사용자에게 눌러 달라고 해요.
+3. 확인할 것:
+   - `npm install -g agent-desktop` 뒤에 `agent-desktop status`가 성공하는지(Smart App Control에 막히면 그 문구)
+   - `uvx mcp-for-blender setup --dry-run` 출력이 사용자에게 보였는지, `--yes` 뒤에 Blender를 다시 열었을 때 애드온이 켜져 있는지
+   - `unity-install` 뒤에 Unity가 패키지를 받아 오는지(Unity가 열려 있었다면 창을 클릭했을 때), 뜬 대화상자를 Claude가 읽어서 물어봤는지
+   - `ch_apply_settings(apply)` 결과의 `applied_live` 값과 Preferences > General > Interaction Mode가 No Throttling으로 보이는지
+   - 화면 조작을 했다면 마우스·키보드를 움직이기 전에 따로 물어봤는지
+   - 마지막 `doctor`에서 남은 항목
+
+> 결과 알려주세요: 단계마다 성공/실패와 오류 문구, Claude가 대신 했으면 안 되는 일을 했는지
+
 ## 1. 패키지 설치 확인
 
-1. 두 프로젝트에 패키지를 추가합니다. README 설치 2번 방법이에요.
+1. 두 프로젝트에 패키지를 추가합니다. 0단계에서 했다면 건너뛰어요. 직접 하려면 `uv run tools/claude_hand.py unity-install "<프로젝트>"`를 실행해요.
 2. Console에 `ClaudeHand` 관련 빨간 오류가 없어야 합니다.
 3. Claude Code 메인 세션에서 "ch_editor_status 불러줘"라고 해 봅니다.
    - Unity 창이 하나만 열려 있을 때 해야 합니다. 둘 이상이면 대상을 고르라는 오류가 나요.
@@ -16,7 +36,7 @@ Unity 프로젝트는 두 개를 준비합니다. 예: `A` = 작업 중인 프�
 
 ## 2. 백그라운드 동작 실측 (가장 중요)
 
-Interaction Mode를 **바꾸기 전과 후**에 각각 해 봅니다. Edit > Preferences > General > Interaction Mode예요.
+Interaction Mode를 **바꾸기 전과 후**에 각각 해 봅니다. Edit > Preferences > General > Interaction Mode예요. 바꾸기는 `ch_apply_settings(action="apply")`로, 되돌리기는 `action="revert"`로 할 수 있어요.
 
 | 상태 | 방법 | 응답 |
 |---|---|---|

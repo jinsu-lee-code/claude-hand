@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -376,6 +377,135 @@ class BlenderTests(unittest.TestCase):
         self.assertIsNone(ch.guard_decision(own, "character@9876", "blender_character", "stdio", "blender"))
         reason = ch.guard_decision(other, "character@9876", "blender_character", "stdio", "blender")
         self.assertIn("Blender", reason)
+
+
+
+def make_unity_project(root: Path, deps=None, version="6000.3.2f1") -> Path:
+    project = root / "MyGame"
+    (project / "Assets").mkdir(parents=True)
+    (project / "ProjectSettings").mkdir()
+    (project / "Packages").mkdir()
+    (project / "ProjectSettings" / "ProjectVersion.txt").write_text(
+        f"m_EditorVersion: {version}\nm_EditorVersionWithRevision: {version} (abc)\n", encoding="utf-8")
+    manifest = {"dependencies": deps if deps is not None else {"com.unity.ugui": "2.0.0"}, "scopedRegistries": []}
+    (project / "Packages" / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return project
+
+
+class SetupHelperTests(unittest.TestCase):
+    def test_unity_install_adds_both_and_keeps_other_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = make_unity_project(Path(tmp))
+            plan, manifest = ch.plan_unity_install(project, package_dir=Path(tmp) / "pkg")
+            self.assertEqual(len(plan.changes), 2)
+            ch.apply_unity_install(project, manifest, plan)
+            written = json.loads((project / "Packages" / "manifest.json").read_text(encoding="utf-8"))
+            deps = written["dependencies"]
+            self.assertEqual(deps["com.unity.ugui"], "2.0.0")
+            self.assertEqual(deps[ch.MCP_FOR_UNITY_PACKAGE], ch.MCP_FOR_UNITY_GIT_URL)
+            self.assertTrue(deps[ch.CLAUDE_HAND_PACKAGE].startswith("file:") and deps[ch.CLAUDE_HAND_PACKAGE].endswith("/pkg"))
+            self.assertEqual(written["scopedRegistries"], [])
+            backup = json.loads(Path(plan.backup).read_text(encoding="utf-8"))
+            self.assertNotIn(ch.MCP_FOR_UNITY_PACKAGE, backup["dependencies"])
+            again, manifest_again = ch.plan_unity_install(project, package_dir=Path(tmp) / "pkg")
+            self.assertEqual((again.changes, manifest_again), ([], None))
+
+    def test_unity_install_respects_existing_mcp_for_unity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = make_unity_project(Path(tmp), deps={ch.MCP_FOR_UNITY_PACKAGE: "https://example/fork.git"})
+            plan, manifest = ch.plan_unity_install(project, package_dir=Path(tmp) / "pkg")
+            self.assertEqual(manifest["dependencies"][ch.MCP_FOR_UNITY_PACKAGE], "https://example/fork.git")
+            self.assertEqual(len(plan.changes), 1)
+
+    def test_unity_install_detects_asset_store_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = make_unity_project(Path(tmp))
+            (project / "Assets" / "MCPForUnity").mkdir()
+            plan, manifest = ch.plan_unity_install(project, package_dir=Path(tmp) / "pkg")
+            self.assertNotIn(ch.MCP_FOR_UNITY_PACKAGE, manifest["dependencies"])
+            self.assertTrue(any("Asset Store" in n for n in plan.notes))
+
+    def test_unity_install_rejects_non_projects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(SystemExit):
+                ch.plan_unity_install(Path(tmp))
+
+    def test_unity_install_cli_dry_run_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = make_unity_project(Path(tmp))
+            before = (project / "Packages" / "manifest.json").read_text(encoding="utf-8")
+            out = io.StringIO()
+            with unittest.mock.patch("sys.stdout", out):
+                ch.main(["unity-install", str(project), "--dry-run"])
+            self.assertEqual((project / "Packages" / "manifest.json").read_text(encoding="utf-8"), before)
+            self.assertIn("(dry run)", out.getvalue())
+
+    def test_project_version_and_editor_lookup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = make_unity_project(Path(tmp), version="6000.3.2f1")
+            self.assertEqual(ch.read_project_version(project), "6000.3.2f1")
+            hub = Path(tmp) / "Hub" / "Editor"
+            exe = hub / "6000.3.2f1" / "Editor" / "Unity.exe"
+            exe.parent.mkdir(parents=True)
+            exe.write_text("", encoding="utf-8")
+            self.assertEqual(ch.find_unity_editor("6000.3.2f1", [hub], platform="win32"), exe)
+            self.assertIsNone(ch.find_unity_editor("2022.3.1f1", [hub], platform="win32"))
+
+    def test_blender_lookup_on_windows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pf = Path(tmp) / "Program Files"
+            for version in ("4.2", "5.0"):
+                exe = pf / "Blender Foundation" / f"Blender {version}" / "blender.exe"
+                exe.parent.mkdir(parents=True)
+                exe.write_text("", encoding="utf-8")
+            found = ch.find_blender_executables(env={"ProgramFiles": str(pf)}, platform="win32", which=lambda _: None)
+            self.assertEqual([p.parent.name for p in found], ["Blender 5.0", "Blender 4.2"])
+
+    def test_blender_addon_lookup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "Blender"
+            legacy = base / "4.1" / "scripts" / "addons" / ch.BLENDER_ADDON_FILE
+            extension = base / "4.2" / "extensions" / "user_default" / ch.BLENDER_ADDON_FILE
+            for f in (legacy, extension):
+                f.parent.mkdir(parents=True)
+                f.write_text("", encoding="utf-8")
+            (base / "config").mkdir()
+            self.assertEqual(ch.find_blender_addon_installs(base), [extension, legacy])
+
+    def test_blender_open_command(self):
+        cmd = ch.blender_open_command(Path("C:/B/blender.exe"), Path("C:/Art/props.blend"), 9877)
+        self.assertEqual(cmd[:3], [str(Path("C:/B/blender.exe")), str(Path("C:/Art/props.blend")), "--python-expr"])
+        ast.parse(cmd[3])
+        self.assertIn("blendermcp_port = 9877", cmd[3])
+        self.assertEqual(ch.blender_open_command(Path("blender"), None, 9876)[1], "--python-expr")
+
+    def test_node_major(self):
+        self.assertEqual(ch.node_major("v22.3.0"), 22)
+        self.assertIsNone(ch.node_major(None))
+
+    def test_doctor_reports_gaps_with_fixes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            project = make_unity_project(Path(tmp))
+            versions = {"claude": "2.1.0", "uv": "uv 0.9", "git": None, "node": "v16.0.0", "agent-desktop": None}
+            with unittest.mock.patch.dict("os.environ", {"HOME": str(home), "USERPROFILE": str(home), "APPDATA": str(home)}), \
+                 unittest.mock.patch.object(ch.Path, "home", lambda: home), \
+                 unittest.mock.patch.object(ch, "candidate_config_files", lambda cwd=None: []), \
+                 unittest.mock.patch.object(ch, "discover_blender", lambda ports, request=None: []), \
+                 unittest.mock.patch.object(ch, "find_blender_executables", lambda **kw: []):
+                checks = ch.doctor_checks([project], [9876], version=lambda *cmd: versions[cmd[0]])
+        by_item = {c.item: c for c in checks}
+        self.assertTrue(by_item["Claude Code CLI"].ok)
+        self.assertFalse(by_item["git (Unity가 MCP for Unity를 받을 때 필요)"].ok)
+        self.assertIn("winget install", by_item["git (Unity가 MCP for Unity를 받을 때 필요)"].fix)
+        self.assertFalse(by_item["Node.js 18 이상 (agent-desktop용)"].ok)
+        self.assertEqual(by_item["agent-desktop CLI"].fix, "npm install -g agent-desktop")
+        self.assertIn("mcp-for-blender setup", by_item["MCP for Blender 애드온"].fix)
+        self.assertIn("claude mcp add", by_item["Claude 설정에 MCP for Unity 등록"].fix)
+        package = by_item["프로젝트 MyGame: 패키지"]
+        self.assertFalse(package.ok)
+        self.assertIn("unity-install", package.fix)
 
 
 if __name__ == "__main__":

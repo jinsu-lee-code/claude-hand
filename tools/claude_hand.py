@@ -14,6 +14,12 @@ GitHub add-on), one add-on port per Blender window.
   guard   PreToolUse hook used by those subagents: blocks any call that would reach a
           project or Blender other than the subagent's own. Not meant to be run by hand.
 
+First-time setup helpers (used by the claude-hand-setup skill, safe to run by hand):
+  doctor         Check what is installed and configured; prints the command that fixes each gap.
+  unity-install  Add MCP for Unity and Claude Hand Tools to a project's Packages/manifest.json.
+  unity-open     Open a project with the Unity version it was made with.
+  blender-open   Start Blender with the MCP for Blender add-on listening on a chosen port.
+
 Run with uv (already installed for MCP for Unity) or any Python 3.10+:
   uv run tools/claude_hand.py list
   uv run tools/claude_hand.py sync
@@ -25,11 +31,14 @@ import argparse
 import json
 import os
 import re
+import shutil
 import socket
+import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 TOOL_PATH = Path(__file__).resolve()
@@ -41,6 +50,11 @@ UNITY_PACKAGE_HINTS = ("mcp-for-unity", "mcpforunityserver", "unity-mcp")
 BLENDER_PACKAGE_HINTS = ("mcp-for-blender", "blender-mcp")
 DEFAULT_BLENDER_ARGS = ["mcp-for-blender"]
 DEFAULT_BLENDER_PORTS = "9876-9885"
+MCP_FOR_UNITY_PACKAGE = "com.coplaydev.unity-mcp"
+MCP_FOR_UNITY_GIT_URL = "https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#main"
+CLAUDE_HAND_PACKAGE = "com.claudehand.tools"
+CLAUDE_HAND_PACKAGE_DIR = REPO_ROOT / "unity" / CLAUDE_HAND_PACKAGE
+BLENDER_ADDON_FILE = "blender_mcp.py"  # what `mcp-for-blender install-addon` writes
 
 
 # --------------------------------------------------------------------------- data
@@ -552,7 +566,8 @@ MANIFEST만 바꿔서 실행한다. 이름이 겹치면 Blender가 `.001`을 붙
 ```python
 import bpy, os, json
 MANIFEST = r"C:\path\to\transfer.claudehand.json"
-m = json.load(open(MANIFEST, encoding="utf-8"))
+with open(MANIFEST, encoding="utf-8") as f:
+    m = json.load(f)
 blend = os.path.join(os.path.dirname(MANIFEST), m["blend_file"])
 with bpy.data.libraries.load(blend, link=False) as (src, dst):
     dst.objects = [n for n in src.objects if n in m["objects"]]
@@ -747,7 +762,366 @@ def run_guard(args: argparse.Namespace, stdin=None, stdout=None) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------- setup helpers
+
+
+def tool_version(*cmd: str, which=shutil.which) -> str | None:
+    """First output line of `<cmd> --version`-style calls, or None when the tool is missing."""
+    exe = which(cmd[0])
+    if not exe:
+        return None
+    try:
+        proc = subprocess.run([exe, *cmd[1:]], capture_output=True, text=True, errors="replace", timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    text = (proc.stdout or proc.stderr).strip()
+    return text.splitlines()[0].strip() if text else ""
+
+
+def node_major(version: str | None) -> int | None:
+    match = re.match(r"v?(\d+)", version or "")
+    return int(match.group(1)) if match else None
+
+
+def find_blender_executables(env=os.environ, platform=sys.platform, which=shutil.which) -> list[Path]:
+    found: list[Path] = []
+    if exe := which("blender"):
+        found.append(Path(exe))
+    if platform == "win32":
+        for base in filter(None, (env.get("ProgramFiles"), env.get("ProgramFiles(x86)"))):
+            found += sorted(Path(base, "Blender Foundation").glob("Blender*/blender.exe"), reverse=True)
+            steam = Path(base, "Steam", "steamapps", "common", "Blender", "blender.exe")
+            if steam.exists():
+                found.append(steam)
+    elif platform == "darwin":
+        app = Path("/Applications/Blender.app/Contents/MacOS/Blender")
+        if app.exists():
+            found.append(app)
+    unique: list[Path] = []
+    for path in found:
+        if path not in unique:
+            unique.append(path)
+    return unique
+
+
+def blender_config_base(env=os.environ, platform=sys.platform) -> Path | None:
+    if platform == "win32":
+        return Path(env["APPDATA"], "Blender Foundation", "Blender") if env.get("APPDATA") else None
+    if platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Blender"
+    return Path.home() / ".config" / "blender"
+
+
+def find_blender_addon_installs(base: Path | None = None) -> list[Path]:
+    """MCP for Blender add-on files in every Blender version's user folder."""
+    base = base if base is not None else blender_config_base()
+    if not base or not base.is_dir():
+        return []
+    found = []
+    for version_dir in sorted(base.iterdir(), reverse=True):
+        if not re.match(r"^\d+\.\d+", version_dir.name):
+            continue
+        for folder in (version_dir / "scripts" / "addons", version_dir / "extensions" / "user_default"):
+            candidate = folder / BLENDER_ADDON_FILE
+            if candidate.exists():
+                found.append(candidate)
+    return found
+
+
+def read_project_version(project: Path) -> str | None:
+    try:
+        text = (project / "ProjectSettings" / "ProjectVersion.txt").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r"m_EditorVersion:\s*(\S+)", text)
+    return match.group(1) if match else None
+
+
+def unity_hub_editor_dirs(env=os.environ, platform=sys.platform) -> list[Path]:
+    dirs: list[Path] = []
+    if platform == "win32":
+        if env.get("ProgramFiles"):
+            dirs.append(Path(env["ProgramFiles"], "Unity", "Hub", "Editor"))
+        if env.get("APPDATA"):  # a custom install location chosen in Unity Hub
+            try:
+                custom = json.loads(Path(env["APPDATA"], "UnityHub", "secondaryInstallPath.json").read_text(encoding="utf-8"))
+                if isinstance(custom, str) and custom:
+                    dirs.insert(0, Path(custom))
+            except (OSError, ValueError):
+                pass
+    elif platform == "darwin":
+        dirs.append(Path("/Applications/Unity/Hub/Editor"))
+    else:
+        dirs.append(Path.home() / "Unity" / "Hub" / "Editor")
+    return dirs
+
+
+def find_unity_editor(version: str, dirs: list[Path] | None = None, platform=sys.platform) -> Path | None:
+    for base in dirs if dirs is not None else unity_hub_editor_dirs():
+        exe = base / version / ("Unity.app/Contents/MacOS/Unity" if platform == "darwin" else
+                                "Editor/Unity.exe" if platform == "win32" else "Editor/Unity")
+        if exe.exists():
+            return exe
+    return None
+
+
+def is_unity_project(project: Path) -> bool:
+    return (project / "Assets").is_dir() and (project / "ProjectSettings").is_dir()
+
+
+@dataclass
+class ManifestPlan:
+    project: str
+    changes: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    backup: str = ""
+
+
+def plan_unity_install(project: Path, mcp_for_unity: bool = True, claude_hand: bool = True,
+                       package_dir: Path = CLAUDE_HAND_PACKAGE_DIR) -> tuple[ManifestPlan, dict | None]:
+    """What unity-install would change, plus the new manifest (None when nothing changes)."""
+    plan = ManifestPlan(project=str(project))
+    if not is_unity_project(project):
+        raise SystemExit(f"{project} is not a Unity project (needs Assets/ and ProjectSettings/).")
+    manifest_path = project / "Packages" / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"Could not read {manifest_path}: {exc}")
+    deps = manifest.setdefault("dependencies", {})
+    if mcp_for_unity:
+        if MCP_FOR_UNITY_PACKAGE in deps:
+            plan.notes.append(f"MCP for Unity is already installed ({deps[MCP_FOR_UNITY_PACKAGE]}).")
+        elif (project / "Assets" / "MCPForUnity").is_dir():
+            plan.notes.append("MCP for Unity is already installed in Assets/MCPForUnity (Asset Store copy).")
+        else:
+            deps[MCP_FOR_UNITY_PACKAGE] = MCP_FOR_UNITY_GIT_URL
+            plan.changes.append(f"add {MCP_FOR_UNITY_PACKAGE}: {MCP_FOR_UNITY_GIT_URL} (Unity fetches it with git)")
+    if claude_hand:
+        wanted = "file:" + package_dir.resolve().as_posix()
+        current = deps.get(CLAUDE_HAND_PACKAGE)
+        if current == wanted:
+            plan.notes.append("Claude Hand Tools is already installed from this folder.")
+        else:
+            deps[CLAUDE_HAND_PACKAGE] = wanted
+            plan.changes.append(f"{'change' if current else 'add'} {CLAUDE_HAND_PACKAGE}: {wanted}")
+    return plan, (manifest if plan.changes else None)
+
+
+def apply_unity_install(project: Path, manifest: dict, plan: ManifestPlan) -> ManifestPlan:
+    manifest_path = project / "Packages" / "manifest.json"
+    backup = manifest_path.with_name("manifest.json.claude-hand.bak")
+    shutil.copy2(manifest_path, backup)
+    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+    plan.backup = str(backup)
+    return plan
+
+
+def blender_port_expr(port: int) -> str:
+    """Runs inside Blender before its event loop starts, so the add-on's auto-start sees the new port."""
+    return (
+        "import bpy\n"
+        "s = bpy.context.scene\n"
+        "if hasattr(s, 'blendermcp_port'):\n"
+        f"    s.blendermcp_port = {int(port)}\n"
+        "    s.blendermcp_auto_start_server = True\n"
+        f"    print('claude-hand: MCP for Blender will listen on port {int(port)}')\n"
+        "else:\n"
+        "    print('claude-hand: the MCP for Blender add-on is not enabled; run: uvx mcp-for-blender setup')\n"
+    )
+
+
+def blender_open_command(exe: Path, blend_file: Path | None, port: int) -> list[str]:
+    cmd = [str(exe)]
+    if blend_file is not None:
+        cmd.append(str(blend_file))
+    return cmd + ["--python-expr", blender_port_expr(port)]
+
+
+def launch_detached(cmd: list[str]) -> None:
+    kwargs: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    subprocess.Popen(cmd, **kwargs)  # noqa: S603 - fixed argv, no shell
+
+
+def blender_answers(port: int) -> bool:
+    try:
+        pong = blender_request(port, {"type": "ping", "params": {}}, 2.0)
+    except OSError:
+        return False
+    return isinstance(pong, dict) and pong.get("status") == "success"
+
+
+@dataclass
+class Check:
+    area: str
+    item: str
+    ok: bool | None  # None = not applicable / informational
+    detail: str = ""
+    fix: str = ""
+
+
+def doctor_checks(projects: list[Path], blender_ports: list[int], version=tool_version) -> list[Check]:
+    checks: list[Check] = []
+
+    def add(area, item, ok, detail="", fix=""):
+        checks.append(Check(area, item, ok, detail, fix))
+
+    claude = version("claude", "--version")
+    add("기본 도구", "Claude Code CLI", claude is not None, claude or "없음",
+        "" if claude else "https://claude.com/claude-code 에서 설치")
+    uv = version("uv", "--version")
+    add("기본 도구", "uv", uv is not None, uv or "없음", "" if uv else "winget install --id astral-sh.uv -e")
+    git = version("git", "--version")
+    add("기본 도구", "git (Unity가 MCP for Unity를 받을 때 필요)", git is not None, git or "없음",
+        "" if git else "winget install --id Git.Git -e")
+    node = version("node", "--version")
+    node_ok = (node_major(node) or 0) >= 18
+    add("기본 도구", "Node.js 18 이상 (agent-desktop용)", node_ok, node or "없음",
+        "" if node_ok else "winget install --id OpenJS.NodeJS.LTS -e")
+
+    agent_desktop = version("agent-desktop", "version")
+    add("agent-desktop", "agent-desktop CLI", agent_desktop is not None, agent_desktop or "없음",
+        "" if agent_desktop else "npm install -g agent-desktop")
+
+    exes = find_blender_executables()
+    add("Blender", "Blender 실행 파일", bool(exes), ", ".join(map(str, exes[:3])) or "못 찾음",
+        "" if exes else "Blender를 설치하거나 blender-open --blender-exe 로 경로를 알려주세요")
+    addons = find_blender_addon_installs()
+    add("Blender", "MCP for Blender 애드온", bool(addons), ", ".join(map(str, addons[:3])) or "설치 안 됨",
+        "" if addons else "uvx mcp-for-blender setup --dry-run  (확인 후 --yes)")
+    blender_cfg = detect_blender_config()
+    configured = blender_cfg.origin != "default"  # a warning means some other Blender MCP is configured, not ours
+    add("Blender", "Claude 설정에 MCP for Blender 등록", configured,
+        blender_cfg.origin if configured else (blender_cfg.warning or "없음"),
+        "" if configured else "uvx mcp-for-blender setup --dry-run  (확인 후 --yes)")
+    running = discover_blender(blender_ports)
+    add("Blender", "응답하는 Blender 창", bool(running) if exes else None,
+        ", ".join(f"{b.name}@{b.port}" for b in running) or "없음",
+        "" if running else "Blender를 열고 애드온 서버를 켜세요 (blender-open --port 9876)")
+
+    unity_cfg = detect_server_config()
+    unity_configured = unity_cfg.origin != "default"
+    add("Unity", "Claude 설정에 MCP for Unity 등록", unity_configured,
+        f"{unity_cfg.transport} ({unity_cfg.origin})" if unity_configured else "없음",
+        "" if unity_configured else "claude mcp add --scope user --transport http unityMCP http://localhost:8080/mcp")
+    unity_running = gather_instances(unity_cfg, [], include_dead=False)
+    add("Unity", "연결된 Unity 에디터", bool(unity_running) or None,
+        ", ".join(i.id for i in unity_running) or "없음",
+        "" if unity_running else "Unity 프로젝트를 열고 Window > MCP for Unity 가 Connected인지 확인")
+    for project in projects:
+        label = f"프로젝트 {project.name}"
+        if not is_unity_project(project):
+            add("Unity", label, False, f"{project}: Unity 프로젝트가 아님", "경로를 확인하세요")
+            continue
+        try:
+            plan, _ = plan_unity_install(project)
+        except SystemExit as exc:
+            add("Unity", f"{label}: 패키지", False, str(exc), "Packages/manifest.json을 확인하세요")
+            continue
+        add("Unity", f"{label}: 패키지", not plan.changes, "; ".join(plan.changes or plan.notes),
+            "" if not plan.changes else f'uv run tools/claude_hand.py unity-install "{project}"')
+        editor_version = read_project_version(project)
+        editor = find_unity_editor(editor_version) if editor_version else None
+        add("Unity", f"{label}: 에디터 {editor_version or '?'}", editor is not None if editor_version else None,
+            str(editor) if editor else "Unity Hub 기본 위치에서 못 찾음",
+            "" if editor else "Unity Hub에서 해당 버전을 설치하거나 Hub로 직접 여세요")
+
+    agents_dir = Path.home() / ".claude" / "agents"
+    generated = sorted(p.name for p in agents_dir.glob("*.md") if GENERATED_MARKER in p.read_text(encoding="utf-8", errors="replace")) \
+        if agents_dir.is_dir() else []
+    add("claude-hand", "하위 세션 정의 파일", bool(generated) or None, ", ".join(generated) or "없음",
+        "" if generated else "uv run tools/claude_hand.py sync")
+    skill = Path.home() / ".claude" / "skills" / "claude-hand" / "SKILL.md"
+    add("claude-hand", "감독 스킬", skill.exists(), str(skill) if skill.exists() else "없음",
+        "" if skill.exists() else "uv run tools/claude_hand.py sync")
+    return checks
+
+
 # --------------------------------------------------------------------------- CLI
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    checks = doctor_checks([Path(p).expanduser() for p in args.unity_project], parse_ports(args.blender_ports))
+    if args.json:
+        print(json.dumps([asdict(c) for c in checks], ensure_ascii=False, indent=2))
+        return 0
+    area = None
+    for c in checks:
+        if c.area != area:
+            area = c.area
+            print(f"[{area}]")
+        mark = "OK " if c.ok else ("-- " if c.ok is None else "!! ")
+        print(f"  {mark}{c.item}: {c.detail}")
+        if c.fix and not c.ok:
+            print(f"       고치기: {c.fix}")
+    missing = [c for c in checks if c.ok is False]
+    print(f"\n빠진 항목 {len(missing)}개" if missing else "\n모두 준비됐습니다.")
+    return 0
+
+
+def cmd_unity_install(args: argparse.Namespace) -> int:
+    project = Path(args.project).expanduser().resolve()
+    plan, manifest = plan_unity_install(project, mcp_for_unity=not args.no_mcp_for_unity, claude_hand=not args.no_claude_hand)
+    for note in plan.notes:
+        print(f"그대로: {note}")
+    if manifest is None:
+        print("바꿀 것이 없습니다.")
+        return 0
+    for change in plan.changes:
+        print(f"{'(dry run) ' if args.dry_run else ''}변경: {change}")
+    if args.dry_run:
+        return 0
+    apply_unity_install(project, manifest, plan)
+    print(f"Packages/manifest.json을 고쳤습니다. 원래 파일: {plan.backup}")
+    print("Unity가 열려 있으면 Unity 창이 앞에 올 때 패키지를 받아 옵니다. 닫혀 있으면 unity-open으로 여세요.")
+    return 0
+
+
+def cmd_unity_open(args: argparse.Namespace) -> int:
+    project = Path(args.project).expanduser().resolve()
+    if not is_unity_project(project):
+        raise SystemExit(f"{project} is not a Unity project.")
+    version = read_project_version(project)
+    exe = Path(args.unity_exe) if args.unity_exe else (find_unity_editor(version) if version else None)
+    if exe is None or not exe.exists():
+        print(f"Unity {version or '?'} 에디터를 찾지 못했습니다. --unity-exe로 Unity.exe 경로를 알려주거나 Unity Hub로 여세요.")
+        return 1
+    cmd = [str(exe), "-projectPath", str(project)]
+    print(("(dry run) " if args.dry_run else "실행: ") + " ".join(f'"{c}"' if " " in c else c for c in cmd))
+    if not args.dry_run:
+        launch_detached(cmd)
+    return 0
+
+
+def cmd_blender_open(args: argparse.Namespace) -> int:
+    port = int(args.port)
+    if blender_answers(port):
+        print(f"포트 {port}은(는) 이미 다른 Blender가 쓰고 있습니다. 다른 포트를 고르세요.")
+        return 1
+    blend = Path(args.file).expanduser().resolve() if args.file else None
+    if blend is not None and not blend.exists():
+        raise SystemExit(f"{blend} does not exist.")
+    exes = [Path(args.blender_exe)] if args.blender_exe else find_blender_executables()
+    if not exes or not exes[0].exists():
+        print("Blender 실행 파일을 찾지 못했습니다. --blender-exe로 blender.exe 경로를 알려주세요.")
+        return 1
+    cmd = blender_open_command(exes[0], blend, port)
+    print(("(dry run) " if args.dry_run else "실행: ") + f"{exes[0]} {blend or '(새 파일)'} (포트 {port})")
+    if args.dry_run:
+        return 0
+    launch_detached(cmd)
+    deadline = time.time() + args.wait
+    while time.time() < deadline:
+        if blender_answers(port):
+            print(f"Blender가 포트 {port}에서 응답합니다. 이 포트를 파일에 남기려면 .blend를 저장하세요.")
+            return 0
+        time.sleep(1)
+    print(f"{args.wait}초 안에 포트 {port}에서 응답이 없습니다. 애드온이 켜져 있는지(uvx mcp-for-blender setup) 확인하세요.")
+    return 1
 
 
 def gather_instances(server: ServerConfig, extra: list[str], include_dead: bool) -> list[Instance]:
@@ -850,6 +1224,33 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--no-blender", action="store_true", help="skip Blender")
     p_sync.add_argument("--dry-run", action="store_true")
     p_sync.set_defaults(func=cmd_sync)
+
+    p_doctor = sub.add_parser("doctor", help="check what is installed and configured")
+    p_doctor.add_argument("--unity-project", action="append", default=[], metavar="PATH", help="also check this Unity project")
+    p_doctor.add_argument("--blender-ports", default=DEFAULT_BLENDER_PORTS)
+    p_doctor.add_argument("--json", action="store_true", help="machine-readable output")
+    p_doctor.set_defaults(func=cmd_doctor)
+
+    p_ui = sub.add_parser("unity-install", help="add MCP for Unity + Claude Hand Tools to a project's manifest")
+    p_ui.add_argument("project")
+    p_ui.add_argument("--no-mcp-for-unity", action="store_true", help="only add Claude Hand Tools")
+    p_ui.add_argument("--no-claude-hand", action="store_true", help="only add MCP for Unity")
+    p_ui.add_argument("--dry-run", action="store_true")
+    p_ui.set_defaults(func=cmd_unity_install)
+
+    p_uo = sub.add_parser("unity-open", help="open a project with the Unity version it was made with")
+    p_uo.add_argument("project")
+    p_uo.add_argument("--unity-exe", help="path to Unity.exe when it is not in Unity Hub's default folder")
+    p_uo.add_argument("--dry-run", action="store_true")
+    p_uo.set_defaults(func=cmd_unity_open)
+
+    p_bo = sub.add_parser("blender-open", help="start Blender with the MCP for Blender add-on on a chosen port")
+    p_bo.add_argument("file", nargs="?", help=".blend file to open (default: a new file)")
+    p_bo.add_argument("--port", required=True, type=int)
+    p_bo.add_argument("--blender-exe", help="path to blender.exe")
+    p_bo.add_argument("--wait", type=int, default=60, help="seconds to wait for the add-on to answer")
+    p_bo.add_argument("--dry-run", action="store_true")
+    p_bo.set_defaults(func=cmd_blender_open)
 
     p_guard = sub.add_parser("guard", help="PreToolUse hook (used by generated subagents)")
     p_guard.add_argument("--pin", required=True)
