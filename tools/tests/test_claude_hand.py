@@ -280,7 +280,7 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(sent[1][2]["tool"], "ch_scene_snapshot")
         self.assertEqual(len(sent), 2)  # not for tools outside the subagent's own servers
 
-    def test_first_unity_action_of_a_request_sets_an_undo_point(self):
+    def test_first_action_of_a_request_sets_an_undo_point(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             (home / "chat").mkdir()
@@ -289,19 +289,38 @@ class GuardTests(unittest.TestCase):
             event = {"tool_name": "mcp__unity_mygame__manage_gameobject", "tool_input": {"action": "create", "name": "Cube"}}
             for reply in ({"new_request": True, "label": "큐브 만들어줘"}, {"new_request": False}, None):
                 ch.report_progress(event, self.PIN, self.SERVER, "unity", home=home, post=lambda req, r=reply: r,
-                                   mark=lambda pin, label: marks.append((pin, label)))
-            ch.report_progress(event, "props@9876", "blender_props", "blender", home=home,
-                               post=lambda req: {"new_request": True, "label": "x"}, mark=lambda pin, label: marks.append(pin))
-        self.assertEqual(marks, [(self.PIN, "큐브 만들어줘")])  # once per request, Unity only
+                                   mark=lambda app, pin, label: marks.append((app, pin, label)))
+            ch.report_progress({"tool_name": "mcp__blender_props__execute_code", "tool_input": {"code": "x = 1"}},
+                               "props@9876", "blender_props", "blender", home=home,
+                               post=lambda req: {"new_request": True, "label": "의자"}, mark=lambda *a: marks.append(a))
+            # "cancel that" starts with the undo: no fresh point in front of it
+            new = lambda req: {"new_request": True, "label": "방금 거 취소해줘"}
+            ch.report_progress({"tool_name": "mcp__unity_mygame_ch__ch_checkpoint", "tool_input": {"action": "undo"}},
+                               self.PIN, self.SERVER, "unity", home=home, post=new, mark=lambda *a: marks.append(a))
+            ch.report_progress({"tool_name": "mcp__blender_props__execute_code",
+                                "tool_input": {"code": "import claude_hand_chat; print(claude_hand_chat.undo_last_request())"}},
+                               "props@9876", "blender_props", "blender", home=home, post=new, mark=lambda *a: marks.append(a))
+        self.assertEqual(marks, [("unity", self.PIN, "큐브 만들어줘"), ("blender", "props@9876", "의자")])  # once per request
 
     def test_undo_point_goes_through_the_bridge(self):
         calls = []
         with unittest.mock.patch.dict(sys.modules, {"unity_bridge": unittest.mock.Mock(
                 find_project=lambda hash_: {"hash": hash_, "port": 1} if hash_ == "aaaa1111" else None)}):
             sys.modules["unity_bridge"].request = lambda entry, tool, params, timeout: calls.append((entry["hash"], tool, params))
-            ch.mark_checkpoint(self.PIN, "큐브 만들어줘")
-            ch.mark_checkpoint("Other@ffff0000", "x")  # not open: nothing to mark
+            ch.mark_checkpoint("unity", self.PIN, "큐브 만들어줘")
+            ch.mark_checkpoint("unity", "Other@ffff0000", "x")  # not open: nothing to mark
         self.assertEqual(calls, [("aaaa1111", "ch_checkpoint", {"action": "mark", "label": "큐브 만들어줘"})])
+
+    def test_blender_undo_point_goes_to_the_chat_addon(self):
+        sent = []
+        ch.mark_checkpoint("blender", "props@9876", "의자를 '빨갛게'", request=lambda port, command, timeout: sent.append((port, command)))
+        port, command = sent[0]
+        self.assertEqual((port, command["type"]), (9876, "execute_code"))
+        namespace = {}
+        exec(command["params"]["code"].replace("import claude_hand_chat\n", ""),
+             {"claude_hand_chat": type("Addon", (), {"mark_undo_point": staticmethod(lambda label: namespace.update(label=label))}),
+              "print": lambda *_: None})
+        self.assertEqual(namespace["label"], "의자를 '빨갛게'")  # the request text arrives as it was, quotes and all
 
     def test_action_summary(self):
         self.assertEqual(ch.action_summary({"action": "create", "name": "Cube", "position": [0, 0, 0]}), "create Cube")
@@ -618,7 +637,7 @@ class ChatSetupTests(unittest.TestCase):
             self.assertTrue(entry["args"][-1].endswith("/tools/chat_channel.py") and Path(entry["args"][-1]).is_absolute())
             settings = json.loads((root / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
             self.assertEqual(settings["permissions"]["allow"],
-                             ["Bash(git status)", ch.CHAT_REPLY_RULE, ch.CHAT_CONTEXT_RULE, ch.CHAT_PROGRESS_RULE])
+                             ["Bash(git status)", ch.CHAT_REPLY_RULE, ch.CHAT_CONTEXT_RULE])
             self.assertEqual(settings["enabledMcpjsonServers"], [ch.CHAT_SERVER_NAME])
             self.assertEqual(settings["model"], "keep-me")
             self.assertEqual(ch.plan_chat_config(root, "uv run -q --no-project", direct_servers=[]), {})  # second run changes nothing

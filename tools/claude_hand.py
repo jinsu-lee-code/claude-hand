@@ -85,7 +85,6 @@ CHAT_ADDON_MODULE = "claude_hand_chat"
 SUPERVISOR_COMMAND = f"claude --dangerously-load-development-channels server:{CHAT_SERVER_NAME}"
 CHAT_REPLY_RULE = f"mcp__{CHAT_SERVER_NAME}__reply"
 CHAT_CONTEXT_RULE = f"mcp__{CHAT_SERVER_NAME}__current_context"  # read-only: what is selected in each window
-CHAT_PROGRESS_RULE = f"mcp__{CHAT_SERVER_NAME}__progress"  # only draws a bar in a panel
 MIN_CLAUDE_FOR_PERMISSION_RELAY = (2, 1, 234)
 THIRD_PARTY_PROVIDER_ENV = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
 START_SCRIPT = REPO_ROOT / ("start-supervisor.cmd" if sys.platform == "win32" else "start-supervisor.sh")
@@ -547,7 +546,7 @@ def render_agent_prompt(inst: Instance, key: str, transport: str) -> str:
 - 다른 프로젝트 일을 받으면 하지 말고, 그 프로젝트 담당(unity-…)에게 넘겨야 한다고 감독에게 돌려준다.
 - 씬 저장(`manage_scene`의 `save`)은 요청받았을 때만 한다.
 - 요청마다 첫 동작 직전에 되돌리기 지점이 저절로 찍힌다(채팅창의 [되돌리기]). `execute_code`로 씬을 바꿀 때는 Undo에 남긴다(`Undo.RegisterCreatedObjectUndo`, `Undo.RecordObject`, `Undo.DestroyObjectImmediate`). 그래야 되돌리기가 그 변경까지 되돌린다. MCP for Unity 도구와 `ch_import_*`는 알아서 남긴다.
-- 사용자가 방금 한 일을 취소해 달라고 하면 `ch_checkpoint(action="undo")`로 되돌리고 무엇을 되돌렸는지 보고한다.
+- 사용자가 방금 한 일을 취소해 달라고 하면 **다른 도구보다 먼저** `ch_checkpoint(action="undo")`로 되돌리고 무엇을 되돌렸는지 보고한다. 다른 도구를 먼저 쓰면 그 자리에 새 되돌리기 지점이 찍혀 아무것도 되돌아가지 않는다.
 {notes_section(unity_notes_path(inst.path), "프로젝트")}
 ## 작업 순서: 스냅샷 → ref → 행동 → 확인
 1. `ch_scene_snapshot`으로 씬을 보고 대상의 ref(`@s1a2b3c4:e5` 형태)를 고른다. 씬이 크면 `depth`를 낮추고 `root=<ref>`로 파고든다.
@@ -627,6 +626,8 @@ BLENDER_PROMPT = r'''# Blender 전담: __NAME__
 - Blender 도구는 `__KEY__` 서버 것만 쓴다.
 - 다른 Blender 파일이나 Unity 프로젝트 일을 받으면 하지 말고, 그 담당(blender-… / unity-…)에게 넘겨야 한다고 감독에게 돌려준다.
 - .blend 저장(`bpy.ops.wm.save_mainfile()`)은 요청받았을 때만 한다.
+- 요청마다 첫 동작 직전에 되돌리기 지점이 저절로 찍힌다(채팅창의 [되돌리기], Blender 실행 취소 기록의 "Claude Hand: …"). `bpy.ops.ed.undo()`·`redo()`는 직접 부르지 않는다.
+- 사용자가 방금 한 일을 취소해 달라고 하면 **다른 도구보다 먼저** `execute_code`로 `import claude_hand_chat; print(claude_hand_chat.undo_last_request())`를 실행하고 출력을 그대로 보고한다. 다른 도구를 먼저 쓰면 그 자리에 새 되돌리기 지점이 찍혀 아무것도 되돌아가지 않는다. `ModuleNotFoundError`면 Claude Hand Chat 애드온이 없는 것이니 Blender에서 Ctrl+Z로 되돌려 달라고 보고한다.
 __NOTES__
 ## 작업 순서: 보기 → 행동 → 확인
 1. `get_scene_info`나 `get_object_info`로 대상 오브젝트의 정확한 이름을 확인한다. Blender에서는 오브젝트 이름이 곧 ID다.
@@ -866,7 +867,7 @@ def action_summary(tool_input: dict) -> str:
 
 def report_progress(event: dict, pin: str, server: str, app: str, home: Path | None = None, post=None, mark=None) -> None:
     """Tell the chat channel what this subagent is about to do, so its window's panel can show it, and on the first
-    Unity action of a request set an undo point there (the chat window's "되돌리기"). Best effort: no Claude Hand,
+    action of a request set an undo point in that window (the chat panel's "되돌리기"). Best effort: no Claude Hand,
     a slow server or any error just skips it; the tool call itself never waits more than a moment."""
     tool = str(event.get("tool_name", ""))
     short = next((tool[len(prefix):] for prefix in (f"mcp__{server}_ch__", f"mcp__{server}__") if tool.startswith(prefix)), "")
@@ -880,14 +881,21 @@ def report_progress(event: dict, pin: str, server: str, app: str, home: Path | N
         req = urllib.request.Request(f"http://127.0.0.1:{info['port']}/v1/progress", data=body.encode("utf-8"), method="POST",
                                      headers={"X-Claude-Hand-Token": info.get("token", ""), "Content-Type": "application/json"})
         reply = (post or (lambda r: json.loads(urllib.request.urlopen(r, timeout=0.5).read() or b"{}")))(req) or {}
-        if app == "unity" and reply.get("new_request"):
-            (mark or mark_checkpoint)(pin, str(reply.get("label") or ""))
+        # A "cancel that" request starts with the undo itself: a fresh point there would leave nothing to undo.
+        undoing = short == "ch_checkpoint" or "undo_last_request" in str((event.get("tool_input") or {}).get("code", ""))
+        if reply.get("new_request") and not undoing:
+            (mark or mark_checkpoint)(app, pin, str(reply.get("label") or ""))
     except Exception:  # progress is a nicety; the guard's answer must not depend on it
         pass
 
 
-def mark_checkpoint(pin: str, label: str, request=None) -> None:
-    """Set an undo point in the subagent's Unity editor through Claude Hand Tools' own bridge (ch_checkpoint)."""
+def mark_checkpoint(app: str, pin: str, label: str, request=None) -> None:
+    """Set an undo point in the subagent's window: in Unity through Claude Hand Tools' own bridge (ch_checkpoint), in
+    Blender through MCP for Blender's execute_code into the Claude Hand Chat add-on (nothing happens without it)."""
+    if app == "blender":
+        code = f"import claude_hand_chat\nprint(claude_hand_chat.mark_undo_point({label!r}))"
+        (request or blender_request)(int(pin.rpartition("@")[2]), {"type": "execute_code", "params": {"code": code}}, 5.0)
+        return
     import unity_bridge
     entry = unity_bridge.find_project(hash_=pin.rpartition("@")[2])
     if entry:
@@ -1304,7 +1312,7 @@ def plan_chat_config(root: Path = REPO_ROOT, runner: str = "uv run -q --no-proje
     settings = read_json_file(settings_path)
     changed = False
     allow = settings.setdefault("permissions", {}).setdefault("allow", [])
-    for rule in (CHAT_REPLY_RULE, CHAT_CONTEXT_RULE, CHAT_PROGRESS_RULE):
+    for rule in (CHAT_REPLY_RULE, CHAT_CONTEXT_RULE):
         if rule not in allow:
             allow.append(rule)
             changed = True

@@ -572,19 +572,19 @@ namespace ClaudeHand.Editor
             _progressRev = rev;
             _progressReceivedAt = EditorApplication.timeSinceStartup;
             EditorApplication.update -= RepaintWhileBusy;
-            if (progress != null) EditorApplication.update += RepaintWhileBusy;  // the bar moves and the seconds count up
+            if (progress != null) EditorApplication.update += RepaintWhileBusy;  // the seconds count up
         }
 
         private void RepaintWhileBusy()
         {
-            if (EditorApplication.timeSinceStartup - _lastBusyRepaint < 0.1) return;
+            if (EditorApplication.timeSinceStartup - _lastBusyRepaint < 0.5) return;
             _lastBusyRepaint = EditorApplication.timeSinceStartup;
             Repaint();
         }
 
         /// <summary>
-        /// A bar just above the input while this project's subagent works: it fills by step / total when the supervisor
-        /// gave the steps, otherwise a block moves along it. The text says what is being done; the reply removes it.
+        /// One line just above the input while this project's subagent works, saying what is being done (no bar).
+        /// The reply removes it.
         /// </summary>
         private void DrawProgress()
         {
@@ -594,29 +594,13 @@ namespace ClaudeHand.Editor
                 SetProgress(null, _progressRev);  // no news for a long while: the supervisor never answered
                 return;
             }
-            int? total = _progress.Value<int?>("total");
-            int step = _progress.Value<int?>("step") ?? 0;
             int actions = _progress.Value<int?>("actions") ?? 0;
             double elapsed = (_progress.Value<double?>("elapsed") ?? 0) + EditorApplication.timeSinceStartup - _progressReceivedAt;
-            var parts = new List<string>();
-            if (total.HasValue) parts.Add($"{step}/{total} {_progress.Value<string>("label")}".Trim());
+            var parts = new List<string> { $"작업 중 · {(int)elapsed}초" };
             var tool = _progress.Value<string>("tool");
             if (!string.IsNullOrEmpty(tool)) parts.Add($"{tool} {_progress.Value<string>("detail")}".Trim());
             if (actions > 0) parts.Add($"{actions}번째 동작");
-            parts.Add($"{(int)elapsed}초");
-            var text = string.Join(" · ", parts);
-
-            var rect = GUILayoutUtility.GetRect(0, 20, GUILayout.ExpandWidth(true));
-            if (total.HasValue)
-            {
-                EditorGUI.ProgressBar(rect, Mathf.Clamp01((float)step / total.Value), text);
-                return;
-            }
-            EditorGUI.DrawRect(rect, new Color(0f, 0f, 0f, 0.18f));
-            float t = Mathf.PingPong((float)EditorApplication.timeSinceStartup * 0.8f, 1f);
-            EditorGUI.DrawRect(new Rect(rect.x + rect.width * 0.75f * t, rect.y, rect.width * 0.25f, rect.height),
-                               new Color(0.3f, 0.6f, 1f, 0.55f));
-            GUI.Label(rect, text, new GUIStyle(EditorStyles.miniLabel) { alignment = TextAnchor.MiddleCenter });
+            EditorGUILayout.LabelField(string.Join(" · ", parts), EditorStyles.wordWrappedMiniLabel);
         }
 
         /// <summary>A message, or its first ShownChars characters and a button that copies all of it.</summary>

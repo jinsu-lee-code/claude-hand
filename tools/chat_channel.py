@@ -85,9 +85,7 @@ INSTRUCTIONS = (
     "finishes, also call reply for each window it changed, with that window's chat_id from current_context, "
     "origin \"desktop\" and request set to a one-line summary of what was asked, so the window's chat panel keeps its whole history. "
     "Claude Hand resumes this same conversation when it is restarted, but subagents started before a restart may be gone: "
-    "if SendMessage to one fails, hand the window's request to its subagent anew. "
-    "The panel shows each Unity/Blender action a subagent takes as a bar above its input. For a request with several clear "
-    "steps (say, export from Blender, import into Unity, place it), also call progress with step and total as each step starts."
+    "if SendMessage to one fails, hand the window's request to its subagent anew."
 )
 HISTORY_KINDS = ("user", "reply")  # what a panel shows again after a restart; permission prompts do not outlive it
 
@@ -107,22 +105,6 @@ REPLY_TOOL = {
     },
 }
 
-PROGRESS_TOOL = {
-    "name": "progress",
-    "description": "Show how far a request with several clear steps is, as a bar above that chat panel's input (step of total "
-                   "and what is happening). Call it as each step starts, after your first short reply. Without it the panel "
-                   "still shows each Unity/Blender action the window's subagent takes. The next reply to that chat_id clears the bar.",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "chat_id": {"type": "string", "description": "The chat (window) the request belongs to"},
-            "step": {"type": "integer", "minimum": 0, "description": "Steps started so far"},
-            "total": {"type": "integer", "minimum": 1, "description": "All steps of this request"},
-            "label": {"type": "string", "description": "What this step does, in the user's language"},
-        },
-        "required": ["chat_id", "step", "total"],
-    },
-}
 PROGRESS_TTL = 300.0  # seconds without news after which a panel stops showing a bar (a long import is one action)
 
 CONTEXT_TOOL = {
@@ -464,16 +446,6 @@ class ChatHub:
                 return " ".join(str(item.get("text", "")).split())[:40]
         return ""
 
-    def set_progress(self, chat_id: str, step: int, total: int, label: str) -> bool:
-        """The supervisor's own count of a multi-step request: makes the panel's bar fill step / total."""
-        if not self.known_chat(chat_id):
-            return False
-        with self.cond:
-            entry = self._progress_entry(chat_id, time.time())  # "marked" stays as it is: the undo point waits for an action
-            entry.update(step=max(0, min(step, total)), total=max(1, total), label=label[:120], updated=time.time())
-            self._bump_progress(chat_id)
-        return True
-
     def _current_progress(self, chat_id: str) -> dict | None:
         entry = self.progress.get(chat_id)
         now = time.time()
@@ -522,7 +494,7 @@ class StdioMcp:
         elif method == "ping":
             self.send({"jsonrpc": "2.0", "id": msg_id, "result": {}})
         elif method == "tools/list":
-            self.send({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": [REPLY_TOOL, CONTEXT_TOOL, PROGRESS_TOOL]}})
+            self.send({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": [REPLY_TOOL, CONTEXT_TOOL]}})
         elif method == "tools/call":
             self.send({"jsonrpc": "2.0", "id": msg_id, "result": self.call_tool(params)})
         elif method == "notifications/claude/channel/permission_request":
@@ -533,21 +505,12 @@ class StdioMcp:
 
     def call_tool(self, params: dict) -> dict:
         name = params.get("name")
-        if name not in ("reply", CONTEXT_TOOL["name"], PROGRESS_TOOL["name"]):
+        if name not in ("reply", CONTEXT_TOOL["name"]):
             return {"isError": True, "content": [{"type": "text", "text": f"Unknown tool {name!r}"}]}
         self.hub.mark_in_use()
         if name == CONTEXT_TOOL["name"]:
             return {"content": [{"type": "text", "text": json.dumps(self.hub.current_context(), ensure_ascii=False)}]}
         args = params.get("arguments") or {}
-        if name == PROGRESS_TOOL["name"]:
-            try:
-                step, total = int(args.get("step", 0)), int(args.get("total", 1))
-            except (TypeError, ValueError):
-                return {"isError": True, "content": [{"type": "text", "text": "step and total must be whole numbers"}]}
-            if not self.hub.set_progress(str(args.get("chat_id", "")), step, total, str(args.get("label", ""))):
-                return {"isError": True, "content": [{"type": "text", "text": "Unknown chat_id; use the one from the <channel> tag "
-                                                      "or current_context."}]}
-            return {"content": [{"type": "text", "text": "shown"}]}
         chat_id, text = str(args.get("chat_id", "")), str(args.get("text", ""))
         origin = "desktop" if args.get("origin") == "desktop" else "panel"
         if not text.strip():

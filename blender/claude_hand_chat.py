@@ -11,13 +11,14 @@ Install: `uv run tools/claude_hand.py blender-install-chat` (or Preferences > Ad
 bl_info = {
     "name": "Claude Hand Chat",
     "author": "claude-hand",
-    "version": (0, 2, 2),
+    "version": (0, 4, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar (N) > Claude Hand",
     "description": "Chat with this Blender window's claude-hand subagent",
     "category": "Interface",
 }
 
+import base64
 import functools
 import json
 import os
@@ -46,10 +47,13 @@ WRAP_WIDTH = 38
 KEPT_ENTRIES = 60       # recent history only: the conversation itself lives in Claude Code
 PANEL_LINES = 40        # history lines drawn; older entries fold so the input box stays within reach
 ENTRY_LINES = 14        # lines of one message; the rest is behind "전체 복사"
-PROGRESS_STALE = 300.0  # seconds without progress news after which the bar is no longer shown (a long import is one action)
+PROGRESS_STALE = 300.0  # seconds without progress news after which "작업 중" is no longer shown (a long import is one action)
 PANEL_MARGIN_PX = 50.0  # category tabs, box and label padding at UI scale 1
 LABEL_HEADROOM = 1.2    # blf's width at the label size can come out a little narrower than the drawn label
 CHAR_PX = 6.0           # without blf: width of a narrow character at 11 px (wide ones such as Korean count twice)
+SHOWN_KINDS = ("user", "reply", "permission", "notice")
+UNDO_KEPT = 20          # undo points kept for the newest requests
+UNDO_PROP = "claude_hand_undo"  # on every scene: "<this run>:<newest undo point set before this state>"
 
 _entries = []            # main thread only
 _status = ["연결 중..."]  # main thread only
@@ -64,6 +68,11 @@ _identity = {"window": None, "pin": None}  # written on the main thread, read by
 _identity_lock = threading.Lock()
 _stop = threading.Event()
 _poller = [None]
+_marks = []               # main thread only: undo points of Claude's requests, newest last ({"seq", "label", "time"})
+_mark_seq = [0]           # main thread only
+_undo_note = [""]         # main thread only: goes along with the next message after "되돌리기"
+_undo_run = f"{os.getpid()}-{int(time.time())}"  # undo points of another Blender run never match
+_native_input = [None]    # main thread only: the Windows input box (a PowerShell process) while it is open
 
 
 # --------------------------------------------------------------------------- server access (any thread)
@@ -220,6 +229,8 @@ def send_text(text, include_context=True):
 
 
 def post_message(text, context):
+    if _undo_note[0]:  # the supervisor would otherwise still count on what was undone
+        context, _undo_note[0] = "\n".join(filter(None, [_undo_note[0], context])), ""
     window, pin = window_identity()
     _last_user[0] = time.time()
     post_in_background("/v1/messages", {"app": "blender", "window": window, "pin": pin, "text": text, "context": context}, "sent")
@@ -293,6 +304,244 @@ def start_supervisor():
     return True
 
 
+# --------------------------------------------------------------------------- Windows input box
+#
+# Blender's own text fields and the Korean IME do not get along on Windows: a syllable shows only once the next one
+# starts, and the space or symbol that ends a syllable is lost. That happens inside Blender before Python sees any key,
+# so the panel offers a native Windows text box instead. It prints each message as one base64 (UTF-8) line.
+
+NATIVE_INPUT_PS = r"""
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+[Windows.Forms.Application]::EnableVisualStyles()
+$utf8 = [Text.Encoding]::UTF8
+$title = $utf8.GetString([Convert]::FromBase64String('__TITLE__'))
+$parentId = __PARENT__
+$out = [Console]::OpenStandardOutput()
+function Send-Line([string]$text) {
+  $bytes = [Text.Encoding]::ASCII.GetBytes([Convert]::ToBase64String($utf8.GetBytes($text)) + "`n")
+  $out.Write($bytes, 0, $bytes.Length)
+  $out.Flush()
+}
+$form = New-Object Windows.Forms.Form
+$form.Text = $title
+$form.TopMost = $true
+$form.StartPosition = 'Manual'
+$cursor = [Windows.Forms.Cursor]::Position
+$form.Location = New-Object Drawing.Point ([Math]::Max(0, $cursor.X - 230)), ([Math]::Max(0, $cursor.Y - 200))
+$form.ClientSize = New-Object Drawing.Size 460, 150
+$form.Font = New-Object Drawing.Font 'Malgun Gothic', 10
+$box = New-Object Windows.Forms.TextBox
+$box.Multiline = $true
+$box.AcceptsReturn = $true
+$box.ScrollBars = 'Vertical'
+$box.Dock = 'Fill'
+$bar = New-Object Windows.Forms.FlowLayoutPanel
+$bar.Dock = 'Bottom'
+$bar.AutoSize = $true
+$bar.FlowDirection = 'RightToLeft'
+$send = New-Object Windows.Forms.Button
+$send.Text = '보내기'
+$send.AutoSize = $true
+$hint = New-Object Windows.Forms.Label
+$hint.Text = 'Enter 보내기 · Shift+Enter 줄바꿈 · Esc 닫기'
+$hint.AutoSize = $true
+$hint.Padding = New-Object Windows.Forms.Padding 0, 7, 0, 0
+$bar.Controls.Add($send)
+$bar.Controls.Add($hint)
+$form.Controls.Add($bar)
+$form.Controls.Add($box)
+$box.BringToFront()
+$doSend = {
+  $text = $box.Text.Trim()
+  if ($text) { Send-Line $text; $box.Clear() }
+  $box.Focus() | Out-Null
+}
+$send.Add_Click($doSend)
+$box.Add_KeyDown({
+  param($s, $e)
+  if ($e.KeyCode -eq 'Return' -and -not $e.Shift) {
+    $e.SuppressKeyPress = $true
+    $form.BeginInvoke([Action]$doSend) | Out-Null  # after the IME has put the last syllable in
+  } elseif ($e.KeyCode -eq 'Escape') {
+    $form.Close()
+  }
+})
+$timer = New-Object Windows.Forms.Timer
+$timer.Interval = 1000
+$timer.Add_Tick({ if (-not (Get-Process -Id $parentId -ErrorAction SilentlyContinue)) { $form.Close() } })
+$timer.Start()
+$form.Add_Shown({ $form.Activate(); $box.Focus() | Out-Null })
+[void]$form.ShowDialog()
+"""
+
+
+def native_input_command(title, parent_pid):
+    """The PowerShell command line for the input box; values go in as base64 or digits, never as script text."""
+    script = (NATIVE_INPUT_PS.replace("__TITLE__", base64.b64encode(title.encode("utf-8")).decode("ascii"))
+              .replace("__PARENT__", str(int(parent_pid))))
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    return ["powershell.exe", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand", encoded]
+
+
+def read_native_input(lines):
+    """Background thread: each line the input box prints is a message for this window."""
+    for raw in lines:
+        try:
+            text = base64.b64decode(raw.strip(), validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if text.strip():
+            _inbox.put(("native_text", text))
+
+
+def open_native_input():
+    """Open the Windows input box, or bring it to the front when it is open already. Main thread."""
+    proc = _native_input[0]
+    if proc is not None and proc.poll() is None:
+        _bring_to_front(proc.pid)
+        return True
+    window, _ = window_identity()
+    try:
+        proc = subprocess.Popen(native_input_command(f"Claude Hand · {window}", os.getpid()), stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except OSError as exc:
+        _status[0] = f"입력창을 열지 못했습니다: {exc}"
+        return False
+    _native_input[0] = proc
+    threading.Thread(target=read_native_input, args=(proc.stdout,), name="claude-hand-input", daemon=True).start()
+    return True
+
+
+def _bring_to_front(pid):
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    found = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def each(hwnd, _):
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and user32.IsWindowVisible(hwnd):
+            found.append(hwnd)
+        return True
+
+    user32.EnumWindows(each, 0)
+    for hwnd in found[:1]:
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        user32.SetForegroundWindow(hwnd)
+
+
+def close_native_input():
+    proc, _native_input[0] = _native_input[0], None
+    if proc is not None and proc.poll() is None:
+        proc.terminate()
+
+
+# --------------------------------------------------------------------------- undo points (main thread)
+#
+# Blender has no Python access to its undo history, so an undo point is a value in the data itself: every scene gets
+# UNDO_PROP = this run and the point's number, and an undo step is pushed. States after the point carry that number
+# (or a newer one); undoing until the number is older and redoing once lands exactly on the point.
+
+
+def _undo_op(op, **kwargs):
+    """Run an ed.* undo operator from a timer or MCP for Blender's execute_code, whose context has no window."""
+    windows = bpy.context.window_manager.windows
+    if not windows:
+        return {"CANCELLED"}  # background Blender: no undo history
+    override = {"window": windows[0], "screen": windows[0].screen}
+    if not hasattr(bpy.context, "temp_override"):  # Blender before 3.2
+        return op(override, **kwargs) if op.poll(override) else {"CANCELLED"}
+    with bpy.context.temp_override(**override):
+        return op(**kwargs) if op.poll() else {"CANCELLED"}
+
+
+def state_seq():
+    """The newest of this run's undo points that the current state comes after (0 for none)."""
+    newest = 0
+    for scene in bpy.data.scenes:
+        run, _, seq = str(getattr(scene, UNDO_PROP, "")).rpartition(":")
+        if run == _undo_run and seq.isdigit():
+            newest = max(newest, int(seq))
+    return newest
+
+
+def describe_mark(mark):
+    return f"{mark['label']} ({mark['time']})" if mark["label"] else f"{mark['time']} 요청"
+
+
+def mark_undo_point(label=""):
+    """Set an undo point for a new request. The subagent's guard hook calls this through MCP for Blender's execute_code
+    just before the request's first Blender action."""
+    seq = _mark_seq[0] + 1
+    for scene in bpy.data.scenes:
+        setattr(scene, UNDO_PROP, f"{_undo_run}:{seq}")
+    if _undo_op(bpy.ops.ed.undo_push, message=f"Claude Hand: {label or '요청'}"[:60]) != {"FINISHED"}:
+        return "undo point not set: no undo history here"
+    _mark_seq[0] = seq
+    _marks.append({"seq": seq, "label": " ".join(str(label).split())[:40], "time": time.strftime("%H:%M")})
+    del _marks[:-UNDO_KEPT]
+    _redraw()
+    return f"undo point {seq} set"
+
+
+def walk_back(seq, current, undo, redo, limit):
+    """Undo until the state is from before undo point seq, then redo once: the state as it was when the point was set.
+    Returns the undo steps taken, or None after stepping forward again to where it started (the point is no longer in
+    the history, which keeps Preferences > System > Undo Steps, 32 by default)."""
+    steps = 0
+    while current() >= seq:
+        if steps >= limit or undo() != {"FINISHED"}:
+            for _ in range(steps):
+                redo()
+            return None
+        steps += 1
+    redo()
+    return steps
+
+
+def undo_last_request(note=False):
+    """Revert everything done in this Blender since the newest undo point. Shows the outcome in the panel and returns
+    it. note: also tell the supervisor with the next message (the panel's button; a subagent knows already)."""
+    if not _marks:
+        return _notice("되돌릴 Claude 요청이 없습니다.")
+    mark = _marks[-1]
+    if state_seq() < mark["seq"]:  # Blender's own undo already went back past it
+        _marks.pop()
+        return _notice(f"'{describe_mark(mark)}' 요청은 이미 되돌려져 있습니다.")
+    _undo_op(bpy.ops.ed.undo_push, message="Claude Hand: 되돌리기 전")  # so Ctrl+Shift+Z can bring the work back
+    limit = bpy.context.preferences.edit.undo_steps + 2
+    steps = walk_back(mark["seq"], state_seq, lambda: _undo_op(bpy.ops.ed.undo), lambda: _undo_op(bpy.ops.ed.redo), limit)
+    if steps is None:
+        return _notice(f"'{describe_mark(mark)}' 요청을 되돌리지 못했습니다. 그 뒤로 실행 취소 단계가 너무 많아 "
+                       "Blender의 실행 취소 기록에서 밀려났습니다.")
+    _marks.pop()
+    if note:
+        _undo_note[0] = f"[사용자가 채팅창에서 '{describe_mark(mark)}' 요청 이후의 Blender 변경을 실행 취소로 되돌렸음]"
+    return _notice(f"되돌렸어요: '{describe_mark(mark)}' 이후의 변경")
+
+
+def _notice(text):
+    _entries.append({"kind": "notice", "text": text})
+    del _entries[:-KEPT_ENTRIES]
+    _redraw()
+    return text
+
+
+def _undo_from_button():
+    undo_last_request(note=True)
+    return None
+
+
+@bpy.app.handlers.persistent
+def _forget_undo_points(*_args):
+    """Opening a file starts a new undo history."""
+    _marks.clear()
+
+
 def apply_event(event, payload):
     if event == "status":
         _status[0] = payload if payload is not None else (STARTING_MESSAGE if starting() else describe_missing_server())
@@ -313,6 +562,9 @@ def apply_event(event, payload):
         _progress[0] = None
     elif event == "progress":
         _progress[0] = (payload, time.time()) if payload else None
+    elif event == "native_text":
+        if not send_text(payload, bpy.context.window_manager.claude_hand_chat_context):  # the box is empty again by now
+            _notice("보내지 못했습니다. 앞 메시지가 Claude Hand가 켜지기를 기다리는 중이니 잠시 뒤 다시 보내 주세요.")
     elif event == "sent":
         if not payload.get("ok"):
             _status[0] = "보내지 못했습니다: " + str(payload.get("error", "알 수 없는 오류"))
@@ -348,13 +600,17 @@ def tick():
     if _progress[0] is not None and time.time() - _progress[0][1] > PROGRESS_STALE:
         _progress[0] = None
         changed = True
-    busy = _progress[0] is not None
+    busy = _progress[0] is not None  # its seconds count up
     if changed or busy or (_last_user[0] and time.time() - _last_user[0] > NO_REPLY_HINT_SECONDS):
-        for window_ in getattr(bpy.context.window_manager, "windows", []):
-            for area in window_.screen.areas:
-                if area.type == "VIEW_3D":
-                    area.tag_redraw()
-    return 0.15 if busy else 0.5  # while the bar moves
+        _redraw()
+    return 0.5
+
+
+def _redraw():
+    for window_ in getattr(bpy.context.window_manager, "windows", []):
+        for area in window_.screen.areas:
+            if area.type == "VIEW_3D":
+                area.tag_redraw()
 
 
 def _on_input_update(self, context):
@@ -423,6 +679,41 @@ class CLAUDEHAND_OT_copy(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CLAUDEHAND_OT_native_input(bpy.types.Operator):
+    bl_idname = "claude_hand.chat_native_input"
+    bl_label = "한글 입력창"
+    bl_description = ("Type in a Windows text box: Blender's own field loses spaces and symbols with the Korean IME and "
+                      "shows a syllable late. Enter sends to this chat, Shift+Enter starts a new line")
+
+    @classmethod
+    def poll(cls, context):
+        return sys.platform == "win32"
+
+    def execute(self, context):
+        return {"FINISHED"} if open_native_input() else {"CANCELLED"}
+
+
+class CLAUDEHAND_OT_undo(bpy.types.Operator):
+    bl_idname = "claude_hand.chat_undo"
+    bl_label = "되돌리기"
+    bl_description = "Undo everything changed in this Blender since Claude's last request started (Blender's own undo history)"
+
+    def invoke(self, context, event):
+        if not _marks:
+            return {"CANCELLED"}
+        message = f"'{describe_mark(_marks[-1])}' 이후 바뀐 것을 모두 되돌립니다. 그 뒤에 직접 고친 것도 함께 되돌아갑니다."
+        try:
+            return context.window_manager.invoke_confirm(self, event, title="Claude Hand 되돌리기", message=message,
+                                                         confirm_text="되돌리기")
+        except TypeError:  # Blender before 4.1: no title or message
+            return context.window_manager.invoke_confirm(self, event)
+
+    def execute(self, context):
+        # Not inside the operator: undo frees the data an operator still holds.
+        bpy.app.timers.register(_undo_from_button, first_interval=0.0)
+        return {"FINISHED"}
+
+
 class CLAUDEHAND_PT_chat(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -476,44 +767,38 @@ class CLAUDEHAND_PT_chat(bpy.types.Panel):
             for line in wrap("1분 넘게 답이 없습니다. 감독 세션을 start-supervisor.cmd로 열었는지, Claude Code 창에 확인을 기다리는 질문이 없는지 봐 주세요.", width):
                 layout.label(text=line)
         draw_progress(layout, width)
+        if _marks and _progress[0] is None:
+            layout.operator(CLAUDEHAND_OT_undo.bl_idname, text=f"되돌리기: {describe_mark(_marks[-1])}", icon="LOOP_BACK")
         wm = context.window_manager
-        layout.prop(wm, "claude_hand_chat_input", text="")
+        row = layout.row(align=True)
+        row.prop(wm, "claude_hand_chat_input", text="")
+        if sys.platform == "win32":
+            row.operator(CLAUDEHAND_OT_native_input.bl_idname, text="한글", icon="WINDOW")
         row = layout.row()
         row.prop(wm, "claude_hand_chat_context", text="선택 항목 함께")
         row.operator(CLAUDEHAND_OT_send.bl_idname, text="보내기", icon="PLAY")
 
 
 def progress_view(progress, received_at, now):
-    """(bar factor, bar text, caption) for what the subagent is doing: the bar fills by step / total when the supervisor
-    gave the steps, otherwise it goes back and forth while work goes on (no made-up percentage)."""
+    """What the subagent is doing, in one line: "작업 중 · 12초 · execute_code bpy.ops… · 3번째 동작"."""
     seconds = int(progress.get("elapsed", 0) + now - received_at)
-    total = progress.get("total")
-    if total:
-        factor, bar = max(0.0, min(1.0, progress.get("step", 0) / total)), f"{progress.get('step', 0)}/{total} · {seconds}초"
-    else:
-        factor, bar = abs((now * 0.8) % 2.0 - 1.0), f"작업 중 · {seconds}초"
-    caption = [progress.get("label") or "", f"{progress.get('tool', '')} {progress.get('detail', '')}".strip()]
+    parts = [f"작업 중 · {seconds}초", f"{progress.get('tool', '')} {progress.get('detail', '')}".strip()]
     if progress.get("actions"):
-        caption.append(f"{progress['actions']}번째 동작")
-    return factor, bar, " · ".join(part for part in caption if part)
+        parts.append(f"{progress['actions']}번째 동작")
+    return " · ".join(part for part in parts if part)
 
 
 def draw_progress(layout, width):
-    """The bar just above the input while this window's subagent works; the reply removes it."""
+    """Just above the input while this window's subagent works, as text (no bar); the reply removes it."""
     if _progress[0] is None:
         return
     progress, received_at = _progress[0]
     now = time.time()
     if now - received_at > PROGRESS_STALE:  # no news for a long while: the supervisor never answered
         return
-    factor, bar, caption = progress_view(progress, received_at, now)
     col = layout.column(align=True)
-    for line in wrap(caption, width)[:3] if caption else []:
-        col.label(text=line, icon="NONE")
-    if hasattr(col, "progress"):  # Blender 4.0+
-        col.progress(factor=factor, type="BAR", text=bar)
-    else:
-        col.label(text=bar, icon="TIME")
+    for i, line in enumerate(wrap(progress_view(progress, received_at, now), width)[:3]):
+        col.label(text=line, icon="TIME" if i == 0 else "NONE")
 
 
 def panel_metrics(context):
@@ -589,8 +874,11 @@ def entry_rows(entry, width):
     """(rows, hidden): the (text, icon) label rows of one entry, at most ENTRY_LINES lines of its text, and how
     many lines were left out. No rows for kinds the panel does not show."""
     kind = entry.get("kind")
-    if kind not in ("user", "reply", "permission"):
+    if kind not in SHOWN_KINDS:
         return [], 0
+    if kind == "notice":  # from this panel itself, e.g. after 되돌리기
+        lines = wrap(entry_text(entry), width)[:ENTRY_LINES]
+        return [(line, "LOOP_BACK" if i == 0 else "NONE") for i, line in enumerate(lines)], 0
     rows = []
     if kind == "reply" and entry.get("origin") == "desktop":
         rows.append(("데스크톱 앱에서", "WINDOW"))
@@ -609,7 +897,7 @@ def visible_entries(width):
     oldest first, so a long conversation never pushes the input box out of reach; folded counts the rest."""
     shown, used, total, full = [], 0, 0, False
     for entry in reversed(_entries):
-        if entry.get("kind") not in ("user", "reply", "permission"):
+        if entry.get("kind") not in SHOWN_KINDS:
             continue
         total += 1
         if full:
@@ -625,7 +913,8 @@ def visible_entries(width):
     return shown, total - len(shown)
 
 
-CLASSES = (CLAUDEHAND_OT_send, CLAUDEHAND_OT_start, CLAUDEHAND_OT_permission, CLAUDEHAND_OT_copy, CLAUDEHAND_PT_chat)
+CLASSES = (CLAUDEHAND_OT_send, CLAUDEHAND_OT_start, CLAUDEHAND_OT_permission, CLAUDEHAND_OT_copy, CLAUDEHAND_OT_undo,
+           CLAUDEHAND_OT_native_input, CLAUDEHAND_PT_chat)
 
 
 def register():
@@ -635,6 +924,10 @@ def register():
         name="메시지", description="Enter로 보냅니다", update=_on_input_update)
     bpy.types.WindowManager.claude_hand_chat_context = bpy.props.BoolProperty(
         name="선택 항목 함께 보내기", default=True)
+    # Defined here (not a custom property) so the Properties editor does not list it.
+    setattr(bpy.types.Scene, UNDO_PROP, bpy.props.StringProperty(options={"HIDDEN"}))
+    if _forget_undo_points not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_forget_undo_points)
     _stop.clear()
     if not bpy.app.timers.is_registered(tick):
         bpy.app.timers.register(tick, first_interval=0.5, persistent=True)
@@ -645,8 +938,12 @@ def register():
 
 def unregister():
     _stop.set()
+    close_native_input()
     if bpy.app.timers.is_registered(tick):
         bpy.app.timers.unregister(tick)
+    if _forget_undo_points in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_forget_undo_points)
+    delattr(bpy.types.Scene, UNDO_PROP)
     del bpy.types.WindowManager.claude_hand_chat_input
     del bpy.types.WindowManager.claude_hand_chat_context
     for cls in reversed(CLASSES):

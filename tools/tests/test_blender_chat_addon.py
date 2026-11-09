@@ -3,6 +3,7 @@
 Needs Blender's Python module (`pip install bpy`); skipped when it is not importable.
 """
 
+import base64
 import importlib.util
 import json
 import os
@@ -151,21 +152,95 @@ class BlenderChatAddonTests(unittest.TestCase):
         self.assertTrue(hasattr(bpy.types, "CLAUDEHAND_PT_chat"))
         self.assertEqual(self.addon.wrap("가" * 50)[0], "가" * self.addon.WRAP_WIDTH)
 
-    def test_progress_bar_while_the_subagent_works(self):
+    def test_progress_line_while_the_subagent_works(self):
         addon = self.addon
         pin = next(a.pin for a in cc.load_agents(Path(self.tmp.name) / "agents") if a.app == "blender")
         self.assertTrue(wait_for(lambda: addon._status[0].startswith("담당"), addon))
-        chat_id = self.hub.report_action("blender", pin, "execute_code", "bpy.ops.mesh.primitive_uv_sphere_add()")
+        chat_id = self.hub.report_action("blender", pin, "execute_code", "bpy.ops.mesh.primitive_uv_sphere_add()")["chat_id"]
         self.assertTrue(wait_for(lambda: addon._progress[0] is not None, addon))
-        factor, bar, caption = addon.progress_view(*addon._progress[0], time.time())
-        self.assertTrue(bar.startswith("작업 중") and 0.0 <= factor <= 1.0)
-        self.assertIn("primitive_uv_sphere_add", caption)
-        self.hub.set_progress(chat_id, 2, 4, "Unity로 가져오는 중")
-        self.assertTrue(wait_for(lambda: (addon._progress[0] or ({}, 0))[0].get("total") == 4, addon))
-        factor, bar, caption = addon.progress_view(*addon._progress[0], time.time())
-        self.assertEqual((factor, bar.split(" ")[0]), (0.5, "2/4"))
+        line = addon.progress_view(*addon._progress[0], time.time())
+        self.assertTrue(line.startswith("작업 중 · ") and "초 · execute_code bpy.ops.mesh.primitive_uv_sphere_add()" in line, line)
+        self.hub.report_action("blender", pin, "execute_code", "bpy.ops.export_scene.fbx()")
+        self.assertTrue(wait_for(lambda: (addon._progress[0] or ({}, 0))[0].get("actions") == 2, addon))
+        self.assertTrue(addon.progress_view(*addon._progress[0], time.time()).endswith("2번째 동작"))
         self.hub.reply(chat_id, "다 했어요")
         self.assertTrue(wait_for(lambda: addon._progress[0] is None, addon))
+
+    def test_walking_back_to_an_undo_point(self):
+        """Blender's undo history as a list of the newest undo point each state comes after, including the failures."""
+        history, at = [0, 1, 1, 2, 2], [4]
+
+        def step(by):
+            if not 0 <= at[0] + by < len(history):
+                return {"CANCELLED"}
+            at[0] += by
+            return {"FINISHED"}
+        walk = lambda seq, limit=50: self.addon.walk_back(seq, lambda: history[at[0]], lambda: step(-1), lambda: step(1), limit)
+        self.assertIsNone(walk(2, limit=1))  # too many steps: back where it started
+        self.assertEqual(at[0], 4)
+        self.assertEqual(walk(2), 2)
+        self.assertEqual(at[0], 3)  # the state right when point 2 was set
+        self.assertEqual(walk(1), 3)
+        self.assertEqual(at[0], 1)
+        history[:] = [1, 1, 2]  # point 1 dropped out of the history
+        at[0] = 2
+        self.assertIsNone(walk(1))
+        self.assertEqual(at[0], 2)
+
+    def test_undo_points_in_blenders_own_history(self):
+        addon = self.addon
+        made = lambda: sorted(o.name for o in bpy.data.objects if o.name.startswith("CH_"))
+        self.assertEqual(addon.undo_last_request(), "되돌릴 Claude 요청이 없습니다.")
+        rows, _ = addon.entry_rows(addon._entries[-1], None)
+        self.assertEqual(rows[0], ("되돌릴 Claude 요청이 없습니다.", "LOOP_BACK"))  # shown in the panel
+        self.assertIs(addon.visible_entries(None)[0][-1][0], addon._entries[-1])
+
+        addon._undo_op(bpy.ops.ed.undo_push, message="Original")  # what a file opened in the UI starts with
+        self.assertEqual(addon.mark_undo_point("의자   만들어줘"), "undo point 1 set")
+        bpy.context.scene.collection.objects.link(bpy.data.objects.new("CH_Chair", None))  # data API: no undo step
+        addon.mark_undo_point("")  # a request from the Claude app: no panel text
+        bpy.ops.mesh.primitive_cube_add()  # an operator: an undo step of its own
+        bpy.context.active_object.name = "CH_Cube"
+        self.assertEqual([m["label"] for m in addon._marks], ["의자 만들어줘", ""])
+        self.assertTrue(addon.undo_last_request().startswith("되돌렸어요:"))
+        self.assertEqual(made(), ["CH_Chair"])  # only the newest request
+        self.assertTrue(addon.undo_last_request().startswith("되돌렸어요: '의자 만들어줘 ("))
+        self.assertEqual(made(), [])
+
+        addon.mark_undo_point("램프")
+        bpy.ops.mesh.primitive_cube_add()
+        addon._undo_op(bpy.ops.ed.undo)  # Ctrl+Z in Blender went back past the point already
+        self.assertIn("이미 되돌려져", addon.undo_last_request())
+        self.assertEqual(addon._marks, [])
+
+        addon.mark_undo_point("x")
+        bpy.ops.wm.read_factory_settings(use_empty=True)  # another file: a new undo history
+        self.assertEqual(addon._marks, [])
+
+    def test_the_message_after_an_undo_says_so(self):
+        addon = self.addon
+        self.assertTrue(wait_for(lambda: addon._status[0].startswith("담당"), addon))
+        addon._undo_note[0] = "[사용자가 채팅창에서 '의자' 요청 이후의 Blender 변경을 실행 취소로 되돌렸음]"
+        addon.send_text("다시 파랗게 해줘")
+        self.assertTrue(wait_for(lambda: self.emitted, addon))
+        self.assertIn("실행 취소로 되돌렸음", self.emitted[0]["params"]["content"])
+        self.assertEqual(addon._undo_note[0], "")
+
+    def test_windows_input_box_messages_go_to_this_chat(self):
+        """The input box itself runs in PowerShell (checked by hand); here: what it prints reaches this window's chat."""
+        addon = self.addon
+        self.assertTrue(wait_for(lambda: addon._status[0].startswith("담당"), addon))
+        line = lambda text: base64.b64encode(text.encode("utf-8")) + b"\n"
+        addon.read_native_input([line("안녕 하세요?! @#"), b"not base64 !!\n", line("   ")])
+        self.assertTrue(wait_for(lambda: self.emitted, addon))
+        self.assertIn("안녕 하세요?! @#", self.emitted[0]["params"]["content"])
+        self.assertEqual(len(self.emitted), 1)  # garbage and blank lines are dropped
+
+        command = addon.native_input_command("Claude Hand · props'; Remove-Item x", 4321)
+        self.assertEqual(command[:2], ["powershell.exe", "-NoProfile"])
+        script = base64.b64decode(command[-1]).decode("utf-16-le")
+        self.assertIn("$parentId = 4321", script)
+        self.assertNotIn("Remove-Item", script)  # the title goes in as base64, not as script text
 
     def test_lines_fit_the_sidebar(self):
         """Korean is about twice as wide as Latin text; a fixed character count overflowed into "..."."""

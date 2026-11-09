@@ -252,7 +252,7 @@ class McpTests(unittest.TestCase):
         self.assertEqual(init["protocolVersion"], "2025-06-18")
         self.assertEqual(init["capabilities"]["experimental"], {"claude/channel": {}, "claude/channel/permission": {}})
         self.assertIn("reply tool", init["instructions"])
-        self.assertEqual([t["name"] for t in replies[1]["result"]["tools"]], ["reply", "current_context", "progress"])
+        self.assertEqual([t["name"] for t in replies[1]["result"]["tools"]], ["reply", "current_context"])
         self.assertEqual(replies[2], {"jsonrpc": "2.0", "id": 3, "result": {}})
         self.assertEqual(replies[3]["error"]["code"], -32601)
 
@@ -385,15 +385,8 @@ class ProgressTests(unittest.TestCase):
         self.hub.reply("unity-mygame", "다 했어요")
         self.assertIsNone(self.hub.poll("unity-mygame", 0, 0)["progress"])
         # the next request (here asked in the Claude app, so no panel text) gets its own undo point
-        self.hub.set_progress("unity-mygame", 1, 2, "가져오는 중")  # a step before any action keeps the point pending
         self.assertEqual(self.hub.report_action("unity", "MyGame@aaaa1111", "manage_scene", "get_hierarchy"),
                          {"chat_id": "unity-mygame", "new_request": True, "label": ""})
-
-    def test_supervisor_steps_fill_the_bar(self):
-        self.assertTrue(self.hub.set_progress("unity-mygame", 2, 3, "Unity로 가져오는 중"))
-        progress = self.hub.poll("unity-mygame", 0, 0)["progress"]
-        self.assertEqual((progress["step"], progress["total"], progress["label"]), (2, 3, "Unity로 가져오는 중"))
-        self.assertFalse(self.hub.set_progress("nobody", 1, 2, ""))
 
     def test_a_waiting_panel_wakes_on_progress(self):
         rev = self.hub.poll("unity-mygame", 0, 0)["progress_rev"]
