@@ -117,7 +117,7 @@ namespace ClaudeHand.Editor
                 ["ref"] = s.Builder.Add(go, path),
                 ["name"] = go.name,
                 ["path"] = path,
-                ["instance_id"] = go.GetInstanceID(),
+                ["instance_id"] = ChCompat.InstanceIdForTools(go),
                 ["active"] = go.activeSelf,
             };
 

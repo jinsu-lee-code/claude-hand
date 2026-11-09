@@ -32,7 +32,7 @@ namespace ClaudeHand.Editor
 
         internal sealed class Entry
         {
-            public int instance_id;
+            public string object_id;
             public string global_id;
             public string path;
         }
@@ -54,7 +54,7 @@ namespace ClaudeHand.Editor
             {
                 _file.entries.Add(new Entry
                 {
-                    instance_id = go.GetInstanceID(),
+                    object_id = ChCompat.ObjectId(go),
                     global_id = GlobalObjectId.GetGlobalObjectIdSlow(go).ToString(),
                     path = hierarchyPath,
                 });
@@ -106,7 +106,7 @@ namespace ClaudeHand.Editor
             }
 
             var entry = file.entries[index - 1];
-            var go = EditorUtility.InstanceIDToObject(entry.instance_id) as GameObject;
+            var go = string.IsNullOrEmpty(entry.object_id) ? null : ChCompat.FindGameObject(entry.object_id);
             if (go == null && GlobalObjectId.TryParse(entry.global_id, out var globalId))
             {
                 go = GlobalObjectId.GlobalObjectIdentifierToObjectSlow(globalId) as GameObject;

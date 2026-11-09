@@ -7,6 +7,8 @@ description: Unity 프로젝트나 Blender 창 여러 개를 동시에 다룰 �
 
 Unity 프로젝트마다 `unity-<프로젝트>`, Blender 창마다 `blender-<파일>` 전담 하위 세션이 있다. 각 하위 세션은 자기 대상에만 연결되고, 다른 대상은 안전장치가 막는다. 너는 감독이다. Unity와 Blender 작업은 직접 하지 말고 담당 하위 세션에게 맡긴다.
 
+**Unity·Blender를 직접 조작하는 도구는 쓰지 않는다.** MCP for Unity(`unityMCP` 등), Unity AI Assistant(`unity-mcp`), MCP for Blender(`blender` 등)가 이 세션에 붙어 있어도 마찬가지다. 그 도구는 하위 세션의 고정과 안전장치를 거치지 않는다. claude-hand 폴더에서는 설정으로 막혀 있다. 조회든 수정이든 항상 담당 하위 세션에게 맡긴다.
+
 ## 시작할 때
 1. 어떤 `unity-*`, `blender-*` 하위 세션이 있는지 확인한다.
 2. 사용자가 말한 대상의 담당이 없으면 **직접 만든다.** 그 Unity 프로젝트나 Blender 파일이 열려 있는지 확인하고(Blender라면 MCP for Blender 서버가 켜져 있어야 한다), 이 명령을 실행한다.

@@ -168,7 +168,8 @@ uv run tools/claude_hand.py update     # 하위 세션·감독 스킬·채팅 �
 | `skills/orchestrator/` | 평소에 감독 세션이 따르는 규칙(스킬)입니다. `sync`가 `~/.claude/skills/claude-hand/`에 설치합니다. |
 | `tools/claude_hand.py` | 하위 세션 생성(`list`, `sync`), 안전장치(`guard`), 세팅 도우미(`doctor`, `update`, `mode`, `unity-install`, `unity-open`, `blender-open`, `chat-setup`, `blender-install-chat`, `chat-status`, `shortcut`, `remote-control`)가 들어 있습니다. |
 | `tools/chat_channel.py` | 채팅 채널 서버입니다. Claude Code가 실행하는 MCP 서버이고, Unity·Blender 채팅창과는 로컬 HTTP로 통신합니다. |
-| `unity/com.claudehand.tools/` | Unity 패키지입니다. MCP for Unity에 `ch_*` 도구 6개와 채팅창(Window > Claude Hand > Chat)을 추가합니다. |
+| `unity/com.claudehand.tools/` | Unity 패키지입니다. `ch_*` 도구 6개와 채팅창(Window > Claude Hand > Chat)을 추가합니다. `ch_*` 도구는 이 패키지가 여는 자기 통로로 불립니다(MCP for Unity 버전에 상관없이 동작). |
+| `tools/unity_bridge.py` | 하위 세션이 그 통로로 `ch_*` 도구를 부를 때 쓰는 MCP 서버입니다. `--list`로 통로를 연 Unity를 볼 수 있습니다. |
 | `blender/claude_hand_chat.py` | Blender 채팅 패널 애드온입니다. |
 | `start-supervisor.cmd` / `.sh` | 감독 세션을 엽니다. 바탕화면 아이콘과 채팅창 버튼이 이 파일을 실행합니다. 열 때마다 `preflight`가 하위 세션과 설정을 맞추고, 이미 켜져 있으면 알려 줍니다. |
 | `docs/` | [설계](docs/DESIGN.md), [PC 검증 순서](docs/TEST-PLAN.md) |
@@ -183,6 +184,8 @@ uv run tools/claude_hand.py update     # 하위 세션·감독 스킬·채팅 �
 | `ch_import_package` | 위 패키지를 가져와 씬에 배치합니다. `dry_run=true`로 덮어쓸 에셋을 먼저 보여주고, 덮어쓸 게 있으면 허락 없이는 진행하지 않습니다. |
 | `ch_import_model` | Blender가 내보낸 FBX(또는 OBJ, GLB)를 `Assets/ClaudeHand/Imports/` 아래로 가져와 씬에 배치합니다. |
 | `ch_apply_settings` | Interaction Mode를 **No Throttling**으로 바꿉니다. Unity가 뒤에 있어도 명령을 처리하게 하는 설정입니다. 보기(`show`), 적용(`apply`), 되돌리기(`revert`)를 할 수 있습니다. 메뉴 **Tools > Claude Hand**에도 있습니다. |
+
+명령줄에서도 부를 수 있습니다. 예: `uv run tools/claude_hand.py unity-call MyGame ch_editor_status`
 
 모든 오류에는 `retry` 값이 붙습니다.
 - `safe`: 그대로 다시 호출해도 됩니다.
@@ -214,9 +217,9 @@ Blender에는 MCP for Blender 말고 따로 설치할 것이 없습니다. 그 �
    ```powershell
    uv run tools/claude_hand.py unity-install "C:\경로\프로젝트"
    ```
-5. Claude Code에 MCP for Unity를 등록합니다(아직 없을 때만). 그다음 Claude Code를 다시 시작합니다.
+5. MCP for Unity를 **Stdio** 방식으로 씁니다. 패키지를 넣고 처음 뜨는 MCP for Unity 설정 창은 HTTP로 등록하니, Unity의 **Window > MCP for Unity**에서 Transport를 **Stdio**로 바꾸고 Claude Code의 **Configure**를 누릅니다. 명령으로 등록해도 됩니다(아직 없을 때만). 그다음 Claude Code를 다시 시작합니다.
    ```powershell
-   claude mcp add --scope user --transport http unityMCP http://localhost:8080/mcp
+   claude mcp add --scope user unityMCP -- uvx --from mcpforunityserver mcp-for-unity --transport stdio
    ```
 6. Unity에서 메뉴 **Tools > Claude Hand > Apply Recommended Settings**를 누릅니다(Interaction Mode = No Throttling).
 7. Blender 창을 여러 개 쓸 거면 창마다 포트를 다르게 해서 엽니다.

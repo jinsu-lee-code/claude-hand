@@ -111,21 +111,30 @@ agent-desktop skills get platform
    ```
    Unity가 이미 열려 있으면 Unity 창이 앞에 올 때 패키지를 받아 온다. 사용자에게 Unity 창을 한 번 클릭해 달라고 하거나, 허락을 받고 `agent-desktop focus-window --app Unity`로 앞으로 가져온다. focus-window는 사용자의 현재 창 포커스를 가져간다는 점을 알린다.
 3. 패키지를 받는 동안 대화상자(예: API 업데이트, Safe Mode)가 뜰 수 있다. 화면 조작 규칙대로 snapshot으로 내용을 읽고 사용자에게 보여준 뒤, 고른 버튼만 누른다. Safe Mode는 컴파일 오류가 있다는 뜻이니 들어가기 전에 사용자에게 묻는다.
-4. Claude Code에 MCP for Unity가 등록돼 있지 않으면 등록한다. MCP for Unity의 기본 방식인 HTTP에 맞춘다.
-   ```
-   claude mcp add --scope user --transport http unityMCP http://localhost:8080/mcp
-   ```
-   새 MCP 서버는 Claude Code를 다시 시작해야 보인다. 사용자에게 다시 시작하고 "세팅 이어서 해줘"라고 말해 달라고 한다. 이어서 할 때는 `doctor`부터 다시 실행해 진행 상황을 파악한다.
+4. MCP for Unity를 **Stdio** 방식으로 맞춘다. 패키지를 넣고 처음 열면 MCP for Unity 설정 창이 뜨는데, 그대로 Configure를 누르면 HTTP 방식(`http://127.0.0.1:8080/mcp`)으로 등록된다. claude-hand는 Stdio 방식으로 시험했고, 하위 세션이 프로젝트에 고정되는 것도 Stdio 방식 기준이다.
+   - 사용자에게 Unity의 **Window > MCP for Unity**에서 Transport를 **Stdio**로 바꾸고 Claude Code의 **Configure**를 눌러 달라고 한다. 허락을 받았으면 화면 조작으로 해도 된다.
+   - 아직 아무 방식으로도 등록돼 있지 않으면 명령으로 등록해도 된다.
+     ```
+     claude mcp add --scope user unityMCP -- uvx --from mcpforunityserver mcp-for-unity --transport stdio
+     ```
+   - 처음 창에서 HTTP로 이미 등록했다면, 그때 Unity가 띄운 HTTP 서버(`mcp-for-unity --transport http`, 8080 포트)가 Stdio로 바꾼 뒤에도 남아 있을 수 있다. 그대로 둬도 claude-hand 동작에는 지장이 없다(Windows 시험에서 확인). 끄고 싶어 하면 그 프로세스를 사용자가 작업 관리자에서 끄게 안내한다.
+   - 새 MCP 서버는 Claude Code를 다시 시작해야 보인다. 사용자에게 다시 시작하고 "세팅 이어서 해줘"라고 말해 달라고 한다. 이어서 할 때는 `doctor`부터 다시 실행해 진행 상황을 파악한다.
+   - `doctor`에 "MCP for Unity 연결"이 빠진 항목으로 나오면 등록 방식과 Unity 창의 Transport가 다르다는 뜻이다. 안내대로 맞춘다.
 
-## 5. Unity 에디터 설정 (MCP로)
+## 5. Unity 에디터 설정
 
-Unity가 Connected이고 Claude Code가 MCP for Unity를 보이는 상태에서 진행한다.
-1. `ch_apply_settings(action="show")`로 현재 값을 보여준다.
-2. 허락받은 계획에 들어 있으면 `ch_apply_settings(action="apply")`를 부른다. Interaction Mode가 No Throttling이 된다.
-   - Unity가 여러 개 열려 있으면 `unity_instance`를 지정한다.
-   - 이 설정은 같은 Unity 버전의 모든 프로젝트에 적용된다.
-   - 되돌리려면 `action="revert"` 또는 메뉴 Tools > Claude Hand > Revert Recommended Settings를 쓴다.
-3. 도구가 안 보이면 `manage_tools(action="sync")`를 먼저 부른다. 그래도 MCP가 안 되면 사용자에게 메뉴 **Tools > Claude Hand > Apply Recommended Settings**를 눌러 달라고 하거나, 허락을 받고 화면 조작으로 누른다.
+Unity가 프로젝트를 연 상태에서 진행한다. 이 저장소 폴더에서는 MCP for Unity 도구를 직접 쓰지 않는다(설정으로 막혀 있다). 대신 Claude Hand Tools의 통로를 부르는 명령을 쓴다. `<프로젝트>`는 프로젝트 폴더 이름(`list`에 보이는 이름)이다.
+1. 현재 값을 보여준다.
+   ```
+   uv run tools/claude_hand.py unity-call "<프로젝트>" ch_apply_settings action=show
+   ```
+2. 허락받은 계획에 들어 있으면 적용한다. Interaction Mode가 No Throttling이 된다.
+   ```
+   uv run tools/claude_hand.py unity-call "<프로젝트>" ch_apply_settings action=apply
+   ```
+   - 이 설정은 같은 Unity 버전의 모든 프로젝트에 적용된다. Unity가 여러 개 열려 있어도 한 프로젝트에서 한 번만 하면 된다.
+   - 되돌리려면 `action=revert` 또는 메뉴 Tools > Claude Hand > Revert Recommended Settings를 쓴다.
+3. `프로젝트를 찾지 못했습니다`가 나오면 Claude Hand Tools가 아직 컴파일되지 않은 것이다. Unity Console에 컴파일 오류가 없는지 보고, Unity 창을 한 번 앞으로 가져와 컴파일을 끝내게 한 뒤 다시 부른다. 그래도 안 되면 사용자에게 메뉴 **Tools > Claude Hand > Apply Recommended Settings**를 눌러 달라고 하거나, 허락을 받고 화면 조작으로 누른다.
 
 ## 6. 하위 세션 만들기
 

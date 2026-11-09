@@ -50,6 +50,18 @@ namespace ClaudeHand.Editor
 
         public static string LibraryDir => Path.Combine(ProjectRoot, "Library", "ClaudeHand");
 
+        /// <summary>~/.claude-hand (or CLAUDE_HAND_HOME): shared with tools/claude_hand.py and the chat channel.</summary>
+        public static string ClaudeHandHome
+        {
+            get
+            {
+                var env = Environment.GetEnvironmentVariable("CLAUDE_HAND_HOME");
+                return string.IsNullOrEmpty(env)
+                    ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude-hand")
+                    : env;
+            }
+        }
+
         /// <summary>
         /// Shared folder where projects drop packages for each other.
         /// Default: %USERPROFILE%/.claude-hand/exchange. Override with CLAUDE_HAND_EXCHANGE_DIR.

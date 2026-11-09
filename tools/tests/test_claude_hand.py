@@ -135,7 +135,8 @@ class GenerationTests(unittest.TestCase):
         text = ch.render_agent(self.a, "unity-mygame", server, "uv run -q --no-project", allowlist=True, focus_nudge=False)
         front = text.split("---")[1]
         self.assertIn("name: unity-mygame", front)
-        self.assertIn('tools: "mcp__unity_mygame__*, Read, Glob, Grep"', front)
+        self.assertIn('tools: "mcp__unity_mygame__*, mcp__unity_mygame_ch__*, Read, Glob, Grep"', front)
+        self.assertIn("  - unity_mygame_ch:", front)
         self.assertIn("  - unity_mygame:", front)
         self.assertIn('"--default-instance", "MyGame@aaaa1111"', front)
         self.assertIn('UNITY_MCP_DISABLE_FOCUS_NUDGE: "1"', front)
@@ -506,7 +507,7 @@ class SetupHelperTests(unittest.TestCase):
                  unittest.mock.patch.object(ch, "discover_blender", lambda ports, request=None: []), \
                  unittest.mock.patch.object(ch, "find_blender_executables", lambda **kw: []), \
                  unittest.mock.patch.object(ch, "chat_server_registered", lambda **kw: False), \
-                 unittest.mock.patch.object(ch, "plan_chat_config", lambda root, runner="": {root / ".mcp.json": {}}):
+                 unittest.mock.patch.object(ch, "plan_chat_config", lambda root, runner="", direct_servers=None: {root / ".mcp.json": {}}):
                 checks = ch.doctor_checks([project], [9876], version=lambda *cmd: versions[cmd[0]])
         by_item = {c.item: c for c in checks}
         self.assertTrue(by_item["Claude Code CLI (claude 명령)"].ok)
@@ -546,7 +547,7 @@ class ChatSetupTests(unittest.TestCase):
             (root / ".mcp.json").write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}}), encoding="utf-8")
             (root / ".claude" / "settings.local.json").write_text(
                 json.dumps({"permissions": {"allow": ["Bash(git status)"]}, "model": "keep-me"}), encoding="utf-8")
-            plan = ch.plan_chat_config(root, "uv run -q --no-project")
+            plan = ch.plan_chat_config(root, "uv run -q --no-project", direct_servers=[])
             self.assertEqual(sorted(p.name for p in plan), [".mcp.json", "settings.local.json"])
             ch.write_json_files(plan)
             mcp = json.loads((root / ".mcp.json").read_text(encoding="utf-8"))
@@ -560,7 +561,7 @@ class ChatSetupTests(unittest.TestCase):
             self.assertEqual(settings["permissions"]["allow"], ["Bash(git status)", ch.CHAT_REPLY_RULE])
             self.assertEqual(settings["enabledMcpjsonServers"], [ch.CHAT_SERVER_NAME])
             self.assertEqual(settings["model"], "keep-me")
-            self.assertEqual(ch.plan_chat_config(root, "uv run -q --no-project"), {})  # second run changes nothing
+            self.assertEqual(ch.plan_chat_config(root, "uv run -q --no-project", direct_servers=[]), {})  # second run changes nothing
 
     def test_chat_config_refuses_broken_json(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -783,7 +784,7 @@ class EverydayStartTests(unittest.TestCase):
         with unittest.mock.patch.dict("os.environ", {"CLAUDE_HAND_HOME": str(home)}), \
              unittest.mock.patch.object(ch.Path, "home", lambda: Path(tmp)), \
              unittest.mock.patch.object(ch, "supervisor_running", lambda home=None, fetch=None: running), \
-             unittest.mock.patch.object(ch, "plan_chat_config", lambda root=None, runner=None: {}), \
+             unittest.mock.patch.object(ch, "plan_chat_config", lambda root=None, runner=None, direct_servers=None: {}), \
              unittest.mock.patch.object(ch, "refresh_agents", lambda **kw: refreshed.append(kw) or ch.SyncResult()), \
              unittest.mock.patch.object(ch, "LAUNCH_ARGS_FILE", Path(tmp) / ".launch-args"), \
              unittest.mock.patch("sys.stdout", out):
@@ -905,7 +906,7 @@ class DesktopModeTests(unittest.TestCase):
                  unittest.mock.patch.object(ch, "discover_blender", lambda ports, request=None: []), \
                  unittest.mock.patch.object(ch, "find_blender_executables", lambda **kw: []), \
                  unittest.mock.patch.object(ch, "claude_mcp_get", lambda **kw: None), \
-                 unittest.mock.patch.object(ch, "plan_chat_config", lambda root=None, runner=None: {Path(".mcp.json"): {}}):
+                 unittest.mock.patch.object(ch, "plan_chat_config", lambda root=None, runner=None, direct_servers=None: {Path(".mcp.json"): {}}):
                 checks = ch.doctor_checks([], [9876], version=lambda *cmd: versions[cmd[0]])
         chat = [c for c in checks if c.area == "채팅"]
         self.assertTrue(chat)

@@ -27,23 +27,29 @@ Unity 프로젝트는 두 개를 준비합니다. 예: `A` = 작업 중인 프�
 
 1. 두 프로젝트에 패키지를 추가합니다. 0단계에서 했다면 건너뛰어요. 직접 하려면 `uv run tools/claude_hand.py unity-install "<프로젝트>"`를 실행해요.
 2. Console에 `ClaudeHand` 관련 빨간 오류가 없어야 합니다.
-3. Claude Code 메인 세션에서 "ch_editor_status 불러줘"라고 해 봅니다.
-   - Unity 창이 하나만 열려 있을 때 해야 합니다. 둘 이상이면 대상을 고르라는 오류가 나요.
-   - 기대 결과: `project`, `focused`, `exchange_dir`가 담긴 응답이 와요.
-   - 도구가 안 보이면 "manage_tools sync 해줘"라고 하거나, Claude Code를 다시 시작하거나, `/mcp`에서 다시 연결합니다. 그래도 안 되면 "execute_custom_tool로 ch_editor_status 불러줘"라고 해 봅니다.
+3. Claude Hand Tools가 자기 통로를 열었는지 봅니다. claude-hand 폴더에서 실행해요.
+   ```
+   uv run tools/unity_bridge.py --list
+   uv run tools/claude_hand.py unity-call "<프로젝트 A 이름>" ch_editor_status
+   ```
+   - 기대 결과: `--list`에 두 프로젝트가 `answers`로 보이고, `unity-call`은 `project`, `focused`, `exchange_dir`가 담긴 응답을 보여요.
+   - 이 통로는 MCP for Unity가 커스텀 도구를 내보내는지와 상관없이 동작해요(MCP for Unity 10.3.0 stdio는 ch_* 도구를 내보내지 않았어요).
+   - claude-hand 폴더의 Claude Code 세션에서는 MCP for Unity 도구가 막혀 있어요. 감독이 하위 세션을 건너뛰지 않게 하려는 설정이에요. 그래서 이 확인은 명령으로 해요.
+4. Unity에서 아무 스크립트나 고쳐 저장하고, 컴파일이 도는 동안 바로 3의 `unity-call`을 다시 실행합니다.
+   - 기대 결과: 컴파일이 끝날 때까지 기다렸다가 응답이 와요. `EDITOR_BUSY`나 `UNREACHABLE`로 끝나면 걸린 시간과 함께 알려주세요.
 
-> 결과 알려주세요: 오류 문구, 또는 도구가 직접 보였는지 execute_custom_tool로만 됐는지
+> 결과 알려주세요: `--list` 출력, `unity-call` 응답 또는 오류 문구, 4에서 걸린 시간
 
 ## 2. 백그라운드 동작 실측 (가장 중요)
 
-Interaction Mode를 **바꾸기 전과 후**에 각각 해 봅니다. Edit > Preferences > General > Interaction Mode예요. 바꾸기는 `ch_apply_settings(action="apply")`로, 되돌리기는 `action="revert"`로 할 수 있어요.
+Interaction Mode를 **바꾸기 전과 후**에 각각 해 봅니다. Edit > Preferences > General > Interaction Mode예요. 바꾸기는 `uv run tools/claude_hand.py unity-call "<A>" ch_apply_settings action=apply`로, 되돌리기는 `action=revert`로 할 수 있어요.
 
 | 상태 | 방법 | 응답 |
 |---|---|---|
-| 포커스 | Unity 창을 클릭해 둔 채 Claude에게 "ch_editor_status 불러줘" | 즉시 / 몇 초 / 30초 이상 / 실패 |
-| 비활성 | 다른 창(브라우저 등)을 클릭해 둔 채 같은 요청 | |
-| 최소화 | Unity 창을 최소화한 채 같은 요청 | |
-| 최소화 + 변경 | 최소화한 채 "씬에 큐브 하나 만들어줘" | |
+| 포커스 | Unity 창을 클릭해 둔 채 `unity-call "<A>" ch_editor_status` | 즉시 / 몇 초 / 30초 이상 / 실패 |
+| 비활성 | 다른 창(브라우저 등)을 클릭해 둔 채 같은 명령 | |
+| 최소화 | Unity 창을 최소화한 채 같은 명령 | |
+| 최소화 + 변경 | 3단계를 마친 뒤, 최소화한 채 감독에게 "A에 큐브 하나 만들어줘" | |
 
 응답의 `focused` 값이 실제 상태와 맞는지도 봐 주세요.
 
@@ -55,7 +61,8 @@ Interaction Mode를 **바꾸기 전과 후**에 각각 해 봅니다. Edit > Pre
 2. `uv run tools/claude_hand.py sync`를 실행합니다.
 3. Claude Code를 다시 시작하고 `/agents`를 입력합니다. `unity-a`, `unity-b`가 보여야 해요.
 4. 메인 세션에서 "unity-a에게 ch_editor_status 불러서 프로젝트 이름 알려달라고 해"라고 합니다.
-   - 기대 결과: A의 이름이 나와요.
+   - 기대 결과: A의 이름이 나와요. 하위 세션이 쓴 도구 이름이 `mcp__unity_a_ch__ch_editor_status`처럼 `_ch`가 붙은 서버 것이어야 해요(claude-hand 통로).
+   - `_ch` 도구가 없다고 하면 하위 세션에게 `ch_bridge_status`를 불러 달라고 해서 나온 이유를 알려주세요.
    - 하위 세션이 Unity 도구가 없다고 하면, 위 가정 1~2가 틀린 거예요. 그 문구를 그대로 알려주세요. `sync --no-allowlist`로 다시 해 볼 수 있어요.
 
 ## 4. 안전장치 확인

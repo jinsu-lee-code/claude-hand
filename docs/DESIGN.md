@@ -31,12 +31,16 @@ MCP for Unity는 테스트를 실행할 때 Unity 창을 잠깐 앞으로 끌어
 사용자 ⇄ 감독 세션 (Claude Code 메인 대화, 스킬: claude-hand-unity)
             │ Agent 도구로 위임 (병렬 가능)
             ├── unity-a (서브에이전트) ─ 인라인 stdio MCP 서버 (--default-instance A@hash) ─┐
-            └── unity-b (서브에이전트) ─ 인라인 stdio MCP 서버 (--default-instance B@hash) ─┤
-                                                                                   TCP │ (MCP for Unity 브리지)
-                                               Unity A ◀──────────────────────────────┤
-                                               Unity B ◀──────────────────────────────┘
+            │                            └ unity_a_ch: unity_bridge.py --hash <A> ─────┼──┐
+            └── unity-b (서브에이전트) ─ 인라인 stdio MCP 서버 (--default-instance B@hash) ─┤  │
+                                         └ unity_b_ch: unity_bridge.py --hash <B> ─────┼──┤
+                                                                                   TCP │  │ TCP (claude-hand 통로, ChBridge.cs)
+                                               Unity A ◀──────────────────────────────┤◀─┤
+                                               Unity B ◀──────────────────────────────┘◀─┘
               교환 폴더 ~/.claude-hand/exchange ◀── ch_export_objects / ch_import_package
 ```
+
+MCP for Unity 기본 도구(씬·오브젝트·스크립트)는 MCP for Unity를 거치고, claude-hand의 `ch_*` 도구는 claude-hand 통로를 거친다(결정 6).
 
 ### 결정 1: 허브 서버를 새로 만들지 않고 MCP for Unity와 Claude Code 기능을 조합한다
 
@@ -56,7 +60,7 @@ MCP for Unity는 테스트를 실행할 때 Unity 창을 잠깐 앞으로 끌어
 ### 결정 3: 고정은 세 겹으로 한다
 
 1. **서버 고정:** `--default-instance`. 인자 없이 부른 호출은 고정된 프로젝트로 간다.
-2. **도구 허용 목록:** `tools: mcp__<자기서버>__*, Read, Glob, Grep`. 부모의 `unityMCP` 도구는 아예 보이지 않는다.
+2. **도구 허용 목록:** `tools: mcp__<자기서버>__*, mcp__<자기서버>_ch__*, Read, Glob, Grep`. 부모의 `unityMCP` 도구는 아예 보이지 않는다. `_ch` 서버는 시작 인자(`--hash`)로 자기 프로젝트에만 붙으니 다른 프로젝트를 고를 방법이 없다.
 3. **PreToolUse 훅 (`claude_hand.py guard`):** 서버 고정이 막지 못하는 경우를 막는다.
    - 호출마다 넣을 수 있는 `unity_instance` 인자
    - `set_active_instance`
@@ -91,6 +95,23 @@ MCP for Unity는 테스트를 실행할 때 Unity 창을 잠깐 앞으로 끌어
 - 스냅샷은 `Library/ClaudeHand/snapshots/`에 최근 20개를 보관한다. 도메인 리로드가 일어나도 남는다.
 - 노드에는 `path`와 `instance_id`도 같이 넣는다. MCP for Unity 기본 도구에 그대로 넘길 수 있다.
 
+
+### 결정 6: ch_* 도구는 claude-hand 통로로 부른다
+
+Windows 시험에서 MCP for Unity 10.3.0 stdio 서버는 C# 커스텀 도구를 목록에 내보내지 않았다(`manage_tools sync`, `execute_custom_tool`도 안 됨). MCP for Unity 버전마다 달라질 수 있는 부분이라 기대지 않기로 했다.
+
+- Unity 쪽: `ChBridge.cs`가 `[InitializeOnLoad]`로 `127.0.0.1`의 빈 포트에 소켓을 연다. 한 줄 JSON 요청(`{token, tool, params}`)을 받아 메인 스레드(`EditorApplication.update`)에서 `[McpForUnityTool]` 클래스의 `HandleCommand`를 그대로 부른다. 도구 코드는 MCP for Unity로 부를 때와 같다.
+- 등록 파일: `~/.claude-hand/unity/<hash>.json`. hash는 MCP for Unity와 같은 SHA1(Application.dataPath) 앞 8자리라 `Name@hash`가 그대로 맞는다. 포트, 토큰, 도구 목록(이름·설명·인자·폴링 여부)을 담고 30초마다 다시 쓴다. Unity를 닫으면 지운다.
+- 토큰: 처음 열 때 만들어 SessionState에 둔다. 같은 PC의 다른 프로그램이 포트만 알아서는 부를 수 없다. 파일은 사용자 폴더 안에 있다.
+- 스크립트 리로드: 리로드 직전에 소켓을 닫고 기다리던 요청에는 `EDITOR_BUSY`(retry: safe)로 답한다. 다시 열 때 같은 포트를 먼저 시도한다. `unity_bridge.py`는 연결이 안 되면 등록 파일을 다시 읽어 재시도한다.
+- 폴링 도구(`ch_import_package`)는 `unity_bridge.py`가 `action=status`로 끝날 때까지 물어본다. 하위 세션 쪽에서는 한 번의 호출로 보인다.
+- 하위 세션: `unity-<이름>`마다 `<서버키>_ch` 인라인 서버로 `unity_bridge.py --hash <hash>`를 띄운다. 안전장치 훅은 자기 `_ch` 서버 도구를 통과시킨다.
+- 명령줄: `claude_hand.py unity-call <프로젝트> <도구> key=value ...`. 세팅 스킬이 감독 없이 `ch_apply_settings`를 부를 때 쓴다.
+- 등록 파일은 Unity 찾기에도 쓴다. MCP for Unity가 HTTP로 등록돼 `~/.unity-mcp` 상태 파일이 없을 때도 `list`·`sync`가 열린 프로젝트를 찾는다. `doctor`는 두 경로에서 보이는 프로젝트가 다르면 알려 준다.
+
+### 결정 7: 감독은 Unity·Blender를 직접 만지지 않는다
+
+감독 세션에 MCP for Unity나 MCP for Blender가 붙어 있으면, 감독이 하위 세션을 건너뛰고 직접 조작하는 일이 생겼다(고정도 안전장치도 거치지 않는다). `chat-setup`이 사용자 설정에서 그런 서버(MCP for Unity, Unity AI Assistant 릴레이, MCP for Blender)를 찾아 claude-hand 폴더의 `settings.local.json`에 `permissions.deny: mcp__<키>__*`로 넣는다. 하위 세션은 자기 이름(`unity_<이름>`, `blender_<이름>`)의 서버를 쓰니 막히지 않는다. 감독 스킬에도 같은 규칙을 적었다.
 ## Blender
 
 ### 어떤 Blender MCP를 쓰는가
@@ -232,7 +253,7 @@ Blender N 패널 애드온 (urllib)  ─┼──▶ chat_channel.py ──stdio
 | MCP for Blender 애드온 설치·활성화, Claude 설정 | `uvx mcp-for-blender setup --dry-run` → `--yes`. 애드온을 복사하고 Blender를 headless로 실행해 켠다 | 없음 |
 | Blender 창마다 포트 | `blender-open <파일> --port N`: `--python-expr`로 씬 포트를 바꾼 뒤 이벤트 루프가 시작돼서, 애드온 자동 시작이 새 포트를 쓴다 | 이미 열린 창을 닫을 수 없을 때만 N 패널 조작 |
 | Unity 패키지 (MCP for Unity, Claude Hand Tools) | `unity-install`: `Packages/manifest.json`을 고친다(백업 남김) | Unity가 열려 있으면 창이 앞에 와야 패키지를 받는다(사용자 클릭 또는 `focus-window`), 대화상자 |
-| Claude Code에 MCP for Unity 등록 | `claude mcp add --scope user --transport http unityMCP http://localhost:8080/mcp` (MCP for Unity 기본값 HTTP에 맞춤) | 없음 (재시작은 사용자가) |
+| Claude Code에 MCP for Unity 등록 | Unity의 Window > MCP for Unity에서 Transport를 Stdio로 하고 Configure, 또는 `claude mcp add --scope user unityMCP -- uvx --from mcpforunityserver mcp-for-unity --transport stdio`. 처음 설정 창의 기본값은 HTTP지만, HTTP로는 `~/.unity-mcp` 상태 파일이 안 생기고 시험도 Stdio로 했다 | 없음 (재시작은 사용자가) |
 | Unity Interaction Mode | MCP로 `ch_apply_settings(apply)`. EditorPrefs `InteractionMode=1`, `ApplicationIdleTime=0`(UnityCsReference의 Preferences 코드와 같은 키)로 바꾸고 internal `EditorApplication.UpdateInteractionModeSettings`를 리플렉션으로 부른다. 메뉴 Tools > Claude Hand에도 있다 | MCP가 안 될 때 메뉴 클릭 |
 | 하위 세션 | `sync` | 없음 |
 
@@ -252,7 +273,7 @@ Blender N 패널 애드온 (urllib)  ─┼──▶ chat_channel.py ──stdio
 |---|---|---|
 | 1 | 인라인 MCP 서버의 도구 이름이 `mcp__<서버키>__<도구>` 형식이다 | `sync --no-allowlist`로 허용 목록을 끄고 훅에만 의존한다 |
 | 2 | `tools`에 `mcp__x__*` 와일드카드가 동작한다 | 위와 같다 |
-| 3 | MCP for Unity의 stdio 서버가 시작할 때 Unity에서 C# 커스텀 도구 목록을 받아 와 개별 도구로 노출한다. 소스에서 확인했지만, 시작 시점의 동기화라 늦으면 목록에 빠질 수 있다 | 하위 세션 지침대로 `manage_tools(action="sync")`를 부르고, 그래도 없으면 `execute_custom_tool`로 부른다 |
+| 3 | ~~MCP for Unity의 stdio 서버가 C# 커스텀 도구를 개별 도구로 노출한다~~ **틀림** (Windows, MCP for Unity 10.3.0 stdio: 목록에 없고 sync·execute_custom_tool도 안 됨). 대신 Claude Hand Tools가 자기 통로를 연다: `ChBridge.cs`가 루프백 소켓을 열고 `~/.claude-hand/unity/<hash>.json`에 포트·토큰·도구 목록을 쓰며, 하위 세션마다 `tools/unity_bridge.py`가 `<서버키>_ch` MCP 서버로 붙는다. 남은 가정: 스크립트 리로드 뒤 같은 포트를 다시 잡는다(SessionState), Unity 6.3에서 백그라운드 스레드 소켓과 `EditorApplication.update` 처리가 비활성·최소화 상태에서도 돈다(No Throttling) | 포트가 바뀌면 `unity_bridge.py`가 등록 파일을 다시 읽어 재시도한다(최대 약 20초). 최소화 상태에서 안 돌면 가정 6과 같이 깨우기 장치를 넣는다 |
 | 4 | HTTP 방식에서 인라인 http 서버 연결이 부모와 별개의 MCP 세션이다 | stdio로 바꾼다 |
 | 5 | Windows Git Bash에서 `uv`가 PATH에 있다 | `sync --runner "py -3"` 같이 다른 실행기를 지정한다 |
 | 6 | 비활성·최소화 상태의 Unity가 No Throttling에서 명령을 제때 처리한다 | 2단계: Unity 쪽 깨우기 장치를 넣는다 |
