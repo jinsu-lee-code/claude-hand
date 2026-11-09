@@ -19,7 +19,8 @@ First-time setup helpers (used by the claude-hand-setup skill, safe to run by ha
   unity-install  Add MCP for Unity and Claude Hand Tools to a project's Packages/manifest.json.
   unity-open     Open a project with the Unity version it was made with.
   blender-open   Start Blender with the MCP for Blender add-on listening on a chosen port.
-  chat-setup           Register the chat channel (Unity/Blender chat panels) with Claude Code.
+  chat-setup           Register the chat channel for this folder (.mcp.json), allow its reply tool
+                       (.claude/settings.local.json) and pre-start it once so uv fetches Python.
   blender-install-chat Install and enable the Blender chat panel add-on.
 
 Run with uv (already installed for MCP for Unity) or any Python 3.10+:
@@ -62,6 +63,9 @@ CHAT_CHANNEL_SCRIPT = TOOL_PATH.parent / "chat_channel.py"
 CHAT_ADDON_SOURCE = REPO_ROOT / "blender" / "claude_hand_chat.py"
 CHAT_ADDON_MODULE = "claude_hand_chat"
 SUPERVISOR_COMMAND = f"claude --dangerously-load-development-channels server:{CHAT_SERVER_NAME}"
+CHAT_REPLY_RULE = f"mcp__{CHAT_SERVER_NAME}__reply"
+MIN_CLAUDE_FOR_PERMISSION_RELAY = (2, 1, 234)
+THIRD_PARTY_PROVIDER_ENV = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
 
 
 # --------------------------------------------------------------------------- data
@@ -1037,9 +1041,21 @@ def doctor_checks(projects: list[Path], blender_ports: list[int], version=tool_v
             str(editor) if editor else "Unity Hub 기본 위치에서 못 찾음",
             "" if editor else "Unity Hub에서 해당 버전을 설치하거나 Hub로 직접 여세요")
 
-    chat = chat_server_registered()
-    add("채팅", "채팅 채널 등록 (claude-hand 폴더)", chat, "등록됨" if chat else ("claude CLI 없음" if chat is None else "없음"),
-        "" if chat else "uv run tools/claude_hand.py chat-setup")
+    claude_v = parse_claude_version(claude)
+    relay_ok = claude_v is not None and claude_v >= MIN_CLAUDE_FOR_PERMISSION_RELAY
+    add("채팅", "Claude Code 2.1.234 이상 (채팅창의 허용/거부 버튼)", relay_ok if claude else None, claude or "없음",
+        "" if relay_ok else "claude update")
+    provider = [name for name in THIRD_PARTY_PROVIDER_ENV if os.environ.get(name, "").lower() in ("1", "true")]
+    add("채팅", "Channels를 쓸 수 있는 로그인 (claude.ai 또는 Console API 키)", not provider,
+        ("이 환경은 " + ", ".join(provider) + " 사용 중 - Channels를 쓸 수 없음") if provider else "Bedrock/Vertex/Foundry 아님",
+        "" if not provider else "claude.ai 로그인이나 Console API 키로 Claude Code를 쓰세요")
+    try:
+        chat_plan = plan_chat_config(REPO_ROOT)
+    except SystemExit as exc:
+        chat_plan = {Path("?"): {"error": str(exc)}}
+    add("채팅", "채팅 채널 등록과 답장 허용 (claude-hand 폴더)", not chat_plan,
+        "됨" if not chat_plan else "빠짐: " + ", ".join(p.name for p in chat_plan),
+        "" if not chat_plan else "uv run tools/claude_hand.py chat-setup")
     chat_addons = find_chat_addon_installs()
     add("채팅", "Blender 채팅 애드온", bool(chat_addons) if exes else None, ", ".join(map(str, chat_addons[:3])) or "설치 안 됨",
         "" if chat_addons else "uv run tools/claude_hand.py blender-install-chat")
@@ -1055,9 +1071,91 @@ def doctor_checks(projects: list[Path], blender_ports: list[int], version=tool_v
     return checks
 
 
+def read_json_file(path: Path) -> dict:
+    """{} for a missing file; refuses to touch a file that is not valid JSON."""
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except ValueError as exc:
+        raise SystemExit(f"{path} is not valid JSON ({exc}); fix or move it, then run again.")
+    if not isinstance(data, dict):
+        raise SystemExit(f"{path} does not hold a JSON object.")
+    return data
+
+
+def plan_chat_config(root: Path = REPO_ROOT, runner: str = "uv run -q --no-project") -> dict[Path, dict]:
+    """Files chat-setup writes on this machine, as {path: new contents}; only files that change.
+    .mcp.json registers the channel for this folder (the channels docs' way). settings.local.json
+    pre-allows the reply tool, so answering a panel never stops for a permission prompt. Both stay
+    out of git: they hold this machine's paths and this user's permission choices."""
+    plan: dict[Path, dict] = {}
+    mcp_path = root / ".mcp.json"
+    mcp = read_json_file(mcp_path)
+    parts = runner.split()
+    entry = {"command": parts[0], "args": [*parts[1:], (root / "tools" / "chat_channel.py").as_posix()]}
+    if mcp.get("mcpServers", {}).get(CHAT_SERVER_NAME) != entry:
+        mcp.setdefault("mcpServers", {})[CHAT_SERVER_NAME] = entry
+        plan[mcp_path] = mcp
+    settings_path = root / ".claude" / "settings.local.json"
+    settings = read_json_file(settings_path)
+    allow = settings.setdefault("permissions", {}).setdefault("allow", [])
+    if CHAT_REPLY_RULE not in allow:
+        allow.append(CHAT_REPLY_RULE)
+        plan[settings_path] = settings
+    return plan
+
+
+AGENT_ALLOW_RE = re.compile(r"^mcp__(unity|blender)_[a-z0-9_]+__\*$")
+
+
+def plan_tool_allow(root: Path, server_keys: list[str], prune: bool = False) -> dict[Path, dict]:
+    """sync --allow-tools: let the supervisor's subagents use their Unity/Blender tools without a
+    prompt each time (rules live in this folder's settings.local.json, so only the supervisor gets them)."""
+    path = root / ".claude" / "settings.local.json"
+    settings = read_json_file(path)
+    allow = settings.setdefault("permissions", {}).setdefault("allow", [])
+    wanted = [f"mcp__{key}__*" for key in server_keys]
+    new = [rule for rule in allow if not (prune and AGENT_ALLOW_RE.match(rule) and rule not in wanted)]
+    new += [rule for rule in wanted if rule not in new]
+    if new == allow:
+        return {}
+    settings["permissions"]["allow"] = new
+    return {path: settings}
+
+
+def write_json_files(plan: dict[Path, dict]) -> None:
+    for path, data in plan.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+
+
+def prewarm_chat_channel(root: Path = REPO_ROOT, runner: str = "uv run -q --no-project", run=subprocess.run) -> dict:
+    """Start the channel once the way Claude Code will, with --check: uv fetches Python now (not inside
+    Claude Code's 30-second MCP startup window) and we learn whether the port and home folder work."""
+    parts = runner.split()
+    exe = shutil.which(parts[0]) or parts[0]
+    try:
+        proc = run([exe, *parts[1:], str(root / "tools" / "chat_channel.py"), "--check"],
+                   capture_output=True, text=True, errors="replace", timeout=600)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "error": f"could not run {parts[0]}: {exc}"}
+    for line in reversed((proc.stdout or "").strip().splitlines()):
+        try:
+            return json.loads(line)
+        except ValueError:
+            continue
+    return {"ok": False, "error": (proc.stderr or proc.stdout or "no output").strip()[-500:]}
+
+
+def parse_claude_version(text: str | None) -> tuple[int, ...] | None:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", text or "")
+    return tuple(int(x) for x in match.groups()) if match else None
+
+
 def chat_add_command(runner: str = "uv run -q --no-project") -> list[str]:
-    """`claude mcp add` for the chat channel, scoped to this repo folder (local scope), so only the
-    supervisor started here runs it; a user-wide entry would start one channel per Claude session."""
+    """Fallback for chat-setup --register-local: the same server via `claude mcp add` (local scope)
+    instead of .mcp.json, in case a Claude Code version does not load .mcp.json servers as channels."""
     return ["claude", "mcp", "add", "--scope", "local", CHAT_SERVER_NAME, "--", *runner.split(), str(CHAT_CHANNEL_SCRIPT)]
 
 
@@ -1107,20 +1205,36 @@ ENABLE_CHAT_ADDON = (
 
 
 def cmd_chat_setup(args: argparse.Namespace) -> int:
-    cmd = chat_add_command(args.runner)
-    registered = chat_server_registered()
-    if registered:
-        print(f"{CHAT_SERVER_NAME} 채널이 이미 등록돼 있습니다 ({REPO_ROOT}).")
-    elif args.dry_run or registered is None:
-        print(("(dry run) " if args.dry_run else "claude CLI를 찾지 못했습니다. 직접 실행하세요: ") + " ".join(f'"{c}"' if " " in c else c for c in cmd))
+    prefix = "(dry run) " if args.dry_run else ""
+    if args.register_local:
+        cmd = chat_add_command(args.runner)
+        print(prefix + "등록(대체 방식): " + " ".join(f'"{c}"' if " " in c else c for c in cmd))
+        if not args.dry_run:
+            proc = subprocess.run([shutil.which("claude") or "claude", *cmd[1:]], cwd=str(REPO_ROOT))
+            if proc.returncode != 0:
+                return proc.returncode
     else:
-        proc = subprocess.run([shutil.which("claude") or "claude", *cmd[1:]], cwd=str(REPO_ROOT))
-        if proc.returncode != 0:
-            print("등록하지 못했습니다. 위 오류를 확인하세요.")
-            return proc.returncode
-        print(f"{CHAT_SERVER_NAME} 채널을 이 폴더({REPO_ROOT})에 등록했습니다.")
-    print("감독 세션은 채널을 켜고 이 폴더에서 시작해야 합니다:")
-    print(f"  start-supervisor.cmd   (또는: cd \"{REPO_ROOT}\" && {SUPERVISOR_COMMAND})")
+        plan = plan_chat_config(REPO_ROOT, args.runner)
+        for path in plan:
+            what = "채널 등록" if path.name == ".mcp.json" else f"답장 도구({CHAT_REPLY_RULE}) 자동 허용"
+            print(f"{prefix}{'고침' if path.exists() else '만듦'}: {path}  ({what})")
+        if not plan:
+            print("채널 등록과 답장 도구 허용은 이미 돼 있습니다.")
+        if not args.dry_run:
+            write_json_files(plan)
+
+    if args.dry_run or args.no_check:
+        print(prefix + "건너뜀: 채널 서버 미리 실행(--check)")
+    else:
+        print("채널 서버를 한 번 미리 실행합니다(처음이면 uv가 Python을 내려받아 몇 분 걸릴 수 있습니다)...")
+        result = prewarm_chat_channel(REPO_ROOT, args.runner)
+        if not result.get("ok"):
+            print("점검 실패: " + json.dumps(result, ensure_ascii=False))
+            return 1
+        print(f"점검 통과: Python {result.get('python')}, 포트 {result.get('port')} 사용 가능, 하위 세션 {len(result.get('agents', []))}개")
+
+    print("다음: start-supervisor.cmd 로 감독 세션을 여세요. 처음 한 번은 개발용 채널 경고와")
+    print("      .mcp.json 서버(claude-hand-chat) 사용 승인 창이 뜹니다. 내용을 읽고 승인하세요.")
     return 0
 
 
@@ -1293,6 +1407,13 @@ def cmd_sync(args: argparse.Namespace) -> int:
                          focus_nudge=args.keep_focus_nudge, prune=args.prune, dry_run=args.dry_run,
                          blender=blender, blender_server=blender_server)
     prefix = "(dry run) " if args.dry_run else ""
+    if args.allow_tools:
+        keys = [server_key(Path(name).stem) for name in build_agent_files(instances, server, blender, blender_server, args.runner)]
+        allow_plan = plan_tool_allow(REPO_ROOT, keys, prune=args.prune)
+        for path in allow_plan:
+            print(f"{prefix}도구 자동 허용: {path} ({', '.join(f'mcp__{k}__*' for k in keys)})")
+        if not args.dry_run:
+            write_json_files(allow_plan)
     print(f"{prefix}Unity MCP 설정: {server.transport} ({server.origin})")
     if blender_server:
         print(f"{prefix}Blender MCP 설정: {blender_server.command} {' '.join(blender_server.args)} ({blender_server.origin})")
@@ -1332,6 +1453,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--no-skill", action="store_true", help="do not install the supervisor skill")
     p_sync.add_argument("--blender-ports", default=DEFAULT_BLENDER_PORTS, help="ports to probe for MCP for Blender (default %(default)s)")
     p_sync.add_argument("--no-blender", action="store_true", help="skip Blender")
+    p_sync.add_argument("--allow-tools", action="store_true",
+                        help="let the subagents use their Unity/Blender tools without asking (this folder's settings.local.json)")
     p_sync.add_argument("--dry-run", action="store_true")
     p_sync.set_defaults(func=cmd_sync)
 
@@ -1362,8 +1485,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_bo.add_argument("--dry-run", action="store_true")
     p_bo.set_defaults(func=cmd_blender_open)
 
-    p_cs = sub.add_parser("chat-setup", help="register the chat channel with Claude Code (this folder only)")
+    p_cs = sub.add_parser("chat-setup", help="register the chat channel for this folder and pre-start it once")
     p_cs.add_argument("--runner", default="uv run -q --no-project", help="how Claude Code starts Python")
+    p_cs.add_argument("--no-check", action="store_true", help="skip the pre-start check")
+    p_cs.add_argument("--register-local", action="store_true",
+                      help="fallback: register with `claude mcp add --scope local` instead of .mcp.json")
     p_cs.add_argument("--dry-run", action="store_true")
     p_cs.set_defaults(func=cmd_chat_setup)
 

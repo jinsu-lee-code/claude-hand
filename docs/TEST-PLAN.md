@@ -117,14 +117,19 @@ Interaction Mode를 **바꾸기 전과 후**에 각각 해 봅니다. Edit > Pre
 ## 10. 창마다 채팅
 
 1. `uv run tools/claude_hand.py chat-setup`, `uv run tools/claude_hand.py blender-install-chat`을 실행합니다. 세팅 스킬로 했다면 건너뛰어요.
-2. 지금 열린 Claude Code를 닫고 `start-supervisor.cmd`로 다시 엽니다. 처음 뜨는 개발용 채널 경고와 MCP 서버 승인을 읽고 승인해요.
+   - `chat-setup`이 "점검 통과: Python …, 포트 … 사용 가능"을 출력해야 해요. 처음이라 Python을 받느라 오래 걸렸다면 걸린 시간도 알려주세요.
+   - claude-hand 폴더에 `.mcp.json`과 `.claude/settings.local.json`이 생겼는지 봐 주세요.
+2. 지금 열린 Claude Code를 닫고 `start-supervisor.cmd`로 다시 엽니다. 처음 뜨는 개발용 채널 경고와 `.mcp.json` 서버(claude-hand-chat) 승인을 읽고 승인해요.
+   - Claude Code에서 `/mcp`를 입력하면 claude-hand-chat이 connected로 보여야 해요.
+   - 같은 폴더에서 `start-supervisor` 없이 Claude Code를 하나 더 열어도, 채팅이 계속 감독 세션으로 가는지 확인해 주세요.
 3. Unity A에서 **Window > Claude Hand > Chat**을 엽니다. 위쪽에 `담당: unity-a`처럼 보여야 해요.
 4. 오브젝트 하나를 선택하고 "이거 이름 뭐야?"라고 보냅니다.
    - 기대 결과: Claude Code 창에 채널 메시지가 들어오고, 답이 **Unity 채팅창에** 와요. 선택한 오브젝트 이름이 맞아야 해요.
 5. 이어서 "그거 위로 2만큼 올려줘"라고 보냅니다. 앞 대화를 기억해서 같은 오브젝트를 옮겨야 해요(같은 하위 세션을 이어 쓰는지 확인).
 6. Blender에서 `N` → **Claude Hand** 탭을 열고 같은 식으로 해 봅니다. 위쪽에 `담당: blender-<파일>`이 보여야 해요.
 7. Unity 채팅창에서 "Blender <파일>의 <오브젝트>를 이 씬에 넣어줘"라고 합니다. Blender 담당과 Unity 담당을 함께 써서 처리하고, 결과가 Unity 채팅창에 와야 해요.
-8. 권한 확인이 필요한 일(예: 아직 허락하지 않은 명령)을 시켜 봅니다. 채팅창에 허용/거부 버튼이 뜨고, 누르면 Claude Code 쪽 확인창도 함께 처리돼야 해요.
+8. 권한 확인이 필요한 일(예: 아직 허락하지 않은 명령)을 시켜 봅니다. 채팅창에 허용/거부 버튼이 뜨고, 누르면 Claude Code 쪽 확인창도 함께 처리돼야 해요. 답장할 때는 버튼이 뜨지 않아야 해요(reply 도구는 미리 허용됨).
+   - `sync --allow-tools`를 했다면 하위 세션의 Unity·Blender 조작에도 버튼이 뜨지 않아야 해요.
 9. Unity 창을 최소화했다가 다시 열었을 때, 그리고 스크립트를 고쳐 Unity가 다시 컴파일한 뒤에도 대화 기록이 남아 있는지 봅니다.
 
 > 결과 알려주세요: 3·6번의 담당 표시, 답이 어느 창으로 왔는지, 5번에서 맥락이 이어졌는지, 8번 권한 버튼이 동작했는지, 1분 넘게 답이 없었다면 Claude Code 창에 무엇이 떠 있었는지

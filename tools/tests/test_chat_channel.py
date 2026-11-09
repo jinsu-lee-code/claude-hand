@@ -159,7 +159,7 @@ class EndToEndTests(unittest.TestCase):
         root = Path(self.tmp.name)
         write_agents(root / "agents")
         env = {**os.environ, "CLAUDE_HAND_HOME": str(root / "home"), "CLAUDE_HAND_AGENTS_DIR": str(root / "agents"),
-               "CLAUDE_HAND_CHAT_PORT": "18765"}
+               "CLAUDE_HAND_CHAT_PORT": "18765", "CLAUDE_HAND_SUPERVISOR": "1"}
         self.proc = subprocess.Popen([sys.executable, str(TOOL)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL, text=True, encoding="utf-8", env=env)
         self.send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}})
@@ -224,6 +224,36 @@ class EndToEndTests(unittest.TestCase):
         self.proc.wait(5)
         self.assertFalse(self.server_file.exists())
         self.proc.stdin = open(os.devnull, "w")  # tearDown closes it again
+
+
+
+class ModeTests(unittest.TestCase):
+    def run_tool(self, env_extra, stdin="", args=()):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {**os.environ, "CLAUDE_HAND_HOME": str(Path(tmp) / "home"), "CLAUDE_HAND_AGENTS_DIR": str(Path(tmp) / "agents"),
+                   "CLAUDE_HAND_CHAT_PORT": "18775", **env_extra}
+            env.pop("CLAUDE_HAND_SUPERVISOR", None) if "CLAUDE_HAND_SUPERVISOR" not in env_extra else None
+            proc = subprocess.run([sys.executable, str(TOOL), *args], input=stdin, capture_output=True, text=True,
+                                  encoding="utf-8", env=env, timeout=30)
+            return proc, (Path(tmp) / "home" / "chat" / "server.json").exists()
+
+    def test_other_sessions_stay_passive(self):
+        init = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n"
+        proc, served = self.run_tool({}, stdin=init)
+        self.assertEqual(json.loads(proc.stdout.splitlines()[0])["id"], 1)  # still a well-behaved MCP server
+        self.assertFalse(served)  # but it never advertised itself to the panels
+        self.assertIn("passive", proc.stderr)
+
+    def test_self_check(self):
+        proc, served = self.run_tool({}, args=["--check"])
+        result = json.loads(proc.stdout.strip().splitlines()[-1])
+        self.assertEqual(proc.returncode, 0, result)
+        self.assertTrue(result["ok"] and result["port_ok"] and result["home_ok"])
+        self.assertFalse(served)
+
+    def test_is_supervisor(self):
+        self.assertTrue(cc.is_supervisor({"CLAUDE_HAND_SUPERVISOR": "1"}))
+        self.assertFalse(cc.is_supervisor({}))
 
 
 if __name__ == "__main__":

@@ -504,7 +504,8 @@ class SetupHelperTests(unittest.TestCase):
         self.assertEqual(by_item["agent-desktop CLI"].fix, "npm install -g agent-desktop")
         self.assertIn("mcp-for-blender setup", by_item["MCP for Blender 애드온"].fix)
         self.assertIn("claude mcp add", by_item["Claude 설정에 MCP for Unity 등록"].fix)
-        self.assertIn("chat-setup", by_item["채팅 채널 등록 (claude-hand 폴더)"].fix)
+        self.assertIn("chat-setup", by_item["채팅 채널 등록과 답장 허용 (claude-hand 폴더)"].fix)
+        self.assertTrue(by_item["Claude Code 2.1.234 이상 (채팅창의 허용/거부 버튼)"].fix == "claude update")  # 2.1.0 is too old
         package = by_item["프로젝트 MyGame: 패키지"]
         self.assertFalse(package.ok)
         self.assertIn("unity-install", package.fix)
@@ -521,7 +522,66 @@ class ChatSetupTests(unittest.TestCase):
 
     def test_supervisor_scripts_use_the_same_command(self):
         for name in ("start-supervisor.cmd", "start-supervisor.sh"):
-            self.assertIn(ch.SUPERVISOR_COMMAND, (ch.REPO_ROOT / name).read_text(encoding="utf-8"))
+            script = (ch.REPO_ROOT / name).read_text(encoding="utf-8")
+            self.assertIn(ch.SUPERVISOR_COMMAND, script)
+            self.assertIn("CLAUDE_HAND_SUPERVISOR=1", script)
+            self.assertIn("MCP_TIMEOUT", script)
+
+    def test_chat_config_is_merged_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".claude").mkdir()
+            (root / ".mcp.json").write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}}), encoding="utf-8")
+            (root / ".claude" / "settings.local.json").write_text(
+                json.dumps({"permissions": {"allow": ["Bash(git status)"]}, "model": "keep-me"}), encoding="utf-8")
+            plan = ch.plan_chat_config(root, "uv run -q --no-project")
+            self.assertEqual(sorted(p.name for p in plan), [".mcp.json", "settings.local.json"])
+            ch.write_json_files(plan)
+            mcp = json.loads((root / ".mcp.json").read_text(encoding="utf-8"))
+            self.assertEqual(mcp["mcpServers"]["other"], {"command": "x"})
+            entry = mcp["mcpServers"][ch.CHAT_SERVER_NAME]
+            self.assertEqual(entry["command"], "uv")
+            self.assertEqual(entry["args"][:3], ["run", "-q", "--no-project"])
+            self.assertTrue(entry["args"][-1].endswith("/tools/chat_channel.py") and Path(entry["args"][-1]).is_absolute())
+            settings = json.loads((root / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
+            self.assertEqual(settings["permissions"]["allow"], ["Bash(git status)", ch.CHAT_REPLY_RULE])
+            self.assertEqual(settings["model"], "keep-me")
+            self.assertEqual(ch.plan_chat_config(root, "uv run -q --no-project"), {})  # second run changes nothing
+
+    def test_chat_config_refuses_broken_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".mcp.json").write_text("{oops", encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                ch.plan_chat_config(Path(tmp))
+
+    def test_tool_allow_rules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ch.write_json_files(ch.plan_tool_allow(root, ["unity_mygame", "blender_props"]))
+            path = root / ".claude" / "settings.local.json"
+            rules = json.loads(path.read_text(encoding="utf-8"))["permissions"]["allow"]
+            self.assertEqual(rules, ["mcp__unity_mygame__*", "mcp__blender_props__*"])
+            self.assertEqual(ch.plan_tool_allow(root, ["unity_mygame", "blender_props"]), {})
+            ch.write_json_files(ch.plan_tool_allow(root, ["unity_mygame"], prune=True))
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["permissions"]["allow"], ["mcp__unity_mygame__*"])
+
+    def test_prewarm_reads_the_check_result(self):
+        class Done:
+            stdout = 'Installed Python 3.12\n{"ok": true, "python": "3.12.1", "port": 8765}\n'
+            stderr = ""
+        seen = {}
+        def fake_run(cmd, **kwargs):
+            seen["cmd"] = cmd
+            return Done()
+        result = ch.prewarm_chat_channel(Path("/repo"), "uv run -q --no-project", run=fake_run)
+        self.assertTrue(result["ok"])
+        self.assertEqual(seen["cmd"][-1], "--check")
+        self.assertTrue(seen["cmd"][-2].endswith("chat_channel.py"))
+
+    def test_claude_version(self):
+        self.assertEqual(ch.parse_claude_version("2.1.319 (Claude Code)"), (2, 1, 319))
+        self.assertLess(ch.parse_claude_version("2.1.99"), ch.MIN_CLAUDE_FOR_PERMISSION_RELAY)
+        self.assertIsNone(ch.parse_claude_version(None))
 
     def test_registration_check(self):
         class Done:

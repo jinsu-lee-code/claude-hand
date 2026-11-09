@@ -148,7 +148,16 @@ Blender N 패널 애드온 (urllib)  ─┼──▶ chat_channel.py ──stdio
   - HTTP는 127.0.0.1에만 연다.
   - 시작할 때 만든 무작위 토큰을 `~/.claude-hand/chat/server.json`에 쓰고(POSIX는 0600), 모든 요청에 그 토큰을 요구한다. 내 계정으로 도는 프로그램만 메시지를 넣을 수 있다.
   - 메시지는 8000자, 창 정보는 3000자, 요청 본문은 64KB로 제한한다.
-- **등록 범위:** 사용자 범위로 등록하면 모든 Claude 세션이 채널을 하나씩 띄워 서로 server.json을 덮어쓴다. 그래서 저장소 폴더의 `local` 범위로 등록하고(`chat-setup`), 감독은 그 폴더에서 연다(`start-supervisor.cmd`).
+- **등록:** 채널 문서의 예시처럼 저장소 루트의 `.mcp.json`에 등록한다. 다만 저장소에 커밋하지 않고, 각 PC에서 `chat-setup`이 절대 경로로 만든다. 만드는 김에 `.claude/settings.local.json`에 `reply` 도구 허용 규칙도 넣는다. 그러지 않으면 답장마다 허락을 묻는다. 둘 다 `.gitignore`에 있다.
+  - 이 시제품을 만든 개발 세션은 같은 폴더에서 돌고 있어서, 설정 파일을 직접 커밋하려다 "자기 설정 변경"으로 막혔다. 이 판단도 각 PC에서 만드는 쪽이 맞다는 근거다.
+  - `.mcp.json`이 문서대로 안 불러와지는 버전이면 `chat-setup --register-local`(`claude mcp add --scope local`)로 등록한다.
+- **감독만 채팅을 받는다.** `.mcp.json`은 그 폴더에서 연 모든 세션이 채널 서버를 띄우게 한다. 그래서 서버는 `CLAUDE_HAND_SUPERVISOR=1`일 때만 HTTP를 열고 `server.json`을 쓴다. 이 값은 `start-supervisor`가 설정한다. 그 밖의 세션에서는 MCP에는 정상 응답하지만 채팅창은 받지 않는다(passive). 채널 플래그 없이 연 세션이 채팅을 가로채 메시지가 사라지는 일을 막는다.
+- **첫 실행 시간:** MCP 서버 시작 제한은 기본 30초다(`MCP_TIMEOUT`). `chat-setup`이 `uv run … chat_channel.py --check`를 한 번 돌려 uv가 Python을 미리 받게 하고, 포트와 저장 폴더를 점검한다. `start-supervisor`는 `MCP_TIMEOUT=60000`으로 여유를 둔다.
+- **요구 사항 확인(`doctor`):**
+  - Claude Code 2.1.234 이상: 이 버전부터 채널에 권한 요청이 전달된다.
+  - Bedrock·Vertex·Foundry가 아닐 것: Channels는 claude.ai 로그인이나 Console API 키가 필요하다.
+  - 회사 계정의 `channelsEnabled`는 확인할 수 없어서 세팅 스킬이 사용자에게 묻는다.
+- **(선택) 하위 세션 도구 자동 허용:** `sync --allow-tools`가 이 폴더의 `settings.local.json`에 생성된 서버별 규칙(`mcp__<서버>__*`)만 넣는다. 서버 이름 앞부분만 맞추는 와일드카드(`mcp__unity_*`)는 권한 규칙에서 지원되지 않아서 서버마다 적는다. `--prune`이면 사라진 창의 규칙을 지운다.
 - **창 쪽 구현**
   - Unity: IMGUI EditorWindow다. 긴 폴링(최대 20초)으로 답을 받는다. 도메인 리로드 뒤에는 서버 기록으로 대화를 다시 채우고, 감독 세션이 바뀌면(pid) 기록을 비운다.
   - Blender: 통신은 백그라운드 스레드에서 하고, bpy는 메인 스레드 타이머에서만 만진다. 입력칸에서 Enter를 치면 보낸다.
@@ -208,7 +217,7 @@ Blender N 패널 애드온 (urllib)  ─┼──▶ chat_channel.py ──stdio
 | 11 | `blender-open`의 `--python-expr`가 애드온 자동 시작보다 먼저 돈다(타이머는 이벤트 루프에서만 돈다) | N 패널에서 포트를 바꾸고 서버를 켠다 |
 | 12 | `UpdateInteractionModeSettings` 리플렉션 호출이 Unity 6.3에서 바로 적용된다 | Unity를 다시 시작하면 적용된다(도구가 `applied_live`로 알려준다) |
 | 13 | Unity가 열려 있을 때 `manifest.json`을 고치면 창이 앞에 올 때 패키지를 다시 받는다 | Unity를 다시 연다 |
-| 14 | `claude mcp add --scope local`로 등록한 서버를 `--dangerously-load-development-channels server:claude-hand-chat`이 채널로 불러온다. 문서 예시는 `.mcp.json`이다 | 저장소 루트에 `.mcp.json`으로 등록한다 |
+| 14 | `.mcp.json`으로 등록한 서버를 `--dangerously-load-development-channels server:claude-hand-chat`이 채널로 불러온다(문서 예시와 같음). `.mcp.json`의 절대 경로 인자가 그대로 쓰인다 | `chat-setup --register-local`로 등록한다 |
 | 15 | 감독이 같은 `chat_id`에 같은 하위 세션을 계속 이어 쓴다(지침을 따르는지) | 지침을 고치거나, 채널 서버가 agent id를 기억해 메타로 넘긴다 |
 | 16 | Unity 에디터가 비활성일 때도 `async` 이어 받기가 늦지 않게 돈다 | 폴링을 `EditorApplication.update`로 옮긴다 |
 

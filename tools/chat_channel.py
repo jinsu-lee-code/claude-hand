@@ -5,7 +5,8 @@
 # ///
 """claude-hand chat channel: Unity / Blender chat panels <-> the supervisor Claude Code session.
 
-Claude Code starts this file as an MCP server (stdio) and, when the session is launched with
+Claude Code starts this file as an MCP server (stdio, registered in the repo's .mcp.json) and,
+when the session is launched with start-supervisor.cmd / .sh, i.e.
   claude --dangerously-load-development-channels server:claude-hand-chat
 treats it as a *channel*: a message typed in a Unity or Blender chat panel is pushed into the
 running supervisor session (notifications/claude/channel), tagged with the window it came from
@@ -16,6 +17,12 @@ panels too (Allow / Deny buttons).
 The panels talk to this process over HTTP on 127.0.0.1 only. Every request must carry the
 token this process writes to ~/.claude-hand/chat/server.json, so only programs running as you
 can post into the session (an open port would be a prompt-injection hole).
+
+Only the supervisor session serves the panels: start-supervisor sets CLAUDE_HAND_SUPERVISOR=1.
+Any other Claude Code session opened in this folder also starts this server (it is in .mcp.json)
+but stays passive, so it cannot capture the panels with a session that has no channel.
+
+  python tools/chat_channel.py --check   checks that this machine can run the channel (used by setup)
 
 No third-party packages; run with `uv run` or any Python 3.10+.
 """
@@ -423,11 +430,57 @@ def remove_server_file(path: Path) -> None:
         pass
 
 
-def main() -> int:
+def is_supervisor(env=os.environ) -> bool:
+    return env.get("CLAUDE_HAND_SUPERVISOR", "").lower() in ("1", "true", "yes", "on")
+
+
+def self_check(env=os.environ) -> dict:
+    """What setup runs once: proves Python, the home folder and a loopback port all work here.
+    Running it through `uv run` also makes uv fetch Python now instead of during Claude Code's
+    30-second MCP startup window."""
+    checks = {"python": sys.version.split()[0], "python_ok": sys.version_info >= (3, 10)}
+    home = claude_hand_home(env) / "chat"
+    try:
+        home.mkdir(parents=True, exist_ok=True)
+        probe = home / f"check.{os.getpid()}.tmp"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        checks["home_ok"] = True
+    except OSError as exc:
+        checks["home_ok"] = False
+        checks["home_error"] = str(exc)
+    checks["home"] = str(home)
+    try:
+        hub = ChatHub(lambda message: None, default_agents_dir(env))
+        port = int(env["CLAUDE_HAND_CHAT_PORT"]) if env.get("CLAUDE_HAND_CHAT_PORT") else None
+        httpd = start_http(hub, secrets.token_urlsafe(8), port)
+        checks["port"] = httpd.server_address[1]
+        httpd.shutdown()
+        httpd.server_close()
+        checks["port_ok"] = True
+    except OSError as exc:
+        checks["port_ok"] = False
+        checks["port_error"] = str(exc)
+    checks["agents"] = [a.name for a in load_agents(default_agents_dir(env))]
+    checks["ok"] = checks["python_ok"] and checks["home_ok"] and checks["port_ok"]
+    return checks
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", newline="\n")
         sys.stdin.reconfigure(encoding="utf-8")
+    if "--check" in argv:
+        result = self_check()
+        print(json.dumps(result, ensure_ascii=False))
+        return 0 if result["ok"] else 1
     mcp = StdioMcp(sys.stdin, sys.stdout, default_agents_dir())
+    if not is_supervisor():
+        # Same tools, no panels: messages only reach a session started with start-supervisor.
+        log("passive: not started by start-supervisor (CLAUDE_HAND_SUPERVISOR unset); panels are not served")
+        mcp.serve()
+        return 0
     token = secrets.token_urlsafe(32)
     env_port = os.environ.get("CLAUDE_HAND_CHAT_PORT")
     httpd = start_http(mcp.hub, token, int(env_port) if env_port else None)

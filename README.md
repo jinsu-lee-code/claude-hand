@@ -73,15 +73,21 @@ Blender 패널 ─┼─ 채널 ─ 감독 ┼─ blender-props
 
 준비(세팅 스킬이 대신 해 줍니다):
 ```powershell
-uv run tools/claude_hand.py chat-setup            # 채널을 이 폴더의 Claude Code에 등록
+uv run tools/claude_hand.py chat-setup            # 채널 등록 + 답장 도구 허용 + 채널 서버 미리 실행·점검
 uv run tools/claude_hand.py blender-install-chat  # Blender 채팅 애드온 설치·활성화
+uv run tools/claude_hand.py sync --allow-tools    # (선택) 하위 세션의 Unity·Blender 도구를 묻지 않고 실행
 ```
-그다음 감독 세션을 **`start-supervisor.cmd`**로 엽니다. 저장소 폴더에서 채널을 켜고 Claude Code를 시작하는 파일입니다.
+그다음 감독 세션을 **`start-supervisor.cmd`**로 엽니다.
+
+`chat-setup`이 하는 일:
+- 이 폴더에 `.mcp.json`(채널 등록)과 `.claude/settings.local.json`(답장 도구 `mcp__claude-hand-chat__reply` 자동 허용)을 만듭니다. 기존 내용은 유지하고, 둘 다 git에 올라가지 않습니다.
+- 채널 서버를 한 번 미리 실행해서 점검합니다(`--check`). Claude Code는 MCP 서버가 30초 안에 떠야 하는데, 처음에는 uv가 Python을 내려받느라 늦을 수 있어서 미리 받아 둡니다. `start-supervisor`는 여유를 두려고 `MCP_TIMEOUT=60000`도 설정합니다.
 
 알아둘 점:
-- Claude Code의 **Channels는 아직 리서치 프리뷰**입니다. 직접 만든 채널이라 `--dangerously-load-development-channels`로 켜야 하고, 처음에 경고와 승인 창이 뜹니다.
-- 감독 세션(Claude Code 창)이 켜져 있어야 채팅이 됩니다. 감독 세션은 하나만 여세요. 여러 개 열면 마지막에 연 세션이 채팅을 받습니다.
-- 채팅창과 채널은 내 PC 안(127.0.0.1)에서만, 토큰을 아는 프로그램끼리만 통신합니다. 토큰은 `%USERPROFILE%\.claude-hand\chat\server.json`에 있습니다.
+- Claude Code의 **Channels는 아직 리서치 프리뷰**입니다. 직접 만든 채널이라 `--dangerously-load-development-channels`로 켜야 하고, 처음에 개발용 채널 경고와 `.mcp.json` 서버 승인 창이 뜹니다.
+- 채팅창의 **허용/거부 버튼은 Claude Code 2.1.234 이상**에서 동작합니다. Channels는 claude.ai 로그인이나 Console API 키가 필요하고, Bedrock·Vertex·Foundry에서는 쓸 수 없습니다. 회사 계정(Team/Enterprise)은 관리자가 Channels를 켜야 합니다. `doctor`가 버전과 환경을 확인합니다.
+- **채팅을 받는 건 `start-supervisor`로 연 세션뿐입니다.** 이 폴더에서 그냥 연 Claude Code도 채널 서버를 띄우지만 채팅은 받지 않습니다. 채널 없는 세션이 채팅을 가로채지 않게 하기 위해서입니다. 감독 세션은 하나만 여세요.
+- 채팅창과 채널은 내 PC 안(127.0.0.1)에서만, 토큰을 아는 프로그램끼리만 통신합니다. 토큰은 `%USERPROFILE%\.claude-hand\chat\server.json`에 있습니다. 방화벽 규칙은 필요 없고, 방화벽 창이 떠도 허용하지 않아도 됩니다.
 
 ## 들어 있는 것
 

@@ -33,7 +33,7 @@ Unity 프로젝트 경로를 알면 `--unity-project "<경로>"`를 붙인다. �
 - 4단계: Unity 프로젝트의 Packages/manifest.json, Claude Code MCP 설정
 - 5단계: Unity 에디터 환경설정
 - 6단계: `~/.claude/agents`, `~/.claude/skills`
-- 7단계: 이 폴더의 Claude Code MCP 설정(채팅 채널), Blender 애드온 폴더(채팅 애드온)
+- 7단계: 이 폴더의 `.mcp.json`과 `.claude/settings.local.json`(채팅 채널 등록, 답장 도구 허용), Blender 애드온 폴더(채팅 애드온), 선택하면 하위 세션 도구 허용 규칙
 
 ## 1. 기본 도구 (빠진 것만)
 
@@ -116,23 +116,45 @@ uv run tools/claude_hand.py sync
 
 ## 7. Unity·Blender 채팅창 (사용자가 원할 때)
 
-Unity와 Blender 안에서 바로 채팅하려면 채널을 등록하고 Blender 애드온을 설치한다. 계획을 보여줄 때 이 단계도 선택지로 넣는다.
-1. 채널 등록: 이 저장소 폴더에서만 쓰이게 `local` 범위로 등록한다.
+Unity와 Blender 안에서 바로 채팅하려면 아래를 한다. 계획을 보여줄 때 이 단계도 선택지로 넣는다.
+
+**먼저 `doctor`의 [채팅] 항목을 본다.**
+- Claude Code가 2.1.234보다 낮으면, 허락받고 `claude update`를 한다. 이 버전부터 채팅창에 허용/거부 버튼이 뜬다.
+- Bedrock, Vertex, Foundry를 쓰는 환경이면 Channels를 쓸 수 없다. 이 단계를 건너뛰고 이유를 알린다. Channels는 claude.ai 로그인이나 Console API 키가 필요하다.
+- 회사 계정(Team/Enterprise)인지 물어본다. 그렇다면 관리자가 Channels(`channelsEnabled`)를 켜야 한다. 꺼져 있으면 개발용 채널 플래그도 막힌다.
+
+1. **채널 등록과 미리 실행**
    ```
    uv run tools/claude_hand.py chat-setup --dry-run
    uv run tools/claude_hand.py chat-setup
    ```
-2. Blender 채팅 애드온: 애드온 폴더에 복사하고, Blender를 화면 없이 실행해서 켠다. 열려 있는 Blender는 다시 열어야 탭이 보인다.
+   - 이 폴더에 두 파일을 만들거나 고친다. 기존 내용은 유지하고, 둘 다 git에 올라가지 않는다.
+     - `.mcp.json`: 채널 등록
+     - `.claude/settings.local.json`: 답장 도구 `mcp__claude-hand-chat__reply` 자동 허용. 채팅창에 답할 때마다 허락을 묻지 않게 한다.
+   - 채널 서버를 한 번 미리 실행한다(`--check`). Claude Code는 MCP 서버가 30초 안에 떠야 하는데, 처음에는 uv가 Python을 내려받느라 몇 분 걸릴 수 있어서 미리 받아 두는 것이다. 포트와 저장 폴더도 함께 점검한다. 실패하면 출력된 오류를 그대로 보여준다.
+   - Windows 방화벽 창이 뜨면 사용자에게 맡긴다. 채널은 내 PC 안(127.0.0.1)에서만 통신하므로 허용하지 않아도 동작한다.
+2. **Blender 채팅 애드온:** 애드온 폴더에 복사하고, Blender를 화면 없이 실행해서 켠다. 열려 있는 Blender는 다시 열어야 탭이 보인다.
    ```
    uv run tools/claude_hand.py blender-install-chat --dry-run
    uv run tools/claude_hand.py blender-install-chat
    ```
-3. Unity 채팅창은 Claude Hand Tools 패키지에 들어 있어서 따로 설치할 것이 없다. 메뉴는 **Window > Claude Hand > Chat**이다.
-4. 사용자에게 알린다.
-   - 채팅을 쓰려면 감독 세션을 **`start-supervisor.cmd`**로 열어야 한다. 이 파일은 저장소 폴더에서 `--dangerously-load-development-channels server:claude-hand-chat`을 붙여 Claude Code를 연다. 처음 열 때 개발용 채널 경고와 MCP 서버 승인 창이 뜨니, 내용을 읽고 사용자가 직접 승인한다.
-   - Channels는 아직 리서치 프리뷰 기능이다.
-   - 감독 세션은 하나만 연다. 여러 개 열면 마지막에 연 세션이 채팅을 받는다.
-   - 지금 이 세션은 채널 없이 열렸을 수 있다. 그렇다면 세팅이 끝난 뒤 `start-supervisor.cmd`로 다시 열어야 채팅이 연결된다.
+3. **Unity 채팅창**은 Claude Hand Tools 패키지에 들어 있어서 따로 설치할 것이 없다. 메뉴는 **Window > Claude Hand > Chat**이다.
+4. **(선택) 하위 세션 도구 자동 허용:** 채팅창으로 일을 시키면 하위 세션의 Unity·Blender 조작마다 채팅창에 허용 버튼이 뜬다. 사용자에게 장단점을 설명하고 고르게 한다.
+   - 장점: 매번 누를 필요가 없다.
+   - 단점: 그 하위 세션의 Unity·Blender 도구는 묻지 않고 실행된다.
+   원하면 다음을 실행한다. 이 폴더의 `settings.local.json`에 각 하위 세션 서버의 도구(`mcp__unity_…__*`, `mcp__blender_…__*`)만 허용 규칙으로 넣는다. 다른 도구(Bash 등)는 계속 묻는다.
+   ```
+   uv run tools/claude_hand.py sync --allow-tools
+   ```
+5. **사용자에게 알린다.**
+   - 채팅을 쓰려면 감독 세션을 **`start-supervisor.cmd`**로 열어야 한다. 이 파일은 저장소 폴더로 이동하고, 이 세션이 감독이라는 표시(`CLAUDE_HAND_SUPERVISOR=1`)와 넉넉한 MCP 시작 시간(`MCP_TIMEOUT=60000`)을 설정한 뒤, `--dangerously-load-development-channels server:claude-hand-chat`으로 Claude Code를 연다.
+   - 처음 한 번은 개발용 채널 경고와 `.mcp.json` 서버(claude-hand-chat) 사용 승인 창이 뜬다. 사용자가 직접 읽고 승인한다.
+   - 이 폴더에서 그냥 연 Claude Code(지금 이 세션 포함)도 채널 서버를 띄우지만 채팅은 받지 않는다. 채널이 없는 세션이 채팅을 가로채지 않게 하기 위해서다. 그래서 세팅이 끝나면 `start-supervisor.cmd`로 다시 열어야 한다.
+   - Channels는 아직 리서치 프리뷰다. 감독 세션은 하나만 연다.
+   - `start-supervisor.cmd`로 연 뒤에도 채팅이 들어오지 않을 수 있다. 예를 들어 `/mcp`에 claude-hand-chat이 없거나, 채널로 인식되지 않는 경우다. 그러면 대체 방식으로 다시 등록하고 감독 세션을 다시 연다.
+     ```
+     uv run tools/claude_hand.py chat-setup --register-local
+     ```
 
 ## 8. 마무리
 
