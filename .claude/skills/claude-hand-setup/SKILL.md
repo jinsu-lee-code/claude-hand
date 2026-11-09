@@ -39,10 +39,7 @@ Unity 프로젝트 경로를 알면 `--unity-project "<경로>"`를 붙인다. �
 
 결과를 짧은 표로 보여준다.
 
-**먼저 어디서 대화할지 묻는다**(AskUserQuestion). 계획이 여기서 갈린다.
-- **Claude 데스크톱 앱의 Code 탭에서만**(가장 간단): 검은 창도 Channels도 필요 없다. 대신 Unity·Blender 안 채팅창은 쓰지 않는다. 그 창을 쓰려면 Channels가 필요한데, 데스크톱 앱에서는 문서상 지원되지 않는다. 7단계(채팅창)와 8단계(바로가기)는 건너뛰고, 끝에 `uv run tools/claude_hand.py mode desktop`을 실행한다. 그러면 `doctor`가 채팅 항목을 "필요 없음"으로 표시한다.
-- **Unity·Blender 채팅창에서**: 7·8단계까지 한다. 원하면 8-1단계(데스크톱 앱에서 진행 보기)도 한다.
-- 어느 쪽인지 모르겠다고 하면 데스크톱 앱 방식을 먼저 권한다. 나중에 `mode panels`와 7·8단계로 언제든 바꿀 수 있다.
+**쓰는 방식은 하나다.** 사용자에게 한 줄로 알린다: "Claude Hand 창(검은 창) 하나가 일을 하고, Unity·Blender 채팅창과 Claude 데스크톱 앱은 그 창과 대화하는 입구입니다." 그래서 7·8단계(채팅창, 바로가기)는 기본으로 계획에 넣는다. 데스크톱 앱에서 보기(Remote Control)는 기본으로 켜져 있다(8-1단계).
 
 그다음 빠진 항목에 맞춰 아래 1~8단계 중 필요한 것만 계획으로 제시하고 고르게 한다. 각 선택지 설명에 무엇이 바뀌는지 적는다.
 - 1단계: winget으로 프로그램 설치
@@ -52,7 +49,7 @@ Unity 프로젝트 경로를 알면 `--unity-project "<경로>"`를 붙인다. �
 - 5단계: Unity 에디터 환경설정
 - 6단계: `~/.claude/agents`, `~/.claude/skills`
 - 7단계: 이 폴더의 `.mcp.json`과 `.claude/settings.local.json`(채팅 채널 등록, 답장 도구 허용, 채널 서버 사전 승인), Blender 애드온 폴더(채팅 애드온), 선택하면 하위 세션 도구 허용 규칙
-- 8단계: 바탕화면과 시작 메뉴의 "Claude Hand" 바로가기, 선택하면 Windows 시작프로그램, 선택하면 Claude 데스크톱 앱에서 진행 보기(Remote Control)
+- 8단계: 바탕화면과 시작 메뉴의 "Claude Hand" 바로가기, 선택하면 Windows 시작프로그램. 데스크톱 앱에서 보기(Remote Control)는 기본으로 켜져 있고, 원하지 않으면 끈다
 
 ## 1. 기본 도구 (빠진 것만)
 
@@ -159,7 +156,7 @@ Unity와 Blender 안에서 바로 채팅하려면 아래를 한다. 계획을 �
    ```
    - 이 폴더에 두 파일을 만들거나 고친다. 기존 내용은 유지하고, 둘 다 git에 올라가지 않는다.
      - `.mcp.json`: 채널 등록
-     - `.claude/settings.local.json`: 답장 도구 `mcp__claude-hand-chat__reply` 자동 허용. 채팅창에 답할 때마다 허락을 묻지 않게 한다.
+     - `.claude/settings.local.json`: 답장 도구 `mcp__claude-hand-chat__reply`와 현재 상황 도구 `mcp__claude-hand-chat__current_context`(읽기만 함) 자동 허용. 채팅창에 답할 때마다 허락을 묻지 않게 한다. 감독이 하위 세션을 건너뛰지 않도록 사용자 설정의 MCP for Unity·Blender 서버 도구는 이 폴더에서 막는다.
    - 채널 서버를 한 번 미리 실행한다(`--check`). Claude Code는 MCP 서버가 30초 안에 떠야 하는데, 처음에는 uv가 Python을 내려받느라 몇 분 걸릴 수 있어서 미리 받아 두는 것이다. 포트와 저장 폴더도 함께 점검한다. 실패하면 출력된 오류를 그대로 보여준다.
    - Windows 방화벽 창이 뜨면 사용자에게 맡긴다. 채널은 내 PC 안(127.0.0.1)에서만 통신하므로 허용하지 않아도 동작한다.
 2. **Blender 채팅 애드온:** 애드온 폴더에 복사하고, Blender를 화면 없이 실행해서 켠다. 열려 있는 Blender는 다시 열어야 탭이 보인다.
@@ -176,9 +173,9 @@ Unity와 Blender 안에서 바로 채팅하려면 아래를 한다. 계획을 �
    uv run tools/claude_hand.py sync --allow-tools
    ```
 5. **사용자에게 알린다.** 길게 설명하지 말고 이것만 말한다.
-   - 앞으로는 Unity나 Blender 채팅창의 **[Claude Hand 시작]** 버튼, 또는 바탕화면의 **Claude Hand** 아이콘만 누르면 된다. 8단계에서 만든다.
-   - 새로 뜨는 검은 창이 Claude Hand다. **닫지 말고 최소화**해 둔다.
-   - 처음 한 번은 그 창에서 확인 질문 몇 개에 답한다. 폴더 신뢰, 개발용 채널 경고, 채널 서버 사용 같은 것이다. 무엇을 고르면 되는지 그 창에 안내가 나온다.
+   - 앞으로는 Unity나 Blender 채팅창에 그냥 메시지를 보내면 된다. Claude Hand가 꺼져 있으면 채팅창이 켜고, 연결되면 그 메시지를 보낸다. 바탕화면의 **Claude Hand** 아이콘(8단계)이나 데스크톱 앱에서 "Claude Hand 켜줘"로 켜도 된다.
+   - 새로 뜨는 검은 창이 Claude Hand다. **닫지 않는다.** 세션이 일을 시작하면 Windows에서는 저절로 최소화된다(`minimize off`로 끌 수 있다).
+   - 그 창에서 확인 질문에 답해야 할 때가 있다. 폴더 신뢰, 개발용 채널 경고, 채널 서버 사용 같은 것이다. 무엇을 고르면 되는지 그 창에 안내가 나온다. 개발용 채널 경고는 Claude Code의 보안 확인이라 claude-hand가 대신 답하지 않는다.
    - 새 Unity 프로젝트나 Blender 파일을 열어도 따로 할 일이 없다. 그 창에서 처음 메시지를 보내면 담당 하위 세션이 자동으로 만들어진다.
    - 참고(사용자가 궁금해하면): Channels는 리서치 프리뷰다. 감독 세션은 한 번에 하나만 열린다(두 번 누르면 "이미 실행 중"이라고 나온다). 지금 이 세팅용 세션은 채팅을 받지 않는다.
    - `start-supervisor`로 열었는데도 채팅이 들어오지 않을 수 있다. 예를 들어 `/mcp`에 claude-hand-chat이 없을 때다. 그러면 대체 방식으로 다시 등록한다.
@@ -201,26 +198,19 @@ uv run tools/claude_hand.py shortcut
   - 이미 켜져 있는지 확인
   - 처음 한 번 안내
 
-## 8-1. Claude 데스크톱 앱에서 진행 보기 (사용자가 원할 때)
+## 8-1. Claude 데스크톱 앱에서 보고 말하기 (기본으로 켜짐)
 
-감독 세션과 하위 세션이 하는 일을 Claude 데스크톱 앱이나 모바일 앱에서 보고 싶은지 물어본다. 원하면 이 명령을 실행한다.
-```
-uv run tools/claude_hand.py remote-control on
-```
-- 다음부터 Claude Hand가 Remote Control(`--remote-control --name "Claude Hand"`)로 열린다. 데스크톱 앱의 **Code 탭** 세션 목록에 "Claude Hand"로 보인다(claude.ai/code, 모바일도 같다). 대화, 도구 실행, 백그라운드 하위 세션이 보이고, 하위 세션은 거기서 멈출 수 있다.
-- 조건을 먼저 확인해 알린다.
-  - Pro·Max·Ultra·Team·Enterprise 구독의 claude.ai 로그인이 필요하고, API 키로는 안 된다.
+Claude Hand는 기본으로 Remote Control(`--remote-control --name "Claude Hand"`)로 열린다. 데스크톱 앱의 **Code 탭** 세션 목록에 "Claude Hand"로 보인다(claude.ai/code, 모바일도 같다). 거기서 보는 것은 Claude Hand 창과 같은 대화다. 거기서 말해도 되고, 하위 세션은 백그라운드 작업으로 보이고 멈출 수도 있다.
+- 조건을 확인해 알린다.
+  - Pro·Max·Ultra·Team·Enterprise 구독의 claude.ai 로그인이 필요하고, API 키로는 안 된다. Claude Hand 창에서 `/status`로 로그인 방식을 볼 수 있고, 아니면 `/login`으로 구독 계정에 로그인한다.
   - Team·Enterprise는 관리자가 켜야 한다.
-  - 명령이 `ANTHROPIC_API_KEY`나 `ANTHROPIC_BASE_URL`, Bedrock·Vertex 사용을 발견하면 "주의"로 알려 준다.
-- Channels 옵션과 같이 쓰는 것은 문서로 확인되지 않았다. Claude Hand가 이상하게 시작되면 `remote-control off`로 끄고 다시 켜 보게 한다.
-
-## 데스크톱 앱 모드로 끝낼 때 사용자에게 알릴 것
-
-- Claude 데스크톱 앱 → **Code** 탭 → 폴더를 하나 고르고(아무 폴더나 됨, 예: Unity 프로젝트 폴더) 그냥 말하면 된다. 예: "MyGame 씬에 큐브 3개 만들어줘", "props.blend의 Rock을 MyGame에 넣어줘".
-- 일을 맡은 하위 세션은 앱 오른쪽 위 **⋮ > Background tasks**에서 보인다. 허락 요청은 앱 안의 버튼으로 답한다.
-- 새 Unity 프로젝트나 Blender 파일을 열고 그 이름으로 말하면 감독이 담당을 직접 만든다. 이때 명령 실행 허락을 한 번 묻는다.
-- 일반 채팅 탭(Code 탭이 아닌 곳)에서는 이 스킬이 동작하지 않는다. 하위 세션과 안전장치가 Claude Code 기능이기 때문이다.
-- 처음 세팅을 Code 탭에서 하는데 `claude-hand-setup` 스킬이 보이지 않으면, claude-hand 폴더를 연 상태에서 "README의 처음 설치대로 해줘"라고 하게 한다.
+  - `ANTHROPIC_API_KEY`, 다른 서버를 가리키는 `ANTHROPIC_BASE_URL`, Bedrock·Vertex·Foundry를 쓰면 Claude Hand가 켤 때 Remote Control을 빼고 시작하고 이유를 그 창에 보여 준다.
+- 사용자가 원하지 않으면 끈다.
+  ```
+  uv run tools/claude_hand.py remote-control off
+  ```
+- 데스크톱 앱에서 시킨 일도 그 Unity·Blender 창의 채팅창에 "데스크톱 앱에서"라고 표시돼 남는다. "선택한 거"처럼 말하면 Claude Hand가 각 창에서 지금 선택된 것을 보고 대상을 찾는다.
+- 데스크톱 앱의 다른 Code 탭 세션에서 "Claude Hand 켜줘"라고 하면 Claude Hand 창을 연다. 그 뒤 세션 목록에서 "Claude Hand"로 옮겨 가서 이어서 말한다.
 
 ## 9. 마무리
 
@@ -232,7 +222,7 @@ uv run tools/claude_hand.py remote-control on
 ## 채팅창에 감독 세션이 없다고 나올 때
 
 먼저 채팅창의 **[Claude Hand 시작]** 버튼을 눌러 보게 한다. 대부분은 감독 세션이 꺼져 있는 경우다. 그래도 안 되면 `uv run tools/claude_hand.py chat-status`를 실행하고, 출력에 적힌 대로 고친다. 흔한 원인은 이렇다.
-1. **감독 세션을 `start-supervisor.cmd`가 아닌 방법으로 열었다.** 데스크톱 앱이나 그냥 실행한 `claude`가 이 경우다. 채널 서버가 대기 모드로 뜨고, 채팅창에 그 이유가 보인다.
+1. **감독 세션을 `start-supervisor.cmd`가 아닌 방법으로 열었다.** 데스크톱 앱의 새 Code 탭 세션이나 그냥 실행한 `claude`가 이 경우다. 채널 서버가 대기 모드로 뜨고, 채팅창에 그 이유가 보인다. 그 세션에서 "Claude Hand 켜줘"라고 하면 제대로 연다.
 2. **이전 버전의 local 범위 등록이 남아 있다** → `update`
 3. **`.mcp.json` 서버가 승인 대기 중이거나 거절됐다** → 감독 세션에서 `/mcp`로 확인하고 승인한다. 거절했었다면 `claude mcp reset-project-choices` 후 다시 연다.
 4. **채널 서버가 시작에 실패했다**(`/mcp`에서 failed) → `chat-setup`을 다시 실행해 점검 결과를 보고, `uv`가 PATH에 있는지 확인한다.

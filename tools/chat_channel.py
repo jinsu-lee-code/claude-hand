@@ -61,6 +61,7 @@ PORT_ATTEMPTS = 10
 MAX_TEXT = 8000
 MAX_CONTEXT = 3000
 MAX_WAIT_SECONDS = 30
+MAX_CONTEXT_ITEMS = 20  # selected objects / assets kept per window
 LOG_LIMIT = 500  # items kept per chat
 AUTO_SYNC_INTERVAL = 20.0  # seconds between automatic subagent refreshes for the same window
 
@@ -77,7 +78,12 @@ INSTRUCTIONS = (
     "skill describes, and report back in the chat_id the request came from. If agent is \"none\", the window's subagent could "
     "not be made automatically: reply that MCP for Unity should show Connected (Window > MCP for Unity) or the "
     "MCP for Blender server should be on, then ask them to send the message again. For work that takes "
-    "more than a few seconds, send a short reply first saying what you are doing, then the result."
+    "more than a few seconds, send a short reply first saying what you are doing, then the result. "
+    "Messages without a <channel> tag come from the terminal or the Claude app (Remote Control). When such a request "
+    "is about a Unity or Blender window and says 'this', 'the selected one' or 'here' without naming it, call "
+    "current_context to see what is selected where and which window was used last. After work requested that way "
+    "finishes, also call reply for each window it changed, with that window's chat_id from current_context, "
+    "origin \"desktop\" and request set to a one-line summary of what was asked, so the window's chat panel keeps its whole history."
 )
 
 REPLY_TOOL = {
@@ -88,9 +94,20 @@ REPLY_TOOL = {
         "properties": {
             "chat_id": {"type": "string", "description": "The chat (window) to reply in, from the channel tag"},
             "text": {"type": "string", "description": "The message to show in that panel"},
+            "origin": {"type": "string", "enum": ["panel", "desktop"],
+                       "description": "desktop: the request came from the terminal or the Claude app, not from this panel"},
+            "request": {"type": "string", "description": "With origin desktop: one line saying what was asked"},
         },
         "required": ["chat_id", "text"],
     },
+}
+
+CONTEXT_TOOL = {
+    "name": "current_context",
+    "description": "What the user has open in Unity and Blender right now, most recently used window first: per window its "
+                   "chat_id, subagent, active scene or file, selected objects and assets, whether it has focus, and when "
+                   "it was last used. Use it to tell which window 'this', 'the selected one' or 'here' means.",
+    "inputSchema": {"type": "object", "properties": {}},
 }
 
 
@@ -163,7 +180,11 @@ class ChatHub:
         self.logs: dict[str, list[dict]] = {}
         self.windows: dict[str, dict] = {}
         self.permissions: dict[str, dict] = {}
+        self.contexts: dict[str, dict] = {}
+        self.backlog: list[dict] = []  # channel messages that arrived before Claude Code finished connecting
         self.initialized = False
+        self.in_use = False  # Claude has called a tool or asked a permission: the session is past its start-up prompts
+        self.on_first_use = None  # callable(): run once when in_use becomes true (minimizes the Claude Hand window)
 
     def _append(self, chat_id: str, item: dict) -> dict:
         self.seq += 1
@@ -203,24 +224,97 @@ class ChatHub:
                 if not pending.get("resolved") and chat_id not in pending["chats"]:
                     pending["chats"].add(chat_id)
                     self._append(chat_id, self._permission_item(pending))
+            self._touch(chat_id, app, window, agent)
+            notification = {"jsonrpc": "2.0", "method": "notifications/claude/channel", "params": {"content": content, "meta": meta}}
             ready = self.initialized
-        self.emit({"jsonrpc": "2.0", "method": "notifications/claude/channel", "params": {"content": content, "meta": meta}})
+            if not ready:
+                self.backlog.append(notification)
+        if ready:
+            self.emit(notification)
         return {"chat_id": chat_id, "agent": agent, "delivered": ready}
 
-    def reply(self, chat_id: str, text: str) -> bool:
+    def mark_initialized(self) -> None:
+        """Claude Code finished connecting: send what panels posted while it was starting (lazy start)."""
         with self.cond:
-            known = chat_id in self.logs
-            if known:
-                self._append(chat_id, {"kind": "reply", "text": text})
-            return known
+            self.initialized = True
+            backlog, self.backlog = self.backlog, []
+        for notification in backlog:
+            self.emit(notification)
+
+    def known_chat(self, chat_id: str) -> bool:
+        """A chat a panel has used, or a window's subagent (so work asked in the Claude app can be recorded there)."""
+        return chat_id in self.logs or any(a.name == chat_id for a in load_agents(self.agents_dir))
+
+    def reply(self, chat_id: str, text: str, origin: str = "panel", request: str = "") -> bool:
+        if not self.known_chat(chat_id):
+            return False
+        item = {"kind": "reply", "text": text}
+        if origin == "desktop":
+            item.update(origin="desktop", request=request[:500])
+        with self.cond:
+            self._append(chat_id, item)
+        return True
+
+    def _touch(self, chat_id: str, app: str, window: str, agent: str | None) -> None:
+        entry = self.contexts.setdefault(chat_id, {"chat_id": chat_id})
+        entry.update(app=app, window=window, agent=agent or "none", last_used=time.time())
+
+    def update_context(self, app: str, window: str, pin: str, context: dict) -> str:
+        """A Unity or Blender window reports what is selected and open (no chat message needed)."""
+        chat_id, agent = resolve_window(load_agents(self.agents_dir), app, window, pin)
+        clean = {}
+        for key in ("scene", "file", "active", "mode"):
+            if isinstance(context.get(key), str):
+                clean[key] = context[key][:300]
+        for key in ("selection", "assets"):
+            if isinstance(context.get(key), list):
+                clean[key] = [str(v)[:300] for v in context[key][:MAX_CONTEXT_ITEMS]]
+        if isinstance(context.get("focused"), bool):
+            clean["focused"] = context["focused"]
+        with self.cond:
+            self.logs.setdefault(chat_id, [])
+            entry = self.contexts.setdefault(chat_id, {"chat_id": chat_id})
+            previous = {k: entry.get(k) for k in ("scene", "file", "active", "selection", "assets")}
+            entry.update(app=app, window=window, agent=agent or "none", reported=time.time())
+            for key in ("scene", "file", "active", "mode", "selection", "assets", "focused"):
+                entry.pop(key, None)
+            entry.update(clean)
+            changed = previous != {k: entry.get(k) for k in ("scene", "file", "active", "selection", "assets")}
+            if changed or clean.get("focused"):
+                entry["last_used"] = time.time()
+        return chat_id
+
+    def current_context(self, now: float | None = None) -> dict:
+        now = now or time.time()
+        with self.cond:
+            windows = [dict(w) for w in self.contexts.values()]
+        windows.sort(key=lambda w: (bool(w.get("focused")), w.get("last_used", 0)), reverse=True)
+        for w in windows:
+            for key in ("last_used", "reported"):
+                if key in w:
+                    w[key + "_seconds_ago"] = round(now - w.pop(key))
+        return {"windows": windows,
+                "note": "Most recently used first. A window that is not listed has not reported since this session "
+                        "started (its Claude Hand Tools / chat add-on may be missing)."}
 
     @staticmethod
     def _permission_item(pending: dict) -> dict:
         return {"kind": "permission", "request_id": pending["request_id"], "tool_name": pending["tool_name"],
                 "description": pending["description"], "input_preview": pending["input_preview"]}
 
+    def mark_in_use(self) -> None:
+        with self.cond:
+            first = not self.in_use
+            self.in_use = True
+        if first and self.on_first_use is not None:
+            try:
+                self.on_first_use()
+            except Exception as exc:  # a window that will not minimize is no reason to fail a tool call
+                log("could not minimize the Claude Hand window:", exc)
+
     def permission_request(self, params: dict) -> None:
         """Claude Code asks for a tool approval; show it in every chat panel that is open."""
+        self.mark_in_use()
         request_id = str(params.get("request_id", ""))
         if not request_id:
             return
@@ -267,7 +361,8 @@ class ChatHub:
     def status(self) -> dict:
         with self.cond:
             return {"ok": True, "server": SERVER_NAME, "version": SERVER_VERSION, "claude_connected": self.initialized,
-                    "chats": sorted(self.logs), "open_permissions": sum(not p["resolved"] for p in self.permissions.values())}
+                    "in_use": self.in_use, "chats": sorted(self.logs),
+                    "open_permissions": sum(not p["resolved"] for p in self.permissions.values())}
 
 
 # --------------------------------------------------------------------------- MCP over stdio
@@ -300,12 +395,11 @@ class StdioMcp:
                 "instructions": INSTRUCTIONS,
             }})
         elif method == "notifications/initialized":
-            with self.hub.cond:
-                self.hub.initialized = True
+            self.hub.mark_initialized()
         elif method == "ping":
             self.send({"jsonrpc": "2.0", "id": msg_id, "result": {}})
         elif method == "tools/list":
-            self.send({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": [REPLY_TOOL]}})
+            self.send({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": [REPLY_TOOL, CONTEXT_TOOL]}})
         elif method == "tools/call":
             self.send({"jsonrpc": "2.0", "id": msg_id, "result": self.call_tool(params)})
         elif method == "notifications/claude/channel/permission_request":
@@ -315,14 +409,20 @@ class StdioMcp:
         # other notifications (cancelled, roots changed, ...) need no answer
 
     def call_tool(self, params: dict) -> dict:
-        if params.get("name") != "reply":
-            return {"isError": True, "content": [{"type": "text", "text": f"Unknown tool {params.get('name')!r}"}]}
+        name = params.get("name")
+        if name not in ("reply", CONTEXT_TOOL["name"]):
+            return {"isError": True, "content": [{"type": "text", "text": f"Unknown tool {name!r}"}]}
+        self.hub.mark_in_use()
+        if name == CONTEXT_TOOL["name"]:
+            return {"content": [{"type": "text", "text": json.dumps(self.hub.current_context(), ensure_ascii=False)}]}
         args = params.get("arguments") or {}
         chat_id, text = str(args.get("chat_id", "")), str(args.get("text", ""))
+        origin = "desktop" if args.get("origin") == "desktop" else "panel"
         if not text.strip():
             return {"isError": True, "content": [{"type": "text", "text": "text is empty"}]}
-        if not self.hub.reply(chat_id, text[:MAX_TEXT]):
-            return {"isError": True, "content": [{"type": "text", "text": f"No chat panel has used chat_id {chat_id!r}. Use the chat_id from the <channel> tag."}]}
+        if not self.hub.reply(chat_id, text[:MAX_TEXT], origin, str(args.get("request", ""))):
+            return {"isError": True, "content": [{"type": "text", "text": f"Unknown chat_id {chat_id!r}. Use the chat_id from the "
+                                                  "<channel> tag, or a window's chat_id from current_context."}]}
         return {"content": [{"type": "text", "text": "sent"}]}
 
     def serve(self) -> None:
@@ -418,6 +518,13 @@ class PanelHandler(BaseHTTPRequestHandler):
         elif path == "/v1/permission":
             ok = self.hub.permission_verdict(str(body.get("request_id", "")), str(body.get("behavior", "")))
             self._json(200 if ok else 409, {"ok": ok})
+        elif path == "/v1/context":
+            app, context = str(body.get("app", "")), body.get("context")
+            if app not in ("unity", "blender") or not isinstance(context, dict):
+                self._json(400, {"ok": False, "error": "app must be unity or blender, context must be an object"})
+                return
+            chat_id = self.hub.update_context(app, str(body.get("window", ""))[:200], str(body.get("pin", ""))[:200], context)
+            self._json(200, {"ok": True, "chat_id": chat_id})
         else:
             self._json(404, {"ok": False, "error": "not found"})
 
@@ -512,8 +619,8 @@ def is_claude_code(cmdline: str) -> bool:
     return exe.removesuffix(".exe") in ("node", "bun") and "claude" in cmdline.lower()  # npm-installed CLI
 
 
-def claude_ancestor(table: dict[int, tuple[int, str]], pid: int, max_depth: int = 12) -> str | None:
-    """Command line of the nearest Claude Code process above us; uv, shells and other wrappers are skipped."""
+def claude_ancestor_pid(table: dict[int, tuple[int, str]], pid: int, max_depth: int = 12) -> int | None:
+    """Pid of the nearest Claude Code process above us; uv, shells and other wrappers are skipped."""
     seen = set()
     current = table.get(pid, (0, ""))[0]
     for _ in range(max_depth):
@@ -522,9 +629,15 @@ def claude_ancestor(table: dict[int, tuple[int, str]], pid: int, max_depth: int 
         seen.add(current)
         parent, cmdline = table[current]
         if is_claude_code(cmdline):
-            return cmdline
+            return current
         current = parent
     return None
+
+
+def claude_ancestor(table: dict[int, tuple[int, str]], pid: int, max_depth: int = 12) -> str | None:
+    """Command line of the nearest Claude Code process above us."""
+    found = claude_ancestor_pid(table, pid, max_depth)
+    return table[found][1] if found else None
 
 
 def channel_ancestor(table: dict[int, tuple[int, str]], pid: int, max_depth: int = 12) -> str | None:
@@ -551,6 +664,39 @@ def supervisor_decision(env=os.environ, table_fn=process_table, pid: int | None 
     if claude and f"server:{SERVER_NAME}" in claude and CHANNEL_FLAG_RE.search(claude):
         return True, "Claude Code가 이 서버를 채널로 불러옴"
     return False, "채널 플래그 없이 연 Claude Code 세션 (감독 세션은 start-supervisor.cmd로 여세요)"
+
+
+# Run in a separate, windowless Python: it detaches from its own console, attaches to the console of the
+# Claude Code process (the "Claude Hand" cmd window) and minimizes that window. Doing it in this process
+# would detach the channel server from its console.
+MINIMIZE_SCRIPT = r"""
+import ctypes, sys
+kernel32, user32 = ctypes.windll.kernel32, ctypes.windll.user32
+kernel32.GetConsoleWindow.restype = ctypes.c_void_p
+kernel32.FreeConsole()
+if kernel32.AttachConsole(int(sys.argv[1])):
+    hwnd = kernel32.GetConsoleWindow()
+    if hwnd:
+        user32.ShowWindow(ctypes.c_void_p(hwnd), 6)  # SW_MINIMIZE
+    kernel32.FreeConsole()
+"""
+
+
+def minimize_after_start(home: Path) -> bool:
+    """config.json "minimize_after_start" (default on): tuck the Claude Hand window away once it is in use."""
+    try:
+        return json.loads((home / "config.json").read_text(encoding="utf-8")).get("minimize_after_start", True) is not False
+    except (OSError, ValueError):
+        return True
+
+
+def minimize_console(claude_pid: int, run=subprocess.run, platform=sys.platform) -> bool:
+    """Minimize the console window Claude Code runs in (Windows only; elsewhere the terminal is left alone)."""
+    if platform != "win32" or not claude_pid:
+        return False
+    run([sys.executable, "-c", MINIMIZE_SCRIPT, str(claude_pid)], timeout=15, capture_output=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return True
 
 
 def write_status(home: Path, mode: str, reason: str, port: int | None = None) -> Path:
@@ -623,6 +769,14 @@ def main(argv: list[str] | None = None) -> int:
         mcp.serve()
         return 0
     mcp.hub.auto_sync = lambda agents_dir: refresh_agents(agents_dir=agents_dir)
+    if sys.platform == "win32" and minimize_after_start(home):
+        # Not at start: Claude Code may still be showing its development-channel confirmation in that window.
+        # The first tool call or permission request means the session is past it.
+        def minimize() -> None:
+            claude_pid = claude_ancestor_pid(process_table(), os.getpid())
+            if claude_pid:
+                minimize_console(claude_pid)
+        mcp.hub.on_first_use = lambda: threading.Thread(target=minimize, daemon=True).start()
     token = secrets.token_urlsafe(32)
     env_port = os.environ.get("CLAUDE_HAND_CHAT_PORT")
     httpd = start_http(mcp.hub, token, int(env_port) if env_port else None)

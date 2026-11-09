@@ -105,6 +105,48 @@ class BlenderChatAddonTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: self.addon._server_missing[0], self.addon))
         self.httpd = cc.start_http(self.hub, "x", port=18791)  # tearDown shuts this one down
 
+    def test_message_while_off_starts_claude_hand_and_is_sent_later(self):
+        addon, home = self.addon, Path(os.environ["CLAUDE_HAND_HOME"])
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        (home / "chat" / "server.json").unlink()
+        self.assertTrue(wait_for(lambda: addon._server_missing[0], addon))
+        script = home / "start-supervisor.cmd"
+        script.write_text("", encoding="utf-8")
+        (home / "config.json").write_text(json.dumps({"start_script": str(script)}), encoding="utf-8")
+        launched = []
+        import unittest.mock
+        with unittest.mock.patch.object(addon.subprocess, "Popen", lambda cmd, **kw: launched.append(cmd)):
+            self.assertTrue(addon.send_text("의자 만들어줘"))
+            self.assertFalse(addon.send_text("두 번째"))  # one held message at a time
+        self.assertEqual(len(launched), 1)
+        self.assertEqual(addon._pending[0][0], "의자 만들어줘")
+        self.assertIn("확인", addon._status[0])
+        self.hub.initialized = False  # Claude Code is still connecting when the server appears
+        self.httpd = cc.start_http(self.hub, "fresh-token", port=18796)  # tearDown shuts this one down
+        cc.write_server_file(home, self.httpd.server_address[1], "fresh-token")
+        self.assertTrue(wait_for(lambda: addon._pending[0] is None, addon))
+        self.assertTrue(wait_for(lambda: self.hub.backlog, addon))
+        self.assertEqual(self.emitted, [])
+        self.hub.mark_initialized()
+        self.assertIn("의자 만들어줘", self.emitted[0]["params"]["content"])
+
+    def test_selection_is_reported_without_the_panel_sending_anything(self):
+        addon = self.addon
+        bpy.ops.mesh.primitive_cube_add()
+        bpy.context.view_layer.objects.active.name = "Chair"
+        self.assertTrue(wait_for(lambda: self.hub.contexts.get("blender-props", {}).get("active") == "Chair", addon))
+        context = self.hub.current_context()["windows"][0]
+        self.assertEqual((context["chat_id"], context["selection"]), ("blender-props", ["Chair"]))
+        self.assertTrue(context["file"].endswith("props.blend"))
+
+    def test_desktop_work_shows_in_the_panel(self):
+        addon = self.addon
+        self.assertTrue(wait_for(lambda: addon._status[0] == "담당: blender-props", addon))
+        self.hub.reply("blender-props", "의자를 Unity로 보냈어요.", origin="desktop", request="선택한 의자를 Unity로")
+        self.assertTrue(wait_for(lambda: addon._entries, addon))
+        self.assertEqual((addon._entries[0]["origin"], addon._entries[0]["request"]), ("desktop", "선택한 의자를 Unity로"))
+
     def test_panel_draw_does_not_fail(self):
         self.assertTrue(hasattr(bpy.types, "CLAUDEHAND_PT_chat"))
         self.assertEqual(self.addon.wrap("가" * 50)[0], "가" * self.addon.WRAP_WIDTH)

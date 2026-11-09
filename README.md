@@ -22,49 +22,39 @@ Unity·Blender 안의 채팅창 ──(claude-hand-chat 채널)──┐
 
 ## 매일 쓰는 법
 
-1. 바탕화면의 **Claude Hand** 아이콘을 더블클릭합니다. 또는 Unity·Blender 채팅창의 **[Claude Hand 시작]** 버튼을 누릅니다.
-2. 검은 창이 하나 뜹니다. **닫지 말고 최소화**해 두세요. 처음 한 번은 그 창에서 확인 질문에 답합니다(화살표 키로 고르고 Enter).
-3. Unity(**Window > Claude Hand > Chat**)나 Blender(3D 뷰포트 `N` > **Claude Hand**)에서 채팅합니다.
+1. Unity(**Window > Claude Hand > Chat**)나 Blender(3D 뷰포트 `N` > **Claude Hand**)의 채팅창에 바로 말합니다.
+   - Claude Hand가 꺼져 있으면 채팅창이 켜고, 연결되면 그 메시지를 보냅니다.
+   - 바탕화면의 **Claude Hand** 아이콘이나 채팅창의 **[Claude Hand 시작]** 버튼으로 먼저 켜도 됩니다.
+2. 검은 Claude Hand 창이 뜹니다. 그 창에 확인 질문이 보이면 화살표 키로 고르고 Enter를 누릅니다(개발용 채널 경고는 계속하는 쪽). Claude Code의 보안 확인이라 claude-hand가 대신 답하지 않습니다.
+3. 세션이 일을 시작하면 그 창은 저절로 최소화됩니다(Windows). **닫지는 마세요.** 닫으면 채팅이 멈춥니다.
 
 이게 전부입니다.
 - 새 프로젝트나 파일을 열어도 따로 할 일이 없습니다. 처음 메시지를 보내면 그 창 담당이 자동으로 만들어집니다.
 - 아이콘을 두 번 눌러도 "이미 실행 중"이라고 알려 줄 뿐 둘이 열리지 않습니다.
 
-### Claude 데스크톱 앱에서 진행 보기
+## Claude 데스크톱 앱에서 보고 말하기
 
-```powershell
-uv run tools/claude_hand.py remote-control on     # 끄려면 off
-```
-다음에 Claude Hand를 켜면, 감독 세션이 Claude Code의 **Remote Control**로 열립니다.
-- **Claude 데스크톱 앱의 Code 탭**(그리고 claude.ai/code, 모바일 앱) 세션 목록에 **"Claude Hand"**가 보입니다.
-- 감독의 대화와 도구 실행이 실시간으로 보입니다.
-- 백그라운드로 도는 하위 세션들도 보이고, 거기서 멈출 수 있습니다. 감독은 하위 세션을 백그라운드로 맡기도록 돼 있습니다.
+Claude Hand는 기본으로 Claude Code의 **Remote Control**로 열립니다. 쓰는 방식은 하나입니다. **검은 Claude Hand 창이 일을 하고, Unity·Blender 채팅창과 데스크톱 앱은 같은 세션에 말하는 입구**입니다.
+
+- **Claude 데스크톱 앱의 Code 탭**(그리고 claude.ai/code, 모바일 앱) 세션 목록에 **"Claude Hand"**가 보입니다. 거기서 보고 말할 수 있습니다.
+- 백그라운드로 도는 하위 세션도 보이고, 거기서 멈출 수 있습니다.
+- "선택한 거 Blender로 보내줘"처럼 말해도 됩니다. Unity·Blender가 지금 무엇이 선택돼 있는지 Claude Hand에 알려 주고 있어서, 감독이 대상을 찾습니다(`current_context`).
+- 데스크톱 앱에서 시킨 일도 그 창의 채팅창에 **"데스크톱 앱에서"** 표시와 함께 남습니다. 창마다 작업 기록이 채팅창에 다 모입니다.
+- Claude Hand가 꺼져 있을 때는 데스크톱 앱의 아무 Code 탭 세션에서 **"Claude Hand 켜줘"**라고 하면 됩니다. 검은 창이 뜨면 확인 질문에 답하고, 세션 목록에서 "Claude Hand"로 옮겨 가세요.
 
 필요한 것:
-- Pro·Max·Ultra·Team·Enterprise 구독의 **claude.ai 로그인**. API 키로는 안 됩니다.
+- Pro·Max·Ultra·Team·Enterprise 구독의 **claude.ai 로그인**. API 키로는 안 됩니다. 로그인 방식은 Claude Hand 창에서 `/status`로 볼 수 있습니다.
 - Team·Enterprise는 관리자가 Remote Control을 켜야 합니다.
-- 이미 켜져 있는 Claude Hand에서는 그 창에 `/remote-control`을 입력하면 바로 연결됩니다.
+- 조건이 안 맞으면(API 키, Bedrock 등) Claude Hand는 Remote Control을 빼고 켜고 그 이유를 창에 보여 줍니다. 채팅창은 그대로 됩니다.
 
-## Claude 데스크톱 앱에서 쓰기
-
-**Claude 데스크톱 앱의 Code 탭**에서 바로 쓸 수 있습니다. Code 탭은 내 PC에서 도는 Claude Code라서 감독 스킬, 하위 세션, 안전장치가 그대로 동작합니다. 고를 수 있는 방식은 두 가지입니다.
-
-| | 데스크톱 앱 모드 (`mode desktop`) | 채팅창 모드 (기본) |
-|---|---|---|
-| 대화하는 곳 | 데스크톱 앱 Code 탭 | Unity·Blender 안의 채팅창 |
-| 검은 Claude Hand 창 | 필요 없음 | 필요(최소화) |
-| Channels(리서치 프리뷰) | 필요 없음 | 필요 |
-| 선택한 오브젝트 자동 첨부 | 안 됨. 이름으로 말해야 함 | 됨 |
-| 허락 요청 | 앱 안의 버튼 | 채팅창의 버튼 |
-| 하위 세션 보기 | 앱 ⋮ > **Background tasks** | `remote-control on`이면 데스크톱 앱에서 |
-| 새 프로젝트·파일 | 감독이 `sync`를 직접 실행(명령 허락 1번) | 자동 |
-
-데스크톱 앱 모드로 쓰는 법:
-1. 세팅할 때 "데스크톱 앱에서만 쓸래"라고 하거나 `uv run tools/claude_hand.py mode desktop`을 실행합니다.
-2. Claude 데스크톱 앱 → **Code** 탭 → 폴더를 하나 고르고(아무 폴더나 됩니다) 말하면 됩니다. 예: "MyGame 씬에 큐브 3개 만들어줘".
+설정:
+```powershell
+uv run tools/claude_hand.py remote-control off   # 데스크톱 앱에서 보기 끄기 (on으로 다시 켜기)
+uv run tools/claude_hand.py minimize off         # Claude Hand 창 자동 최소화 끄기
+```
 
 알아둘 점:
-- Unity·Blender 안 채팅창은 Channels가 있어야 연결되는데, 데스크톱 앱에서는 문서상 Channels를 지원하지 않습니다. 그래서 데스크톱 앱 모드에서는 대화를 앱에서 합니다. 두 방식을 같이 써도 됩니다(`mode panels`).
+- 데스크톱 앱에서 새로 연 Code 탭 세션은 Claude Hand가 아닙니다. Unity·Blender 채팅창과 연결되지 않고, 채팅창에 기록도 남지 않습니다. 작업은 "Claude Hand" 세션에서 하세요.
 - 일반 **채팅** 탭에서는 이 스킬이 동작하지 않습니다. **Code** 탭에서만 동작합니다.
 
 ## 처음 설치: Claude에게 맡기기
@@ -127,7 +117,7 @@ uv run tools/claude_hand.py sync --allow-tools    # (선택) 하위 세션의 Un
 그다음 감독 세션을 엽니다. 바탕화면 아이콘, 채팅창의 **[Claude Hand 시작]** 버튼, `start-supervisor.cmd` 중 어느 것이든 됩니다. 아이콘은 `uv run tools/claude_hand.py shortcut`으로 만들고, 컴퓨터를 켤 때 자동으로 켜려면 `--startup`을 붙입니다.
 
 `chat-setup`이 하는 일:
-- 이 폴더에 `.mcp.json`(채널 등록)과 `.claude/settings.local.json`(답장 도구 `mcp__claude-hand-chat__reply` 자동 허용)을 만듭니다. 기존 내용은 유지하고, 둘 다 git에 올라가지 않습니다.
+- 이 폴더에 `.mcp.json`(채널 등록)과 `.claude/settings.local.json`(답장·현재 상황 도구 `mcp__claude-hand-chat__reply`, `mcp__claude-hand-chat__current_context` 자동 허용, 감독이 Unity·Blender를 직접 조작하는 도구 막기)을 만듭니다. 기존 내용은 유지하고, 둘 다 git에 올라가지 않습니다.
 - 채널 서버를 한 번 미리 실행해서 점검합니다(`--check`). Claude Code는 MCP 서버가 30초 안에 떠야 하는데, 처음에는 uv가 Python을 내려받느라 늦을 수 있어서 미리 받아 둡니다. `start-supervisor`는 여유를 두려고 `MCP_TIMEOUT=60000`도 설정합니다.
 
 알아둘 점:

@@ -23,6 +23,7 @@ namespace ClaudeHand.Editor
     public sealed class ChChatWindow : EditorWindow
     {
         private const double NoReplyHintSeconds = 60;
+        private const double StartWaitSeconds = 120;
         private static readonly HttpClient Http = new HttpClient { Timeout = TimeSpan.FromSeconds(45) };
 
         private readonly List<Entry> _entries = new List<Entry>();
@@ -37,7 +38,10 @@ namespace ClaudeHand.Editor
         private double _lastUserMessageTime = -1;
         private bool _sending;
         private bool _serverMissing;
-        private double _startRequestedAt = -1;
+        // Kept through script reloads (EditorWindow fields with SerializeField survive them).
+        [SerializeField] private double _startRequestedAt = -1;
+        [SerializeField] private string _pendingText;    // typed while Claude Hand was off: sent once it answers
+        [SerializeField] private string _pendingContext;
         private CancellationTokenSource _polling;
 
         private sealed class Entry
@@ -49,9 +53,11 @@ namespace ClaudeHand.Editor
             public string Description;
             public string Preview;
             public string Behavior;
+            public string Origin;
+            public string Request;
         }
 
-        private sealed class ServerInfo // filled from server.json by Json.NET
+        internal sealed class ServerInfo // filled from server.json by Json.NET
         {
             public int port { get; set; }
             public string token { get; set; }
@@ -80,7 +86,7 @@ namespace ClaudeHand.Editor
 
         // ------------------------------------------------------------------ server
 
-        private static string ServerFile
+        internal static string ServerFile
         {
             get
             {
@@ -93,7 +99,7 @@ namespace ClaudeHand.Editor
             }
         }
 
-        private static ServerInfo ReadServer()
+        internal static ServerInfo ReadServer()
         {
             try
             {
@@ -110,19 +116,6 @@ namespace ClaudeHand.Editor
         {
             try
             {
-                var config = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(ServerFile)) ?? string.Empty, "config.json");
-                if (File.Exists(config) && JObject.Parse(File.ReadAllText(config)).Value<string>("mode") == "desktop")
-                {
-                    return "데스크톱 앱 모드입니다. Claude 데스크톱 앱의 Code 탭에서 대화하세요. " +
-                           "이 채팅창에서도 대화하려면 아래 버튼으로 Claude Hand를 켜세요.";
-                }
-            }
-            catch (Exception)
-            {
-                // fall through to the server status
-            }
-            try
-            {
                 var path = Path.Combine(Path.GetDirectoryName(ServerFile) ?? string.Empty, "status.json");
                 if (File.Exists(path))
                 {
@@ -131,20 +124,20 @@ namespace ClaudeHand.Editor
                     if (mode == "passive")
                     {
                         return "채널 서버가 대기 중입니다: " + status.Value<string>("reason") +
-                               ". 감독 세션을 claude-hand 폴더의 start-supervisor.cmd로 여세요.";
+                               ". 아래 버튼으로 Claude Hand를 켜거나, 메시지를 보내면 자동으로 켜집니다.";
                     }
-                    if (mode == "stopped") return "감독 세션이 종료됐습니다. start-supervisor.cmd로 다시 여세요.";
+                    if (mode == "stopped") return "Claude Hand가 꺼져 있습니다. 메시지를 보내면 자동으로 켜집니다.";
                 }
             }
             catch (Exception)
             {
                 // fall through to the generic message
             }
-            return "감독 세션의 채널 서버가 시작되지 않았습니다. Claude Code에서 /mcp로 claude-hand-chat 상태를 보거나, " +
+            return "Claude Hand가 꺼져 있습니다. 메시지를 보내면 자동으로 켜집니다. 켜도 연결되지 않으면 " +
                    "claude-hand 폴더에서 uv run tools/claude_hand.py chat-status 를 실행하세요.";
         }
 
-        private static async Task<JObject> Call(ServerInfo server, HttpMethod method, string path, object body, CancellationToken token)
+        internal static async Task<JObject> Call(ServerInfo server, HttpMethod method, string path, object body, CancellationToken token)
         {
             using (var request = new HttpRequestMessage(method, $"http://127.0.0.1:{server.port}{path}"))
             {
@@ -169,8 +162,8 @@ namespace ClaudeHand.Editor
                 if (server == null)
                 {
                     SetServerMissing(true);
-                    SetStatus(DescribeMissingServer());
-                    if (!await Delay(3000, token)) return;
+                    SetStatus(Starting ? StartingMessage : DescribeMissingServer());
+                    if (!await Delay(Starting ? 1000 : 3000, token)) return;
                     continue;
                 }
 
@@ -197,6 +190,7 @@ namespace ClaudeHand.Editor
                     SetStatus(_agent != null
                         ? $"담당: {_agent}"
                         : "이 프로젝트의 하위 세션이 없습니다. uv run tools/claude_hand.py sync 를 실행하세요.");
+                    if (_pendingText != null) SendPending();
 
                     var updates = await Call(server, HttpMethod.Get,
                         $"/v1/updates?chat_id={Uri.EscapeDataString(_chatId)}&after={_after}&wait=20", null, token);
@@ -234,7 +228,7 @@ namespace ClaudeHand.Editor
                     if (match != null) match.Behavior = item.Value<string>("behavior");
                     continue;
                 }
-                if (kind == "reply") _lastUserMessageTime = -1;
+                if (kind == "reply" && item.Value<string>("origin") != "desktop") _lastUserMessageTime = -1;
                 _entries.Add(new Entry
                 {
                     Kind = kind,
@@ -243,6 +237,8 @@ namespace ClaudeHand.Editor
                     ToolName = item.Value<string>("tool_name"),
                     Description = item.Value<string>("description"),
                     Preview = item.Value<string>("input_preview"),
+                    Origin = item.Value<string>("origin"),
+                    Request = item.Value<string>("request"),
                 });
             }
             _after = updates.Value<long?>("next") ?? _after;
@@ -250,11 +246,40 @@ namespace ClaudeHand.Editor
             Repaint();
         }
 
-        private async void Send()
+        private void Send()
         {
             var text = _input.Trim();
+            if (text.Length == 0 || _sending || _pendingText != null) return;
+            var context = _includeSelection ? BuildContext() : string.Empty;
+            if (ReadServer() == null || _serverMissing)
+            {
+                // Claude Hand is off (or its server.json is left over from a crash): keep the message,
+                // start it, and send once it answers.
+                _pendingText = text;
+                _pendingContext = context;
+                _input = string.Empty;
+                if (!Starting) StartSupervisor();
+                Repaint();
+                return;
+            }
+            Post(text, context, () => _input = string.Empty);
+        }
+
+        private void SendPending()
+        {
+            if (_sending) return;
+            var text = _pendingText;
+            var context = _pendingContext;
+            Post(text, context, () =>
+            {
+                if (_pendingText == text) _pendingText = _pendingContext = null;
+            });
+        }
+
+        private async void Post(string text, string context, Action onSent)
+        {
             var server = ReadServer();
-            if (text.Length == 0 || server == null || _sending) return;
+            if (server == null || _sending) return;
             _sending = true;
             try
             {
@@ -263,13 +288,13 @@ namespace ClaudeHand.Editor
                     app = "unity",
                     window = ChPaths.ProjectName,
                     text,
-                    context = _includeSelection ? BuildContext() : string.Empty,
+                    context,
                 }, CancellationToken.None);
                 if (result.Value<bool?>("ok") == true)
                 {
-                    _input = string.Empty;
+                    onSent();
                     _lastUserMessageTime = EditorApplication.timeSinceStartup;
-                    if (result.Value<bool?>("delivered") == false) SetStatus("Claude 세션이 아직 연결 중입니다. 잠시 뒤 답이 옵니다.");
+                    if (result.Value<bool?>("delivered") == false) SetStatus("Claude Hand가 아직 연결 중입니다. 연결되면 바로 전달됩니다.");
                 }
                 else
                 {
@@ -302,7 +327,7 @@ namespace ClaudeHand.Editor
         }
 
         /// <summary>What the user is looking at, so "this object" in a message means something.</summary>
-        private static string BuildContext()
+        internal static string BuildContext()
         {
             var lines = new List<string> { "활성 씬: " + SceneManager.GetActiveScene().name };
             var selected = Selection.gameObjects;
@@ -335,6 +360,12 @@ namespace ClaudeHand.Editor
             if (!missing) _startRequestedAt = -1;
             Repaint();
         }
+
+        private bool Starting => _startRequestedAt > 0 && EditorApplication.timeSinceStartup - _startRequestedAt < StartWaitSeconds;
+
+        private const string StartingMessage =
+            "Claude Hand 창을 여는 중입니다. 그 창에 확인 질문이 보이면 화살표 키로 고르고 Enter를 눌러 주세요 " +
+            "(개발용 채널 경고는 계속하는 쪽). 연결되면 이 채팅창이 이어서 진행합니다.";
 
         /// <summary>start-supervisor next to this claude-hand: from ~/.claude-hand/config.json (written by setup),
         /// else from where this package is installed (claude-hand/unity/com.claudehand.tools).</summary>
@@ -384,7 +415,7 @@ namespace ClaudeHand.Editor
                 }
                 Process.Start(info);
                 _startRequestedAt = EditorApplication.timeSinceStartup;
-                SetStatus("Claude Hand 창을 여는 중입니다...");
+                SetStatus(StartingMessage);
             }
             catch (Exception ex)
             {
@@ -406,7 +437,7 @@ namespace ClaudeHand.Editor
             EditorGUILayout.LabelField(_status, EditorStyles.wordWrappedMiniLabel);
             if (_serverMissing)
             {
-                bool starting = _startRequestedAt > 0 && EditorApplication.timeSinceStartup - _startRequestedAt < 90;
+                bool starting = Starting;
                 GUI.enabled = !starting;
                 if (GUILayout.Button(starting ? "여는 중... (새로 뜬 Claude Hand 창을 확인하세요)" : "▶  Claude Hand 시작", GUILayout.Height(36)))
                 {
@@ -414,8 +445,8 @@ namespace ClaudeHand.Editor
                 }
                 GUI.enabled = true;
                 EditorGUILayout.HelpBox(starting
-                    ? "새 창이 뜹니다. 처음 한 번은 그 창에서 확인 질문에 답해 주세요(화살표 키로 고르고 Enter). 그 창은 닫지 말고 최소화해 두세요."
-                    : "Claude Hand(감독 세션)가 꺼져 있습니다. 버튼을 누르면 켜집니다.", MessageType.Info);
+                    ? "Claude Hand 창에서 확인을 눌러 주세요. 세션이 일을 시작하면 그 창은 저절로 최소화됩니다. 닫지는 마세요."
+                    : "Claude Hand(감독 세션)가 꺼져 있습니다. 버튼을 누르거나 메시지를 보내면 켜집니다.", MessageType.Info);
             }
 
             _scroll = GUILayout.BeginScrollView(_scroll);
@@ -428,6 +459,11 @@ namespace ClaudeHand.Editor
                         EditorGUILayout.LabelField(entry.Text, EditorStyles.wordWrappedLabel);
                         break;
                     case "reply":
+                        if (entry.Origin == "desktop")
+                        {
+                            EditorGUILayout.LabelField("데스크톱 앱에서", EditorStyles.boldLabel);
+                            if (!string.IsNullOrEmpty(entry.Request)) EditorGUILayout.LabelField(entry.Request, EditorStyles.wordWrappedMiniLabel);
+                        }
                         EditorGUILayout.LabelField("Claude", EditorStyles.boldLabel);
                         EditorGUILayout.LabelField(entry.Text, EditorStyles.wordWrappedLabel);
                         break;
@@ -436,6 +472,12 @@ namespace ClaudeHand.Editor
                         break;
                 }
                 GUILayout.Space(6);
+            }
+            if (_pendingText != null)
+            {
+                EditorGUILayout.LabelField("나 (Claude Hand가 켜지면 보냅니다)", EditorStyles.boldLabel);
+                EditorGUILayout.LabelField(_pendingText, EditorStyles.wordWrappedLabel);
+                if (!Starting && GUILayout.Button("보내지 않고 지우기", GUILayout.Width(140))) _pendingText = _pendingContext = null;
             }
             if (_lastUserMessageTime > 0 && EditorApplication.timeSinceStartup - _lastUserMessageTime > NoReplyHintSeconds)
             {
@@ -450,7 +492,7 @@ namespace ClaudeHand.Editor
             GUILayout.BeginHorizontal();
             _includeSelection = EditorGUILayout.ToggleLeft("선택 항목 함께 보내기", _includeSelection);
             GUILayout.FlexibleSpace();
-            GUI.enabled = !_sending && _input.Trim().Length > 0;
+            GUI.enabled = !_sending && _pendingText == null && _input.Trim().Length > 0;
             if (GUILayout.Button("보내기 (Ctrl+Enter)", GUILayout.Width(140)) || (submit && GUI.enabled))
             {
                 Send();

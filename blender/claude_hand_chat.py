@@ -11,7 +11,7 @@ Install: `uv run tools/claude_hand.py blender-install-chat` (or Preferences > Ad
 bl_info = {
     "name": "Claude Hand Chat",
     "author": "claude-hand",
-    "version": (0, 1, 0),
+    "version": (0, 2, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar (N) > Claude Hand",
     "description": "Chat with this Blender window's claude-hand subagent",
@@ -35,6 +35,10 @@ import bpy
 
 POLL_WAIT_SECONDS = 20
 NO_REPLY_HINT_SECONDS = 60
+START_WAIT_SECONDS = 120
+CONTEXT_MIN_INTERVAL = 0.5   # seconds between context reports
+CONTEXT_REFRESH = 60.0       # resend even when nothing changed
+CONTEXT_ITEMS = 20
 VISIBLE_ENTRIES = 12
 WRAP_WIDTH = 38
 
@@ -43,6 +47,8 @@ _status = ["연결 중..."]  # main thread only
 _last_user = [0.0]       # main thread only
 _server_missing = [False]  # main thread only
 _start_requested = [0.0]   # main thread only
+_pending = [None]          # main thread only: (text, context) typed while Claude Hand was off
+_context_sent = {"time": 0.0, "signature": None, "server_pid": None, "busy": False}  # main thread only
 _inbox = queue.Queue()   # (event, payload) from worker threads
 _identity = {"window": None, "pin": None}  # written on the main thread, read by the poller
 _identity_lock = threading.Lock()
@@ -68,21 +74,23 @@ def read_server():
 def describe_missing_server():
     """Why there is no server.json, from the status.json the channel writes on every start."""
     try:
-        if json.loads((server_file().parent.parent / "config.json").read_text(encoding="utf-8")).get("mode") == "desktop":
-            return ("데스크톱 앱 모드입니다. Claude 데스크톱 앱의 Code 탭에서 대화하세요. "
-                    "이 패널에서도 대화하려면 아래 버튼으로 Claude Hand를 켜세요.")
-    except (OSError, ValueError):
-        pass
-    try:
         status = json.loads((server_file().parent / "status.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         status = {}
     if status.get("mode") == "passive":
-        return f"채널 서버가 대기 중입니다: {status.get('reason')}. 감독 세션을 claude-hand 폴더의 start-supervisor.cmd로 여세요."
+        return f"채널 서버가 대기 중입니다: {status.get('reason')}. 아래 버튼으로 켜거나, 메시지를 보내면 자동으로 켜집니다."
     if status.get("mode") == "stopped":
-        return "감독 세션이 종료됐습니다. start-supervisor.cmd로 다시 여세요."
-    return ("감독 세션의 채널 서버가 시작되지 않았습니다. Claude Code에서 /mcp로 claude-hand-chat 상태를 보거나, "
+        return "Claude Hand가 꺼져 있습니다. 메시지를 보내면 자동으로 켜집니다."
+    return ("Claude Hand가 꺼져 있습니다. 메시지를 보내면 자동으로 켜집니다. 켜도 연결되지 않으면 "
             "claude-hand 폴더에서 uv run tools/claude_hand.py chat-status 를 실행하세요.")
+
+
+STARTING_MESSAGE = ("Claude Hand 창을 여는 중입니다. 그 창에 확인 질문이 보이면 화살표 키로 고르고 Enter를 눌러 주세요"
+                    "(개발용 채널 경고는 계속하는 쪽). 연결되면 이 패널이 이어서 진행합니다.")
+
+
+def starting():
+    return bool(_start_requested[0]) and time.time() - _start_requested[0] < START_WAIT_SECONDS
 
 
 def call(server, method, path, body=None, timeout=10):
@@ -110,8 +118,8 @@ def poll_loop():
             window, pin = _identity["window"], _identity["pin"]
         if not server or not window:
             _inbox.put(("missing", True))
-            _inbox.put(("status", describe_missing_server()))
-            _stop.wait(3)
+            _inbox.put(("status", None))  # the main thread knows whether a start is under way
+            _stop.wait(1)
             continue
         if server.get("pid") != server_pid:  # a new supervisor session starts with an empty history
             server_pid, chat_id, agent, after = server.get("pid"), None, None, 0
@@ -147,12 +155,14 @@ def post_in_background(path, body, on_done_event):
     def run():
         server = read_server()
         if not server:
-            _inbox.put(("status", "감독 세션이 실행 중이 아닙니다."))
+            _inbox.put((on_done_event, {"ok": False}) if on_done_event == "context_sent" else ("status", "Claude Hand가 꺼져 있습니다."))
             return
         try:
             _inbox.put((on_done_event, call(server, "POST", path, body)))
         except (OSError, ValueError) as exc:
             _inbox.put(("status", f"보내지 못했습니다: {exc}"))
+            if on_done_event == "context_sent":
+                _inbox.put((on_done_event, {"ok": False}))
     threading.Thread(target=run, daemon=True).start()
 
 
@@ -182,13 +192,59 @@ def build_context():
 
 def send_text(text, include_context=True):
     text = (text or "").strip()
-    if not text:
+    if not text or _pending[0] is not None:
+        return False
+    context = build_context() if include_context else ""
+    if not read_server() or _server_missing[0]:
+        # Claude Hand is off (or its server.json is left over from a crash): keep the message, start it,
+        # and send once it answers.
+        _pending[0] = (text, context)
+        if not starting():
+            start_supervisor()
+        return True
+    post_message(text, context)
+    return True
+
+
+def post_message(text, context):
+    window, pin = window_identity()
+    _last_user[0] = time.time()
+    post_in_background("/v1/messages", {"app": "blender", "window": window, "pin": pin, "text": text, "context": context}, "sent")
+
+
+def collect_context():
+    """What report_context sends: the file, scene, active and selected objects."""
+    layer = bpy.context.view_layer
+    active = layer.objects.active
+    return {
+        "file": bpy.data.filepath or "(저장 안 됨)",
+        "scene": bpy.context.scene.name,
+        "active": active.name if active is not None else "",
+        "mode": active.mode if active is not None else "",
+        "selection": [o.name for o in layer.objects if o.select_get()][:CONTEXT_ITEMS],
+    }
+
+
+def report_context(now=None):
+    """Tell the supervisor what is selected here (its current_context tool), only while Claude Hand is on,
+    at most twice a second and only on change, plus a refresh every minute. Main thread."""
+    now = now or time.time()
+    state = _context_sent
+    if state["busy"] or now - state["time"] < CONTEXT_MIN_INTERVAL:
+        return False
+    server = read_server()
+    if not server:
+        return False
+    try:
+        context = collect_context()
+    except (AttributeError, RuntimeError):  # no scene or view layer during file loading
+        return False
+    signature = json.dumps(context, sort_keys=True)
+    if signature == state["signature"] and server.get("pid") == state["server_pid"] and now - state["time"] < CONTEXT_REFRESH:
         return False
     window, pin = window_identity()
-    body = {"app": "blender", "window": window, "pin": pin, "text": text,
-            "context": build_context() if include_context else ""}
-    _last_user[0] = time.time()
-    post_in_background("/v1/messages", body, "sent")
+    state.update(time=now, signature=signature, server_pid=server.get("pid"), busy=True)
+    post_in_background("/v1/context", {"app": "blender", "window": window, "pin": pin, "context": context}, "context_sent")
     return True
 
 
@@ -220,17 +276,25 @@ def start_supervisor():
         _status[0] = f"Claude Hand를 시작하지 못했습니다: {exc}"
         return False
     _start_requested[0] = time.time()
-    _status[0] = "Claude Hand 창을 여는 중입니다..."
+    _status[0] = STARTING_MESSAGE
     return True
 
 
 def apply_event(event, payload):
     if event == "status":
-        _status[0] = payload
+        _status[0] = payload if payload is not None else (STARTING_MESSAGE if starting() else describe_missing_server())
     elif event == "missing":
         _server_missing[0] = bool(payload)
         if not payload:
             _start_requested[0] = 0.0
+            if _pending[0] is not None:
+                text, context = _pending[0]
+                _pending[0] = None
+                post_message(text, context)
+    elif event == "context_sent":
+        _context_sent["busy"] = False
+        if not (isinstance(payload, dict) and payload.get("ok")):
+            _context_sent["server_pid"] = None  # try again on the next change
     elif event == "reset":
         _entries.clear()
     elif event == "sent":
@@ -245,7 +309,7 @@ def apply_event(event, payload):
                     if entry.get("kind") == "permission" and entry.get("request_id") == item.get("request_id"):
                         entry["behavior"] = item.get("behavior")
                 continue
-            if item.get("kind") == "reply":
+            if item.get("kind") == "reply" and item.get("origin") != "desktop":
                 _last_user[0] = 0.0
             _entries.append(dict(item))
 
@@ -263,6 +327,7 @@ def tick():
             break
         apply_event(event, payload)
         changed = True
+    report_context()
     if changed or (_last_user[0] and time.time() - _last_user[0] > NO_REPLY_HINT_SECONDS):
         for window_ in getattr(bpy.context.window_manager, "windows", []):
             for area in window_.screen.areas:
@@ -332,21 +397,26 @@ class CLAUDEHAND_PT_chat(bpy.types.Panel):
         for line in wrap(_status[0]):
             layout.label(text=line)
         if _server_missing[0]:
-            starting = _start_requested[0] and time.time() - _start_requested[0] < 90
+            opening = starting()
             row = layout.row()
             row.scale_y = 1.6
-            row.enabled = not starting
-            row.operator(CLAUDEHAND_OT_start.bl_idname, text="여는 중... 새 창을 확인하세요" if starting else "Claude Hand 시작", icon="PLAY")
-            hint = ("새 창이 뜹니다. 처음 한 번은 그 창에서 확인 질문에 답해 주세요(화살표 키, Enter). 그 창은 최소화해 두세요."
-                    if starting else "Claude Hand(감독 세션)가 꺼져 있습니다. 버튼을 누르면 켜집니다.")
+            row.enabled = not opening
+            row.operator(CLAUDEHAND_OT_start.bl_idname, text="여는 중... 새 창을 확인하세요" if opening else "Claude Hand 시작", icon="PLAY")
+            hint = ("Claude Hand 창에서 확인을 눌러 주세요. 세션이 일을 시작하면 그 창은 저절로 최소화됩니다. 닫지는 마세요."
+                    if opening else "Claude Hand(감독 세션)가 꺼져 있습니다. 버튼을 누르거나 메시지를 보내면 켜집니다.")
             for line in wrap(hint):
                 layout.label(text=line)
         box = layout.box()
-        if not _entries:
+        if not _entries and _pending[0] is None:
             box.label(text="아직 대화가 없습니다.")
         for entry in _entries[-VISIBLE_ENTRIES:]:
             kind = entry.get("kind")
             col = box.column(align=True)
+            if kind == "reply" and entry.get("origin") == "desktop":
+                col.label(text="데스크톱 앱에서", icon="WINDOW")
+                for line in wrap(entry.get("request", "")):
+                    if line:
+                        col.label(text=line)
             if kind in ("user", "reply"):
                 col.label(text="나" if kind == "user" else "Claude", icon="USER" if kind == "user" else "INFO")
                 for line in wrap(entry.get("text", "")):
@@ -363,6 +433,11 @@ class CLAUDEHAND_PT_chat(bpy.types.Panel):
                         op = row.operator(CLAUDEHAND_OT_permission.bl_idname, text=label)
                         op.request_id = entry.get("request_id", "")
                         op.behavior = behavior
+        if _pending[0] is not None:
+            col = box.column(align=True)
+            col.label(text="나 (Claude Hand가 켜지면 보냅니다)", icon="TIME")
+            for line in wrap(_pending[0][0]):
+                col.label(text=line)
         if _last_user[0] and time.time() - _last_user[0] > NO_REPLY_HINT_SECONDS:
             for line in wrap("1분 넘게 답이 없습니다. 감독 세션을 start-supervisor.cmd로 열었는지, Claude Code 창에 확인을 기다리는 질문이 없는지 봐 주세요."):
                 layout.label(text=line)

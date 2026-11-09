@@ -210,25 +210,36 @@ Blender N 패널 애드온 (urllib)  ─┼──▶ chat_channel.py ──stdio
 
 ### Claude 데스크톱 앱에서 진행 보기 (Remote Control)
 
-- `remote-control on`이면 `preflight`가 저장소의 `.launch-args`(git 제외)에 `--remote-control --name "Claude Hand"`를 쓴다. 시작 스크립트가 그 내용을 `claude` 명령 뒤에 붙인다. cmd는 `set /p`, sh는 `eval "set -- …"`로 읽어서, 따옴표 안의 이름이 하나의 인자로 유지된다.
+- 기본으로(`remote-control off`가 아니면) `preflight`가 저장소의 `.launch-args`(git 제외)에 `--remote-control --name "Claude Hand"`를 쓴다. 시작 스크립트가 그 내용을 `claude` 명령 뒤에 붙인다. cmd는 `set /p`, sh는 `eval "set -- …"`로 읽어서, 따옴표 안의 이름이 하나의 인자로 유지된다.
 - 결과로 세션이 데스크톱 앱 Code 탭, claude.ai/code, 모바일의 세션 목록에 이름으로 보인다. 문서에 따르면 연결된 기기는 대화를 실시간으로 보여주고, 백그라운드로 도는 하위 세션과 워크플로를 보여주며 멈출 수 있게 한다.
 - 그래서 감독 지침에 "하위 세션은 백그라운드로 맡긴다"를 넣었다. 이렇게 하면 앱에서 보이기도 하고, 감독이 그동안 다른 창의 메시지를 받을 수도 있다.
 - 사용자 전체 설정(`remoteControlAtStartup`, `~/.claude/settings.json`)은 쓰지 않았다. 모든 세션이 원격 연결되기 때문이다. 감독 세션에만 플래그를 붙인다.
 - 조건: Pro·Max·Ultra·Team·Enterprise의 claude.ai 로그인이 필요하다. API 키, Bedrock·Vertex·Foundry, 커스텀 `ANTHROPIC_BASE_URL`에서는 안 된다. `doctor`와 `preflight`가 환경변수로 이걸 찾아 알린다.
-- 확인 안 된 것: Channels 개발 플래그와 함께 쓸 때의 동작(가정 20).
+- Channels 개발 플래그와 함께 써도 된다는 것을 Windows에서 확인했다(가정 20, TEST-RESULTS-12-WINDOWS).
 
 배치 파일 주의점:
 - 한국어 메시지가 깨지지 않게 `chcp 65001`을 맨 앞에 둔다. BOM은 넣지 않는다(첫 줄이 깨진다).
 - `if (...)` 블록 안의 echo에는 괄호를 쓰지 않는다. `)`가 블록을 일찍 닫는다.
 - 테스트가 이 두 가지를 검사한다.
 
-## Claude 데스크톱 앱 Code 탭에서 쓰기 (`mode desktop`)
+## 하나로 정리한 방식: Claude Hand 창이 엔진, 채팅창과 데스크톱 앱은 입구
 
-- Code 탭의 로컬 세션은 Claude Code다. 문서에 "로컬 세션은 `~/.claude/skills/`의 개인 스킬을 읽는다", 권한 요청 버튼, 하위 세션을 보여주는 Background tasks 창이 나온다. 그래서 감독 스킬과 `unity-*`/`blender-*` 하위 세션을 그대로 쓴다.
-- Channels는 데스크톱 앱 문서에 없다. 그래서 Unity·Blender 채팅창은 이 모드에서 연결되지 않는다. 데스크톱 세션이 띄운 채널 서버는 가장 가까운 Claude Code 프로세스에 채널 옵션이 없어서 대기 모드로 남는다. 따라서 같은 폴더에서 CLI 감독과 같이 써도 채팅을 가로채지 않는다.
-- 시작 스크립트(`preflight`)가 돌지 않으니, 감독이 하위 세션 없는 프로젝트를 만나면 `sync`를 직접 실행한다. 설치되는 감독 스킬은 `{{CLAUDE_HAND}}` 자리에 이 저장소의 절대 경로를 넣어서, 어느 폴더에서 열어도 명령이 맞는다(`rendered_skill`).
-- `mode desktop`은 `config.json`에 기록된다. `doctor`는 채팅 항목을 "필요 없음"으로 바꾸고, Unity·Blender 채팅창은 "데스크톱 앱 Code 탭에서 대화하세요"를 먼저 보여준다(버튼으로 채팅창 모드도 켤 수 있다).
-- 확인 안 된 것: Code 탭이 `~/.claude/agents`의 사용자 하위 세션(인라인 `mcpServers`와 `hooks` 포함)과 저장소 `.claude/skills`를 CLI와 똑같이 읽는지(가정 21). 문서 페이지의 확인한 부분에는 개인 스킬만 명시돼 있다.
+```
+Unity·Blender 채팅창 ─▶ 채널 ─▶ [Claude Hand 창: 감독 세션(엔진)] ◀═ Remote Control ═▶ Claude 데스크톱 앱(보기·입력)
+        │                                    ▲
+        └── 선택·활성 씬/파일 (/v1/context) ──┘ current_context 도구
+```
+
+TEST-PLAN 12(Windows)에서 Remote Control과 Channels를 한 세션에 같이 쓸 수 있음을 확인했다(가정 20). 그래서 예전의 "Code 탭만" 방식(`mode desktop`)을 없애고 이렇게 정리했다.
+
+- **모드 없음.** `config.json`의 예전 `"mode"` 값은 무시하고 지운다(`write_user_config`). `mode` 명령은 그 사실만 알린다. `doctor`의 채팅 항목은 늘 필요한 항목이다.
+- **Remote Control 기본 켜짐.** `config.json`에 `remote_control: false`가 없으면 켠다. 환경변수로 안 되는 조건(API 키, 다른 서버를 가리키는 `ANTHROPIC_BASE_URL`, Bedrock·Vertex·Foundry)을 찾으면 `preflight`가 `.launch-args`에서 플래그를 빼고 이유를 창에 쓴다. 데스크톱 앱이 자기 세션에 넣는 `ANTHROPIC_BASE_URL=https://api.anthropic.com`은 문제로 보지 않는다(Windows 결과 과제 5). 구독이 아닌 claude.ai 로그인처럼 환경변수로 알 수 없는 경우는 Claude Code가 알린다.
+- **창은 보이게 열고, 쓰기 시작하면 최소화.** 개발용 채널 경고는 Claude Code의 보안 확인이라 대신 답하지 않는다. 그래서 바로가기와 채팅창 버튼은 창을 보이게 연다. 채널 서버가 Claude의 첫 도구 호출이나 첫 허락 요청을 받으면(그때는 시작 질문을 지나온 것이 확실하다) Windows에서 그 창을 최소화한다. 방법: 창 없는 Python을 따로 띄워 `FreeConsole` → `AttachConsole(<claude pid>)` → `GetConsoleWindow` → `ShowWindow(SW_MINIMIZE)`. 채널 서버 자신은 콘솔을 바꾸지 않는다. `minimize off`(config `minimize_after_start`)로 끈다.
+- **처음 메시지로 켜기.** 채팅창은 Claude Hand가 꺼져 있거나(`server.json` 없음) 응답이 없으면 메시지를 맡아 두고 시작 스크립트를 연다. 그동안 "Claude Hand 창에서 확인을 눌러 주세요"를 보여 준다. 서버가 응답하면 맡아 둔 메시지를 보낸다. Unity는 `[SerializeField]`로 스크립트 리로드에도 남긴다. 채널 서버는 Claude Code가 `notifications/initialized`를 보내기 전에 온 메시지를 모아 두었다가 그때 보낸다(`backlog`).
+- **현재 상황 공유(`current_context`).** Unity는 `ChContextReporter`(InitializeOnLoad)가 `Selection.selectionChanged`, `EditorApplication.focusChanged`, `activeSceneChangedInEditMode`에 반응해, Blender는 애드온 타이머가 바뀐 것을 비교해, 활성 씬·파일, 선택한 오브젝트·에셋(각 20개까지), 포커스를 `/v1/context`로 보낸다. 0.5초에 한 번까지, 바뀌었을 때만, 1분마다 한 번 새로 보낸다. Claude Hand가 꺼져 있으면 아무것도 보내지 않는다. 채널 서버는 창마다 마지막 상태와 마지막으로 쓴 시각을 들고, 감독의 `current_context` 도구가 최근 순(포커스 먼저)으로 돌려준다.
+- **데스크톱 앱에서 시킨 일도 채팅창에.** `reply`에 `origin: "desktop"`, `request`(무엇을 시켰는지 한 줄)를 더했다. 채널 서버는 패널이 한 번도 말하지 않은 창이라도 그 창의 하위 세션 이름이면 받아 기록한다. 채팅창은 "데스크톱 앱에서" 아래에 요청과 결과를 보여 준다. 감독 지침(채널 instructions, 감독 스킬)에 "채널 태그 없는 요청이 창을 바꿨으면 그 창에 이렇게 남긴다"를 넣었다.
+- **데스크톱 앱에서 켜기.** 데스크톱 앱에는 cmd를 여는 방법이 문서에 없다. 그래서 아무 Code 탭 세션에서 "Claude Hand 켜줘"라고 하면 감독 스킬이 `claude_hand.py start`를 실행한다. 이 명령은 이미 켜져 있거나 자기가 Claude Hand(`CLAUDE_HAND_SUPERVISOR=1`)면 아무것도 열지 않고, 아니면 새 창을 연 뒤 확인 질문과 세션 목록의 "Claude Hand"로 옮겨 가라고 안내한다.
+- Code 탭에서 새로 연 다른 세션은 Claude Hand가 아니다. 채널 서버는 대기 모드로 뜨고(채널 옵션이 없음), 감독 스킬은 작업을 "Claude Hand" 세션에서 하라고 한 번 권한다. 그래도 여기서 하길 원하면 하위 세션으로 일은 되지만 채팅창 기록과 `current_context`는 없다.
 
 ## 처음 세팅 (claude-hand-setup 스킬)
 
@@ -291,26 +302,14 @@ Blender N 패널 애드온 (urllib)  ─┼──▶ chat_channel.py ──stdio
 | 18 | `settings.local.json`의 `enabledMcpjsonServers`가 `.mcp.json` 승인 질문을 없앤다(문서는 local 파일의 승인이 믿는 폴더에서 적용된다고만 함) | 처음 한 번 질문에 답한다(안내 문구가 있음) |
 | 19 | Unity·Blender 버튼의 `cmd /c start "Claude Hand" <script>`가 새 콘솔 창을 연다 | 바탕화면 아이콘을 쓴다 |
 | 20 | `--remote-control`과 `--dangerously-load-development-channels`를 한 세션에 같이 쓸 수 있다 | `remote-control off`로 끄고, 필요할 때 그 창에서 `/remote-control`을 입력한다 |
-| 21 | 데스크톱 앱 Code 탭이 `~/.claude/agents`의 하위 세션(인라인 MCP 서버·훅 포함)과 저장소의 `.claude/skills`를 읽는다 | 하위 세션이 안 보이면 채팅창 모드(Claude Hand 창)를 쓴다 |
+| 21 | 데스크톱 앱 Code 탭이 `~/.claude/agents`의 하위 세션(인라인 MCP 서버·훅 포함)과 저장소의 `.claude/skills`를 읽는다 | "Claude Hand 켜줘"가 안 되면 바탕화면 아이콘으로 켠다 |
+| 22 | 개발용 채널 경고는 Claude Code가 시작할 때 묻고, Claude의 첫 도구 호출은 그 뒤에만 온다. 그래서 그때 최소화하면 질문을 가리지 않는다. (경고가 켤 때마다 뜨는지 처음 한 번만 뜨는지는 아직 모름) | `minimize off`. 처음 한 번만 뜬다면, 두 번째부터는 창을 최소화로 열도록 바꿀 수 있다 |
+| 23 | 창 없는 Python에서 `AttachConsole(<claude pid>)`로 Claude Hand 콘솔 창을 찾아 최소화할 수 있다(Windows 10 conhost). Windows Terminal이 기본 터미널이면 `GetConsoleWindow`가 가짜 창을 줄 수 있다 | 최소화가 안 될 뿐 동작에는 지장이 없다. 사용자가 직접 최소화한다 |
+| 24 | Remote Control로 들어온 데스크톱 앱 입력이 채널 태그 없는 일반 사용자 메시지로 보인다(그래서 감독이 "데스크톱에서 온 요청"으로 구분한다) | 지침을 "채널 태그가 없으면"에서 다른 표시로 바꾼다 |
 
-## 정한 방향: "데스크톱 앱 + 채팅창" 하나로 (TEST-PLAN 12 확인 후 진행)
+## 정한 방향: "데스크톱 앱 + 채팅창" 하나로
 
-```
-Unity·Blender 채팅창 ─▶ 채널 ─▶ [cmd 창: 감독 세션(엔진), 최소화] ◀═ Remote Control ═▶ Claude 데스크톱 앱(화면·입력)
-                 ▲                         │
-                 └──── 현재 선택·활성 창 ───┘ (current_context)
-```
-
-사용자와 정한 것:
-1. 모드는 하나로 정리한다. cmd(CLI) 세션이 엔진이고, 데스크톱 앱은 Remote Control로 같은 세션을 보고 입력하는 화면이다. "Code 탭만" 모드(`mode desktop`)는 없앤다. Channels가 없어서 채팅창을 쓸 수 없기 때문이다.
-2. **진행 순서:** 먼저 TEST-PLAN 12로 Remote Control과 Channels를 한 세션에서 같이 쓸 수 있는지(가정 20) 확인한다. 된다는 결과가 오면 아래를 만든다.
-3. 만들 것:
-   - **cmd 창은 최소화로 시작:** 바로가기의 실행 창을 "최소화"(.lnk WindowStyle 7)로 하고, 채팅창 버튼은 `start "Claude Hand" /min`을 쓴다.
-   - **Remote Control 기본 켜짐:** 조건(claude.ai 로그인 등)이 안 맞으면 끄고 이유를 안내한다.
-   - **현재 상황 공유(`current_context`):** Unity와 Blender가 채팅창을 열지 않아도 지금 선택, 활성 씬·파일, 마지막으로 쓴 창을 채널 서버에 알린다. Unity는 패키지의 백그라운드 코드가, Blender는 애드온이 한다. 감독은 데스크톱 앱에서 "지금 선택한 거"나 "여기" 같은 말을 들으면 이 도구로 대상을 확인한다.
-   - **대화 기록 맞추기:** 데스크톱 앱에서 시킨 일의 요청 요약과 결과를, 해당 창의 채팅창에도 "데스크톱 앱에서"라는 표시와 함께 남긴다. 그러면 채팅창에 그 창의 작업 기록이 다 모인다.
-   - **처음 대화할 때 자동 시작:** 컴퓨터를 켤 때 자동 실행하지는 않는다. 감독이 꺼진 상태에서 채팅창에 메시지를 보내면, 채팅창이 cmd를 최소화로 켜고 메시지를 맡아 뒀다가 연결되면 전달한다. 데스크톱 앱에서 시작하는 경우(앱이 cmd를 켤 방법은 문서에 없음)는 따로 정한다. 후보는 바로가기, 그리고 데스크톱 앱의 아무 Code 탭 세션에서 "Claude Hand 켜줘"라고 하면 감독 스킬이 시작 스크립트를 실행하는 방법이다.
-4. **확인 결과가 안 좋으면:** Remote Control과 Channels를 같이 못 쓰면 이 방향은 그대로 할 수 없다. 그때 대안을 다시 논의한다(예: 채널 세션은 cmd에 두고 데스크톱 앱에서는 보기만 하기).
+TEST-PLAN 12에서 확인된 뒤 위의 "하나로 정리한 방식"으로 만들었다. 사용자와 정한 것: 모드는 하나, Remote Control 기본 켜짐, 현재 상황 공유, 데스크톱 앱에서 시킨 일을 채팅창에도 기록, 처음 대화할 때 자동 시작(컴퓨터를 켤 때 자동 실행은 하지 않음), 데스크톱 앱의 아무 Code 탭 세션에서 "Claude Hand 켜줘". 바뀐 점 하나: 창을 처음부터 최소화로 열기로 했었지만, 개발용 채널 경고에 사용자가 답해야 해서 보이게 열고 쓰기 시작하면 최소화한다(가정 22).
 
 ## 다음 단계 (2단계 후보)
 

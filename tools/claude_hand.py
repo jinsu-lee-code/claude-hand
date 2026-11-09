@@ -29,11 +29,13 @@ First-time setup helpers (used by the claude-hand-setup skill, safe to run by ha
 Everyday start (so nobody has to open a terminal):
   preflight            Run by start-supervisor each time: refresh subagents, check nothing is
                        already running, explain the first-run prompts.
+  start                Open the Claude Hand window (what the icon and the panels' start button do).
+                       From any Claude Code session: "Claude Hand 켜줘" runs this.
   shortcut             Put a "Claude Hand" icon on the Desktop and in the Start menu.
-  mode                 panels/desktop: talk in the Unity/Blender chat panels, or only in the Claude
-                       desktop app's Code tab (no Claude Hand window, no channel needed).
-  remote-control       on/off/status: show the supervisor and its subagents in the Claude
-                       desktop app (Code tab), claude.ai/code and the mobile app.
+  remote-control       on/off/status (default on): show the supervisor and its subagents in the
+                       Claude desktop app (Code tab), claude.ai/code and the mobile app.
+  minimize             on/off/status (default on, Windows): minimize the Claude Hand window once
+                       the session is in use.
 
 Run with uv (already installed for MCP for Unity) or any Python 3.10+:
   uv run tools/claude_hand.py list
@@ -79,6 +81,7 @@ CHAT_ADDON_SOURCE = REPO_ROOT / "blender" / "claude_hand_chat.py"
 CHAT_ADDON_MODULE = "claude_hand_chat"
 SUPERVISOR_COMMAND = f"claude --dangerously-load-development-channels server:{CHAT_SERVER_NAME}"
 CHAT_REPLY_RULE = f"mcp__{CHAT_SERVER_NAME}__reply"
+CHAT_CONTEXT_RULE = f"mcp__{CHAT_SERVER_NAME}__current_context"  # read-only: what is selected in each window
 MIN_CLAUDE_FOR_PERMISSION_RELAY = (2, 1, 234)
 THIRD_PARTY_PROVIDER_ENV = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
 START_SCRIPT = REPO_ROOT / ("start-supervisor.cmd" if sys.platform == "win32" else "start-supervisor.sh")
@@ -1123,8 +1126,6 @@ def doctor_checks(projects: list[Path], blender_ports: list[int], version=tool_v
             str(editor) if editor else "Unity Hub 기본 위치에서 못 찾음",
             "" if editor else "Unity Hub에서 해당 버전을 설치하거나 Hub로 직접 여세요")
 
-    desktop_mode = read_user_config().get("mode") == "desktop"
-    chat_start = len(checks)
     claude_v = parse_claude_version(claude)
     relay_ok = claude_v is not None and claude_v >= MIN_CLAUDE_FOR_PERMISSION_RELAY
     add("채팅", "Claude Code 2.1.234 이상 (채팅창의 허용/거부 버튼)", relay_ok if claude else None, claude or "없음",
@@ -1143,10 +1144,6 @@ def doctor_checks(projects: list[Path], blender_ports: list[int], version=tool_v
     chat_addons = find_chat_addon_installs()
     add("채팅", "Blender 채팅 애드온", bool(chat_addons) if exes else None, ", ".join(map(str, chat_addons[:3])) or "설치 안 됨",
         "" if chat_addons else "uv run tools/claude_hand.py blender-install-chat")
-    if desktop_mode:  # talking in the desktop app's Code tab: the chat-panel pieces are optional
-        for check in checks[chat_start:]:
-            if check.ok is False:
-                check.ok, check.detail = None, check.detail + " (데스크톱 앱 모드라 필요 없음)"
 
     agents_dir = Path.home() / ".claude" / "agents"
     generated = sorted(p.name for p in agents_dir.glob("*.md") if GENERATED_MARKER in p.read_text(encoding="utf-8", errors="replace")) \
@@ -1156,7 +1153,7 @@ def doctor_checks(projects: list[Path], blender_ports: list[int], version=tool_v
     skill = Path.home() / ".claude" / "skills" / "claude-hand" / "SKILL.md"
     add("claude-hand", "감독 스킬", skill.exists(), str(skill) if skill.exists() else "없음",
         "" if skill.exists() else "uv run tools/claude_hand.py sync")
-    if read_user_config().get("remote_control"):
+    if remote_control_wanted(read_user_config()):
         problems = remote_control_problems()
         add("데스크톱 앱에서 보기", "Remote Control을 쓸 수 있는 로그인", not problems, "; ".join(problems) or "문제 없음",
             "" if not problems else "claude.ai 계정(Pro·Max·Team 등)으로 /login 하세요")
@@ -1223,9 +1220,10 @@ def plan_chat_config(root: Path = REPO_ROOT, runner: str = "uv run -q --no-proje
     settings = read_json_file(settings_path)
     changed = False
     allow = settings.setdefault("permissions", {}).setdefault("allow", [])
-    if CHAT_REPLY_RULE not in allow:
-        allow.append(CHAT_REPLY_RULE)
-        changed = True
+    for rule in (CHAT_REPLY_RULE, CHAT_CONTEXT_RULE):
+        if rule not in allow:
+            allow.append(rule)
+            changed = True
     # Approves this folder's .mcp.json entry up front so the first start asks one question fewer.
     # Claude Code applies approvals from settings.local.json only once the folder is trusted.
     enabled = settings.setdefault("enabledMcpjsonServers", [])
@@ -1377,7 +1375,7 @@ def cmd_chat_setup(args: argparse.Namespace) -> int:
         plan = plan_chat_config(REPO_ROOT, args.runner)
         for path in plan:
             what = "채널 등록" if path.name == ".mcp.json" else \
-                f"답장 도구({CHAT_REPLY_RULE}) 자동 허용, 감독이 Unity·Blender를 직접 조작하는 도구 막기"
+                "답장·현재 상황 도구 자동 허용, 감독이 Unity·Blender를 직접 조작하는 도구 막기"
             print(f"{prefix}{'고침' if path.exists() else '만듦'}: {path}  ({what})")
         if not plan:
             print("채널 등록과 답장 도구 허용은 이미 돼 있습니다.")
@@ -1446,6 +1444,7 @@ def write_user_config(home: Path | None = None, root: Path = REPO_ROOT, start_sc
     path = home / "config.json"
     data = read_json_file(path)
     wanted = {**data, "repo": root.as_posix(), "start_script": start_script.as_posix()}
+    wanted.pop("mode", None)  # "mode desktop" from an earlier version: there is one way to use Claude Hand now
     if wanted != data:
         write_json_files({path: wanted})
     return path
@@ -1455,9 +1454,19 @@ def read_user_config(home: Path | None = None) -> dict:
     return read_json_file((home or claude_hand_home()) / "config.json")
 
 
-def launch_args(config: dict) -> str:
-    """Extra arguments for the supervisor's `claude` command, one line, as start-supervisor pastes it."""
-    if config.get("remote_control"):
+def is_truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def remote_control_wanted(config: dict) -> bool:
+    """Remote Control is on unless the user turned it off (`remote-control off`)."""
+    return config.get("remote_control", True) is not False
+
+
+def launch_args(config: dict, env=os.environ) -> str:
+    """Extra arguments for the supervisor's `claude` command, one line, as start-supervisor pastes it.
+    Remote Control is left out when this login cannot use it (it would only print an error at start)."""
+    if remote_control_wanted(config) and not remote_control_problems(env):
         # Remote Control: the session (and the subagents it runs) shows up in the Claude desktop app's Code tab,
         # claude.ai/code and the mobile app under this name.
         return f'--remote-control --name "{REMOTE_CONTROL_NAME}"'
@@ -1470,8 +1479,9 @@ def remote_control_problems(env=os.environ) -> list[str]:
     provider = [name for name in THIRD_PARTY_PROVIDER_ENV if env.get(name, "").lower() in ("1", "true")]
     if provider:
         problems.append("Bedrock/Vertex/Foundry(" + ", ".join(provider) + ")에서는 Remote Control을 쓸 수 없습니다")
-    if env.get("ANTHROPIC_BASE_URL"):
-        problems.append("ANTHROPIC_BASE_URL이 설정돼 있으면 Remote Control을 쓸 수 없습니다")
+    base_url = env.get("ANTHROPIC_BASE_URL", "").strip().rstrip("/")
+    if base_url and base_url != "https://api.anthropic.com":  # the desktop app sets the official address itself
+        problems.append("ANTHROPIC_BASE_URL이 다른 서버를 가리키고 있으면 Remote Control을 쓸 수 없습니다")
     if env.get("ANTHROPIC_API_KEY"):
         problems.append("ANTHROPIC_API_KEY가 설정돼 있습니다. Remote Control은 API 키로는 안 되고 claude.ai 로그인(Pro·Max·Team 등)이 필요합니다")
     return problems
@@ -1509,7 +1519,8 @@ BANNER = """\
  Claude Hand 감독 세션
    Unity   : Window > Claude Hand > Chat
    Blender : 3D 뷰포트에서 N > Claude Hand 탭
- 이 창은 닫지 말고 최소화해 두세요. 닫으면 채팅이 멈춥니다.
+ 이 창은 닫지 마세요. 닫으면 채팅이 멈춥니다. 일을 시작하면 저절로 최소화됩니다.
+ 개발용 채널(claude-hand-chat) 경고가 뜨면 계속하는 쪽을 고르세요.
 ────────────────────────────────────────────────────────"""
 
 FIRST_RUN_GUIDE = """\
@@ -1517,7 +1528,8 @@ FIRST_RUN_GUIDE = """\
   - 이 폴더(claude-hand)를 믿는지: 믿는다(Yes)를 고르세요.
   - 개발용 채널(claude-hand-chat) 경고: 내용을 읽고 계속하는 쪽을 고르세요.
   - (뜨면) MCP 서버 claude-hand-chat 사용: 사용하는 쪽을 고르세요.
-  - 로그인을 묻으면 화면 안내대로 로그인하세요."""
+  - 로그인을 묻으면 화면 안내대로 로그인하세요.
+  - 데스크톱 앱에서 보려면 구독(Pro·Max 등) 계정 로그인이 필요합니다. /status 로 확인하고, 아니면 /login 하세요."""
 
 
 def cmd_preflight(args: argparse.Namespace) -> int:
@@ -1549,10 +1561,14 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     config = read_user_config(home)
     LAUNCH_ARGS_FILE.write_text(launch_args(config) + "\n", encoding="utf-8")
     print(BANNER)
-    if config.get("remote_control"):
-        print(f" 진행 보기: Claude 데스크톱 앱의 Code 탭(또는 claude.ai/code, 모바일 앱)에서 '{REMOTE_CONTROL_NAME}' 세션을 여세요.")
-        for problem in remote_control_problems():
-            print(f" 주의: {problem}")
+    if remote_control_wanted(config):
+        problems = remote_control_problems()
+        if problems:
+            print(" 데스크톱 앱에서 보기(Remote Control)는 이번에는 끄고 시작합니다:")
+            for problem in problems:
+                print(f"   - {problem}")
+        else:
+            print(f" 진행 보기: Claude 데스크톱 앱의 Code 탭(또는 claude.ai/code, 모바일 앱)에서 '{REMOTE_CONTROL_NAME}' 세션을 여세요.")
     marker = home / "first-run-done"
     if not marker.exists():
         print(FIRST_RUN_GUIDE)
@@ -1588,24 +1604,67 @@ def shortcut_files(platform=sys.platform, home: Path | None = None) -> dict[Path
         f"Exec={script}\nTerminal=true\nComment=Start the Claude Hand supervisor\n")}
 
 
-MODES = {
-    "panels": "Unity·Blender 채팅창에서 대화 (Claude Hand 창이 켜져 있어야 함)",
-    "desktop": "Claude 데스크톱 앱의 Code 탭에서 대화 (Claude Hand 창·채팅창 연결이 필요 없음)",
-}
-
-
 def cmd_mode(args: argparse.Namespace) -> int:
+    """Kept so instructions from an earlier version still run: there is one mode now."""
+    home = claude_hand_home()
+    write_user_config(home)  # drops an old "mode": "desktop"
+    print("이제 쓰는 방식은 하나입니다. Claude Hand 창(감독 세션)이 일을 하고, Unity·Blender 채팅창과 "
+          f"Claude 데스크톱 앱('{REMOTE_CONTROL_NAME}' 세션)은 같은 세션을 보는 창입니다.")
+    return 0
+
+
+def open_start_window(script: Path = START_SCRIPT, platform=sys.platform, popen=subprocess.Popen) -> list[str]:
+    """Open start-supervisor in a new, visible terminal window (the first-start questions are answered there)."""
+    if platform == "win32":
+        cmd = ["cmd.exe", "/c", "start", "Claude Hand", str(script)]
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    elif platform == "darwin":
+        cmd, flags = ["open", "-a", "Terminal", str(script)], 0
+    else:
+        cmd, flags = ["x-terminal-emulator", "-e", str(script)], 0
+    popen(cmd, cwd=str(REPO_ROOT), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+          creationflags=flags)
+    return cmd
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    home = claude_hand_home()
+    if is_truthy(os.environ.get("CLAUDE_HAND_SUPERVISOR")):
+        print("이 세션이 Claude Hand(감독 세션)입니다. 여기서 바로 시키면 됩니다.")
+        return 0
+    if supervisor_running(home):
+        print(f"Claude Hand가 이미 켜져 있습니다. Claude 데스크톱 앱의 Code 탭에서 '{REMOTE_CONTROL_NAME}' 세션을 여세요"
+              "(작업 표시줄의 'Claude Hand' 창과 같은 대화입니다).")
+        return 0
+    write_user_config(home)
+    if args.dry_run:
+        print("(dry run) 새 창에서 실행: " + str(START_SCRIPT))
+        return 0
+    try:
+        open_start_window()
+    except OSError as exc:
+        print(f"Claude Hand 창을 열지 못했습니다: {exc}. 바탕화면의 Claude Hand 아이콘을 누르세요.")
+        return 1
+    print("Claude Hand 창을 열었습니다.")
+    print("  1. 새로 뜬 'Claude Hand' 창에 확인 질문이 보이면 화살표 키로 고르고 Enter를 누르세요(개발용 채널 경고는 계속하는 쪽).")
+    print("     창은 세션이 일을 시작하면 저절로 최소화됩니다. 닫지는 마세요.")
+    if remote_control_wanted(read_user_config(home)) and not remote_control_problems():
+        print(f"  2. Claude 데스크톱 앱의 Code 탭 세션 목록에서 '{REMOTE_CONTROL_NAME}'을 여세요. 거기서 대화하면 됩니다.")
+    return 0
+
+
+def cmd_minimize(args: argparse.Namespace) -> int:
     home = claude_hand_home()
     config = read_user_config(home)
-    if args.mode:
-        config["mode"] = args.mode
+    if args.action in ("on", "off"):
+        config["minimize_after_start"] = args.action == "on"
         write_json_files({home / "config.json": config})
         write_user_config(home)
-    mode = config.get("mode", "panels")
-    print(f"쓰는 방식: {mode} - {MODES.get(mode, '')}")
-    if mode == "desktop":
-        print("  Claude 데스크톱 앱 > Code 탭에서 아무 폴더나 열고 대화하면 됩니다(감독 스킬 claude-hand가 쓰입니다).")
-        print("  하위 세션은 앱의 ⋮ > Background tasks 에서 보입니다. 새 프로젝트·파일은 감독이 알아서 준비합니다.")
+    on = config.get("minimize_after_start", True) is not False
+    print(f"Claude Hand 창 자동 최소화: {'켜짐' if on else '꺼짐'}")
+    if on:
+        print("  Windows에서 세션이 처음 일을 시작하면(도구 호출이나 허락 요청) Claude Hand 창을 최소화합니다. 시작할 때의 "
+              "확인 질문은 창이 보이는 동안 답할 수 있습니다.")
     return 0
 
 
@@ -1617,14 +1676,17 @@ def cmd_remote_control(args: argparse.Namespace) -> int:
         config["remote_control"] = args.action == "on"
         write_json_files({path: config})
         write_user_config(home)
-    on = bool(config.get("remote_control"))
-    print(f"Remote Control: {'켜짐' if on else '꺼짐'}")
+    on = remote_control_wanted(config)
+    print(f"Remote Control: {'켜짐' if on else '꺼짐'}{'' if 'remote_control' in config else ' (기본값)'}")
     if on:
         print(f"  다음에 Claude Hand를 켤 때부터 Claude 데스크톱 앱의 Code 탭(또는 claude.ai/code, 모바일 앱)에 "
               f"'{REMOTE_CONTROL_NAME}' 세션이 보입니다. 감독의 대화와 도구 실행, 백그라운드로 도는 하위 세션이 보입니다.")
         print("  필요한 것: Pro·Max·Ultra·Team·Enterprise 구독의 claude.ai 로그인(API 키는 안 됨). Team·Enterprise는 관리자가 켜야 합니다.")
-        for problem in remote_control_problems():
+        problems = remote_control_problems()
+        for problem in problems:
             print(f"  주의: {problem}")
+        if problems:
+            print("  위 문제가 있는 동안은 Claude Hand를 켤 때 Remote Control을 빼고 시작합니다.")
         if supervisor_running(home):
             print("  지금 켜져 있는 Claude Hand에는 적용되지 않습니다. 그 창에서 /remote-control 을 입력하거나, 닫고 다시 켜세요.")
     return 0
@@ -2111,9 +2173,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_pre.add_argument("--blender-ports", default=DEFAULT_BLENDER_PORTS)
     p_pre.set_defaults(func=cmd_preflight)
 
-    p_mode = sub.add_parser("mode", help="where you talk to Claude Hand: panels (Unity/Blender) or desktop (Code tab)")
-    p_mode.add_argument("mode", nargs="?", choices=sorted(MODES))
+    p_mode = sub.add_parser("mode", help="(earlier versions) there is one mode now; clears an old setting")
+    p_mode.add_argument("mode", nargs="?")
     p_mode.set_defaults(func=cmd_mode)
+
+    p_start = sub.add_parser("start", help="open the Claude Hand window (the supervisor session)")
+    p_start.add_argument("--dry-run", action="store_true")
+    p_start.set_defaults(func=cmd_start)
+
+    p_min = sub.add_parser("minimize", help="minimize the Claude Hand window once it is in use (Windows)")
+    p_min.add_argument("action", nargs="?", choices=["on", "off", "status"], default="status")
+    p_min.set_defaults(func=cmd_minimize)
 
     p_rc = sub.add_parser("remote-control", help="show the supervisor in the Claude desktop app (Remote Control)")
     p_rc.add_argument("action", nargs="?", choices=["on", "off", "status"], default="status")

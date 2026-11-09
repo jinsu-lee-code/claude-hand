@@ -558,7 +558,7 @@ class ChatSetupTests(unittest.TestCase):
             self.assertEqual(entry["args"][:3], ["run", "-q", "--no-project"])
             self.assertTrue(entry["args"][-1].endswith("/tools/chat_channel.py") and Path(entry["args"][-1]).is_absolute())
             settings = json.loads((root / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
-            self.assertEqual(settings["permissions"]["allow"], ["Bash(git status)", ch.CHAT_REPLY_RULE])
+            self.assertEqual(settings["permissions"]["allow"], ["Bash(git status)", ch.CHAT_REPLY_RULE, ch.CHAT_CONTEXT_RULE])
             self.assertEqual(settings["enabledMcpjsonServers"], [ch.CHAT_SERVER_NAME])
             self.assertEqual(settings["model"], "keep-me")
             self.assertEqual(ch.plan_chat_config(root, "uv run -q --no-project", direct_servers=[]), {})  # second run changes nothing
@@ -795,7 +795,7 @@ class EverydayStartTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             code, text, refreshed, home = self.run_preflight(tmp)
             self.assertEqual(code, 0)
-            self.assertIn("닫지 말고 최소화", text)
+            self.assertIn("닫지 마세요", text)
             self.assertIn("처음에는", text)
             self.assertEqual(len(refreshed), 1)
             self.assertTrue((Path(tmp) / ".claude" / "agents").is_dir())  # exists before Claude Code starts
@@ -834,18 +834,24 @@ class EverydayStartTests(unittest.TestCase):
 
 class RemoteControlTests(unittest.TestCase):
     def test_launch_args(self):
-        self.assertEqual(ch.launch_args({}), "")
-        self.assertEqual(ch.launch_args({"remote_control": True}), '--remote-control --name "Claude Hand"')
+        on = '--remote-control --name "Claude Hand"'
+        self.assertEqual(ch.launch_args({}, env={}), on)  # on by default
+        self.assertEqual(ch.launch_args({"remote_control": True}, env={}), on)
+        self.assertEqual(ch.launch_args({"remote_control": False}, env={}), "")
+        self.assertEqual(ch.launch_args({}, env={"ANTHROPIC_API_KEY": "x"}), "")  # cannot work with this login: left out
 
     def test_problems(self):
         self.assertEqual(ch.remote_control_problems({}), [])
         self.assertEqual(len(ch.remote_control_problems({"ANTHROPIC_API_KEY": "x", "CLAUDE_CODE_USE_BEDROCK": "1"})), 2)
         self.assertIn("ANTHROPIC_BASE_URL", ch.remote_control_problems({"ANTHROPIC_BASE_URL": "http://proxy"})[0])
+        # the Claude desktop app puts the official address in its sessions' environment
+        self.assertEqual(ch.remote_control_problems({"ANTHROPIC_BASE_URL": "https://api.anthropic.com/"}), [])
 
     def test_on_off_and_preflight_args(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
-            with unittest.mock.patch.dict("os.environ", {"CLAUDE_HAND_HOME": str(home)}), \
+            clean = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC", "CLAUDE_CODE_USE"))}
+            with unittest.mock.patch.dict("os.environ", {**clean, "CLAUDE_HAND_HOME": str(home)}, clear=True), \
                  unittest.mock.patch.object(ch, "supervisor_running", lambda home=None, fetch=None: False), \
                  unittest.mock.patch("sys.stdout", io.StringIO()):
                 ch.main(["remote-control", "on"])
@@ -883,35 +889,58 @@ class DesktopModeTests(unittest.TestCase):
             installed = ch.install_skill(Path(tmp))
             self.assertEqual(installed.read_text(encoding="utf-8"), ch.rendered_skill())
 
-    def test_mode_command(self):
+    def test_old_desktop_mode_is_cleared(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
+            (home / "config.json").write_text(json.dumps({"mode": "desktop", "remote_control": False}), encoding="utf-8")
             out = io.StringIO()
             with unittest.mock.patch.dict("os.environ", {"CLAUDE_HAND_HOME": str(home)}), unittest.mock.patch("sys.stdout", out):
-                ch.main(["mode", "desktop"])
-                self.assertEqual(ch.read_user_config(home)["mode"], "desktop")
-                ch.main(["mode"])
-            self.assertIn("Code 탭", out.getvalue())
+                ch.main(["mode", "panels"])
+            config = ch.read_user_config(home)
+            self.assertNotIn("mode", config)
+            self.assertFalse(config["remote_control"])  # other choices are kept
+            self.assertIn("하나", out.getvalue())
 
-    def test_doctor_does_not_ask_for_chat_pieces_in_desktop_mode(self):
+
+class StartCommandTests(unittest.TestCase):
+    def run_start(self, env=None, running=False, popen=None):
         with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            (home / ".claude-hand").mkdir()
-            (home / ".claude-hand" / "config.json").write_text(json.dumps({"mode": "desktop"}), encoding="utf-8")
-            versions = {"claude": "2.1.300", "uv": "uv", "git": "git", "node": "v20", "agent-desktop": "1"}
-            with unittest.mock.patch.dict("os.environ", {"HOME": str(home), "USERPROFILE": str(home), "APPDATA": str(home),
-                                                          "CLAUDE_HAND_HOME": str(home / ".claude-hand")}), \
-                 unittest.mock.patch.object(ch.Path, "home", lambda: home), \
-                 unittest.mock.patch.object(ch, "candidate_config_files", lambda cwd=None: []), \
-                 unittest.mock.patch.object(ch, "discover_blender", lambda ports, request=None: []), \
-                 unittest.mock.patch.object(ch, "find_blender_executables", lambda **kw: []), \
-                 unittest.mock.patch.object(ch, "claude_mcp_get", lambda **kw: None), \
-                 unittest.mock.patch.object(ch, "plan_chat_config", lambda root=None, runner=None, direct_servers=None: {Path(".mcp.json"): {}}):
-                checks = ch.doctor_checks([], [9876], version=lambda *cmd: versions[cmd[0]])
-        chat = [c for c in checks if c.area == "채팅"]
-        self.assertTrue(chat)
-        self.assertTrue(all(c.ok is not False for c in chat), [(c.item, c.ok) for c in chat])
-        self.assertTrue(any("필요 없음" in c.detail for c in chat))
+            out = io.StringIO()
+            launched = []
+            base = {k: v for k, v in os.environ.items() if k != "CLAUDE_HAND_SUPERVISOR" and not k.startswith(("ANTHROPIC", "CLAUDE_CODE_USE"))}
+            with unittest.mock.patch.dict("os.environ", {**base, "CLAUDE_HAND_HOME": tmp, **(env or {})}, clear=True), \
+                 unittest.mock.patch.object(ch, "supervisor_running", lambda home=None, fetch=None: running), \
+                 unittest.mock.patch.object(ch, "open_start_window", popen or (lambda: launched.append(1))), \
+                 unittest.mock.patch("sys.stdout", out):
+                code = ch.main(["start"])
+            return code, out.getvalue(), launched
+
+    def test_opens_the_window_and_says_where_to_look(self):
+        code, text, launched = self.run_start()
+        self.assertEqual((code, launched), (0, [1]))
+        self.assertIn("확인 질문", text)
+        self.assertIn("Code 탭", text)
+
+    def test_already_running_or_inside_the_supervisor(self):
+        for kwargs in ({"running": True}, {"env": {"CLAUDE_HAND_SUPERVISOR": "1"}}):
+            code, text, launched = self.run_start(**kwargs)
+            self.assertEqual((code, launched), (0, []), kwargs)
+
+    def test_window_commands(self):
+        calls = []
+        popen = lambda cmd, **kw: calls.append((cmd, kw.get("creationflags", 0)))
+        self.assertEqual(ch.open_start_window(Path("C:/ch/start-supervisor.cmd"), "win32", popen)[:4], ["cmd.exe", "/c", "start", "Claude Hand"])
+        self.assertEqual(ch.open_start_window(Path("/ch/start-supervisor.sh"), "darwin", popen)[:3], ["open", "-a", "Terminal"])
+        self.assertEqual(len(calls), 2)
+
+    def test_minimize_switch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with unittest.mock.patch.dict("os.environ", {"CLAUDE_HAND_HOME": tmp}), unittest.mock.patch("sys.stdout", io.StringIO()):
+                ch.main(["minimize", "off"])
+                import chat_channel
+                self.assertFalse(chat_channel.minimize_after_start(Path(tmp)))
+                ch.main(["minimize", "on"])
+                self.assertTrue(chat_channel.minimize_after_start(Path(tmp)))
 
 
 if __name__ == "__main__":

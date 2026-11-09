@@ -139,6 +139,94 @@ class HubTests(unittest.TestCase):
         self.assertEqual(kinds, ["user", "permission"])
 
 
+class Stage2HubTests(unittest.TestCase):
+    """Lazy start backlog, window context, desktop-origin replies, first-use hook."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        write_agents(Path(self.tmp.name))
+        self.emitted = Recorder()
+        self.hub = cc.ChatHub(self.emitted, Path(self.tmp.name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_messages_wait_until_claude_code_connects(self):
+        result = self.hub.post_user_message("unity", "MyGame", "first message")
+        self.assertFalse(result["delivered"])
+        self.assertEqual(self.emitted.messages, [])
+        self.hub.mark_initialized()
+        self.assertEqual([m["params"]["content"] for m in self.emitted.messages], ["first message"])
+        self.hub.post_user_message("unity", "MyGame", "second")
+        self.assertEqual(len(self.emitted.messages), 2)
+
+    def test_context_is_kept_per_window_newest_first(self):
+        self.hub.update_context("blender", "props", "props@9877", {"file": "C:/Art/props.blend", "active": "Chair",
+                                                                   "selection": ["Chair", "Table"]})
+        time.sleep(0.01)
+        chat_id = self.hub.update_context("unity", "MyGame", "", {"scene": "Main", "selection": ["Root/Player"], "focused": True,
+                                                                  "junk": "dropped", "assets": list(map(str, range(50)))})
+        self.assertEqual(chat_id, "unity-mygame")
+        windows = self.hub.current_context()["windows"]
+        self.assertEqual([w["chat_id"] for w in windows], ["unity-mygame", "blender-props"])
+        self.assertEqual(windows[0]["agent"], "unity-mygame")
+        self.assertEqual(windows[0]["selection"], ["Root/Player"])
+        self.assertNotIn("junk", windows[0])
+        self.assertEqual(len(windows[0]["assets"]), cc.MAX_CONTEXT_ITEMS)
+        self.assertEqual(windows[1]["active"], "Chair")
+        self.assertIn("last_used_seconds_ago", windows[1])
+        # a repeat report that changes nothing and has no focus does not make a window "recent"
+        self.hub.update_context("unity", "MyGame", "", {"scene": "Main", "selection": ["Root/Player"], "focused": False})
+        self.hub.update_context("blender", "props", "props@9877", {"file": "C:/Art/props.blend", "active": "Table",
+                                                                   "selection": ["Table"]})
+        self.assertEqual([w["chat_id"] for w in self.hub.current_context()["windows"]], ["blender-props", "unity-mygame"])
+
+    def test_desktop_reply_reaches_a_window_whose_panel_never_spoke(self):
+        self.assertTrue(self.hub.reply("unity-mygame", "큐브를 만들었습니다", origin="desktop", request="큐브 하나 만들기"))
+        self.assertFalse(self.hub.reply("unity-nobody", "x", origin="desktop"))
+        [item] = self.hub.updates("unity-mygame", 0, 0)
+        self.assertEqual((item["kind"], item["origin"], item["request"]), ("reply", "desktop", "큐브 하나 만들기"))
+
+    def test_first_use_runs_once(self):
+        calls = []
+        self.hub.on_first_use = lambda: calls.append(1)
+        mcp = cc.StdioMcp(io.StringIO(), io.StringIO(), Path(self.tmp.name))
+        mcp.hub = self.hub
+        mcp.call_tool({"name": "current_context", "arguments": {}})
+        mcp.call_tool({"name": "current_context", "arguments": {}})
+        self.hub.permission_request({"request_id": "abcde", "tool_name": "Bash"})
+        self.assertEqual(calls, [1])
+        self.assertTrue(self.hub.status()["in_use"])
+
+    def test_first_use_failure_is_harmless(self):
+        def boom():
+            raise RuntimeError("no window")
+        self.hub.on_first_use = boom
+        self.hub.mark_in_use()
+        self.assertTrue(self.hub.in_use)
+
+
+class MinimizeTests(unittest.TestCase):
+    def test_only_on_windows_and_in_a_separate_process(self):
+        runs = []
+        self.assertFalse(cc.minimize_console(1234, run=lambda *a, **kw: runs.append(a), platform="linux"))
+        self.assertTrue(cc.minimize_console(1234, run=lambda cmd, **kw: runs.append(cmd), platform="win32"))
+        self.assertEqual(runs[0][-1], "1234")
+        self.assertIn("AttachConsole", runs[0][2])
+        compile(cc.MINIMIZE_SCRIPT, "minimize", "exec")
+
+    def test_config_switch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            self.assertTrue(cc.minimize_after_start(home))
+            (home / "config.json").write_text(json.dumps({"minimize_after_start": False}), encoding="utf-8")
+            self.assertFalse(cc.minimize_after_start(home))
+
+    def test_claude_pid_is_found_through_wrappers(self):
+        self.assertEqual(cc.claude_ancestor_pid(AncestorTests.TABLE, 10), 8)
+        self.assertIsNone(cc.claude_ancestor_pid({10: (9, "python x"), 9: (1, "cmd.exe")}, 10))
+
+
 class McpTests(unittest.TestCase):
     def run_session(self, lines):
         out = io.StringIO()
@@ -158,7 +246,7 @@ class McpTests(unittest.TestCase):
         self.assertEqual(init["protocolVersion"], "2025-06-18")
         self.assertEqual(init["capabilities"]["experimental"], {"claude/channel": {}, "claude/channel/permission": {}})
         self.assertIn("reply tool", init["instructions"])
-        self.assertEqual([t["name"] for t in replies[1]["result"]["tools"]], ["reply"])
+        self.assertEqual([t["name"] for t in replies[1]["result"]["tools"]], ["reply", "current_context"])
         self.assertEqual(replies[2], {"jsonrpc": "2.0", "id": 3, "result": {}})
         self.assertEqual(replies[3]["error"]["code"], -32601)
 
@@ -170,6 +258,12 @@ class McpTests(unittest.TestCase):
         empty = mcp.call_tool({"name": "reply", "arguments": {"chat_id": "unity-mygame", "text": " "}})
         self.assertEqual(ok, {"content": [{"type": "text", "text": "sent"}]})
         self.assertTrue(bad["isError"] and empty["isError"])
+        desktop = mcp.call_tool({"name": "reply", "arguments": {"chat_id": "unity-mygame", "text": "done", "origin": "desktop",
+                                                                "request": "큐브"}})
+        self.assertEqual(desktop, {"content": [{"type": "text", "text": "sent"}]})
+        self.assertEqual(mcp.hub.logs["unity-mygame"][-1]["origin"], "desktop")
+        context = mcp.call_tool({"name": "current_context", "arguments": {}})
+        self.assertEqual(json.loads(context["content"][0]["text"])["windows"], [])
 
 
 class EndToEndTests(unittest.TestCase):
