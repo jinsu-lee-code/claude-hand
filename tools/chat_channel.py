@@ -18,9 +18,15 @@ The panels talk to this process over HTTP on 127.0.0.1 only. Every request must 
 token this process writes to ~/.claude-hand/chat/server.json, so only programs running as you
 can post into the session (an open port would be a prompt-injection hole).
 
-Only the supervisor session serves the panels: start-supervisor sets CLAUDE_HAND_SUPERVISOR=1.
+Only the supervisor session serves the panels. It counts as the supervisor when
+  - CLAUDE_HAND_SUPERVISOR=1 reaches it (start-supervisor sets it; chat-setup's .mcp.json passes it
+    on explicitly through `env`, since Claude Code is not documented to pass its whole environment), or
+  - a parent process is Claude Code started with this server as a channel
+    (`--dangerously-load-development-channels server:claude-hand-chat`), however it was launched.
 Any other Claude Code session opened in this folder also starts this server (it is in .mcp.json)
-but stays passive, so it cannot capture the panels with a session that has no channel.
+but stays passive, so a session without the channel cannot swallow panel messages. Every start
+writes ~/.claude-hand/chat/status.json (serving / passive and why) so panels and
+`claude_hand.py chat-status` can say what is wrong.
 
   python tools/chat_channel.py --check   checks that this machine can run the channel (used by setup)
 
@@ -33,6 +39,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import sys
 import threading
 import time
@@ -431,7 +438,88 @@ def remove_server_file(path: Path) -> None:
 
 
 def is_supervisor(env=os.environ) -> bool:
-    return env.get("CLAUDE_HAND_SUPERVISOR", "").lower() in ("1", "true", "yes", "on")
+    return env.get("CLAUDE_HAND_SUPERVISOR", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+CHANNEL_FLAG_RE = re.compile(r"--(dangerously-load-development-channels|channels)\b")
+
+
+def process_table(run=subprocess.run, platform=sys.platform) -> dict[int, tuple[int, str]]:
+    """{pid: (parent pid, command line)} for every process, with no third-party packages."""
+    if platform == "win32":
+        script = ("Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine "
+                  "| ConvertTo-Json -Compress")
+        proc = run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True,
+                   text=True, errors="replace", timeout=30, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        rows = json.loads(proc.stdout or "[]")
+        rows = rows if isinstance(rows, list) else [rows]
+        return {int(r["ProcessId"]): (int(r.get("ParentProcessId") or 0), r.get("CommandLine") or "") for r in rows}
+    proc = run(["ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "args="], capture_output=True, text=True,
+               errors="replace", timeout=30)
+    table = {}
+    for line in (proc.stdout or "").splitlines():
+        parts = line.split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            table[int(parts[0])] = (int(parts[1]), parts[2] if len(parts) > 2 else "")
+    return table
+
+
+def executable_of(cmdline: str) -> str:
+    """Lower-case file name of the program in a command line ("C:/x/claude.exe" -> "claude.exe")."""
+    cmdline = cmdline.strip()
+    if cmdline.startswith('"'):
+        exe = cmdline[1:].split('"', 1)[0]
+    else:
+        exe = cmdline.split(None, 1)[0] if cmdline else ""
+    return re.split(r"[/\\]", exe)[-1].lower()
+
+
+def is_claude_code(cmdline: str) -> bool:
+    exe = executable_of(cmdline)
+    if "claude" in exe:
+        return True
+    return exe.removesuffix(".exe") in ("node", "bun") and "claude" in cmdline.lower()  # npm-installed CLI
+
+
+def channel_ancestor(table: dict[int, tuple[int, str]], pid: int, max_depth: int = 12) -> str | None:
+    """Command line of the Claude Code process that started us, if it loads this server as a channel.
+    Only the nearest Claude Code ancestor counts; uv, shells and other wrappers in between are skipped."""
+    seen = set()
+    current = table.get(pid, (0, ""))[0]
+    for _ in range(max_depth):
+        if not current or current in seen or current not in table:
+            return None
+        seen.add(current)
+        parent, cmdline = table[current]
+        if is_claude_code(cmdline):
+            has_channel = f"server:{SERVER_NAME}" in cmdline and CHANNEL_FLAG_RE.search(cmdline)
+            return cmdline if has_channel else None
+        current = parent
+    return None
+
+
+def supervisor_decision(env=os.environ, table_fn=process_table, pid: int | None = None) -> tuple[bool, str]:
+    if is_supervisor(env):
+        return True, "CLAUDE_HAND_SUPERVISOR=1 (start-supervisor)"
+    try:
+        found = channel_ancestor(table_fn(), pid or os.getpid())
+    except Exception as exc:  # never let the check stop the server from starting
+        return False, f"채널 플래그 없이 연 세션으로 보임 (부모 프로세스 확인 실패: {exc})"
+    if found:
+        return True, "Claude Code가 이 서버를 채널로 불러옴"
+    return False, "채널 플래그 없이 연 Claude Code 세션 (감독 세션은 start-supervisor.cmd로 여세요)"
+
+
+def write_status(home: Path, mode: str, reason: str, port: int | None = None) -> Path:
+    """Last start of the channel, for panels and `claude_hand.py chat-status`."""
+    chat_dir = home / "chat"
+    chat_dir.mkdir(parents=True, exist_ok=True)
+    target = chat_dir / "status.json"
+    tmp = chat_dir / f"status.{os.getpid()}.tmp"
+    tmp.write_text(json.dumps({"mode": mode, "reason": reason, "pid": os.getpid(), "port": port, "time": time.time(),
+                               "version": SERVER_VERSION}, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, target)
+    return target
 
 
 def self_check(env=os.environ) -> dict:
@@ -476,21 +564,33 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, ensure_ascii=False))
         return 0 if result["ok"] else 1
     mcp = StdioMcp(sys.stdin, sys.stdout, default_agents_dir())
-    if not is_supervisor():
-        # Same tools, no panels: messages only reach a session started with start-supervisor.
-        log("passive: not started by start-supervisor (CLAUDE_HAND_SUPERVISOR unset); panels are not served")
+    home = claude_hand_home()
+    serving, reason = supervisor_decision()
+    if not serving:
+        # Same tools, no panels: messages only reach the session that has the channel.
+        log("passive:", reason)
+        try:
+            write_status(home, "passive", reason)
+        except OSError:
+            pass
         mcp.serve()
         return 0
     token = secrets.token_urlsafe(32)
     env_port = os.environ.get("CLAUDE_HAND_CHAT_PORT")
     httpd = start_http(mcp.hub, token, int(env_port) if env_port else None)
-    server_file = write_server_file(claude_hand_home(), httpd.server_address[1], token)
-    log(f"panels: http://127.0.0.1:{httpd.server_address[1]} (token in {server_file})")
+    port = httpd.server_address[1]
+    server_file = write_server_file(home, port, token)
+    write_status(home, "serving", reason, port)
+    log(f"serving panels on http://127.0.0.1:{port} ({reason}); token in {server_file}")
     try:
         mcp.serve()
     finally:
         httpd.shutdown()
         remove_server_file(server_file)
+        try:
+            write_status(home, "stopped", "감독 세션이 종료됨")
+        except OSError:
+            pass
     return 0
 
 

@@ -22,6 +22,8 @@ First-time setup helpers (used by the claude-hand-setup skill, safe to run by ha
   chat-setup           Register the chat channel for this folder (.mcp.json), allow its reply tool
                        (.claude/settings.local.json) and pre-start it once so uv fetches Python.
   blender-install-chat Install and enable the Blender chat panel add-on.
+  chat-status          Explain why a chat panel does or does not reach the supervisor.
+  update               After `git pull`: refresh everything an earlier version set up.
 
 Run with uv (already installed for MCP for Unity) or any Python 3.10+:
   uv run tools/claude_hand.py list
@@ -41,6 +43,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -154,11 +157,16 @@ def discover_stdio(directory: Path | None = None, probe=probe_port) -> list[Inst
     """Read ~/.unity-mcp/unity-mcp-status-<hash>.json files written by the Unity side (stdio bridge)."""
     directory = directory or status_dir()
     by_port: dict[object, tuple[Instance, float]] = {}
+    entries = []
     for file in sorted(directory.glob("unity-mcp-status-*.json")):
         try:
-            data = json.loads(file.read_text(encoding="utf-8"))
+            entries.append((file, json.loads(file.read_text(encoding="utf-8"))))
         except (OSError, ValueError):
             continue
+    ports = sorted({d.get("unity_port") for _, d in entries if isinstance(d.get("unity_port"), int)})
+    with ThreadPoolExecutor(max_workers=max(1, min(16, len(ports)))) as pool:  # stale files cost a timeout each
+        answering = dict(zip(ports, pool.map(probe, ports)))
+    for file, data in entries:
         project_path = data.get("project_path") or ""
         port = data.get("unity_port")
         inst = Instance(
@@ -167,7 +175,7 @@ def discover_stdio(directory: Path | None = None, probe=probe_port) -> list[Inst
             path=project_path[: -len("/Assets")] if project_path.endswith(("/Assets", "\\Assets")) else project_path,
             port=port if isinstance(port, int) else None,
             unity_version=data.get("unity_version") or "",
-            alive=bool(isinstance(port, int) and probe(port)) or bool(data.get("reloading")),
+            alive=bool(isinstance(port, int) and answering.get(port)) or bool(data.get("reloading")),
             source=str(file),
         )
         mtime = file.stat().st_mtime
@@ -199,7 +207,9 @@ def discover_http(url: str, fetch=None) -> list[Instance]:
 
 
 def _fetch_json(url: str):
-    with urllib.request.urlopen(url, timeout=3) as response:  # noqa: S310 - localhost only
+    # "localhost" can try ::1 first and wait on Windows; the MCP for Unity server listens on IPv4.
+    url = re.sub(r"^(https?://)localhost\b", r"\g<1>127.0.0.1", url)
+    with urllib.request.urlopen(url, timeout=2) as response:  # noqa: S310 - localhost only
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -213,9 +223,11 @@ def parse_ports(spec: str) -> list[int]:
     return ports
 
 
-def blender_request(port: int, command: dict, timeout: float = 2.0):
-    """MCP for Blender's add-on speaks bare JSON over TCP: one object in, one object out."""
-    with socket.create_connection(("127.0.0.1", port), timeout) as s:
+def blender_request(port: int, command: dict, timeout: float = 2.0, connect_timeout: float = 0.5):
+    """MCP for Blender's add-on speaks bare JSON over TCP: one object in, one object out.
+    The connect timeout is short on purpose: Windows takes about two seconds to refuse a closed
+    local port, and an add-on that is listening accepts at once even while Blender is busy."""
+    with socket.create_connection(("127.0.0.1", port), min(timeout, connect_timeout)) as s:
         s.settimeout(timeout)
         s.sendall(json.dumps(command).encode("utf-8"))
         buffer = b""
@@ -232,15 +244,17 @@ def blender_request(port: int, command: dict, timeout: float = 2.0):
 
 
 def discover_blender(ports: list[int], request=blender_request) -> list[BlenderInstance]:
-    """Ping each port; for every MCP for Blender add-on that answers, read its .blend path (read-only)."""
-    found = []
-    for port in ports:
+    """Ping the ports in parallel; for every MCP for Blender add-on that answers, read its .blend path (read-only)."""
+    def probe(port):
         try:
             pong = request(port, {"type": "ping", "params": {}}, 2.0)
         except OSError:
-            continue  # nothing listening
+            return None  # nothing listening
         if not (isinstance(pong, dict) and pong.get("status") == "success"):
-            continue  # something else owns the port (e.g. the official Blender Lab add-on)
+            return None  # something else owns the port
+        return describe(port)
+
+    def describe(port):
         inst = BlenderInstance(port=port)
         try:
             info = request(port, {"type": "get_addon_info", "params": {}}, 3.0)
@@ -253,8 +267,12 @@ def discover_blender(ports: list[int], request=blender_request) -> list[BlenderI
             inst.filepath = str((res or {}).get("result", {}).get("result", "")).strip()
         except (OSError, AttributeError):
             pass
-        found.append(inst)
-    return found
+        return inst
+
+    if not ports:
+        return []
+    with ThreadPoolExecutor(max_workers=min(16, len(ports))) as pool:
+        return [inst for inst in pool.map(probe, ports) if inst is not None]
 
 
 # --------------------------------------------------------------------------- config detection
@@ -975,26 +993,33 @@ class Check:
     fix: str = ""
 
 
-def doctor_checks(projects: list[Path], blender_ports: list[int], version=tool_version) -> list[Check]:
+def doctor_checks(projects: list[Path], blender_ports: list[int], version=tool_version, progress=None) -> list[Check]:
     checks: list[Check] = []
+    progress = progress or (lambda message: None)
 
     def add(area, item, ok, detail="", fix=""):
         checks.append(Check(area, item, ok, detail, fix))
 
-    claude = version("claude", "--version")
+    progress("프로그램 버전 확인 중...")
+    tools = {"claude": ("claude", "--version"), "uv": ("uv", "--version"), "git": ("git", "--version"),
+             "node": ("node", "--version"), "agent-desktop": ("agent-desktop", "version")}
+    with ThreadPoolExecutor(max_workers=len(tools)) as pool:  # each CLI start can take a second or two on Windows
+        futures = {name: pool.submit(version, *cmd) for name, cmd in tools.items()}
+        versions = {name: future.result() for name, future in futures.items()}
+    claude = versions["claude"]
     add("기본 도구", "Claude Code CLI", claude is not None, claude or "없음",
         "" if claude else "https://claude.com/claude-code 에서 설치")
-    uv = version("uv", "--version")
+    uv = versions["uv"]
     add("기본 도구", "uv", uv is not None, uv or "없음", "" if uv else "winget install --id astral-sh.uv -e")
-    git = version("git", "--version")
+    git = versions["git"]
     add("기본 도구", "git (Unity가 MCP for Unity를 받을 때 필요)", git is not None, git or "없음",
         "" if git else "winget install --id Git.Git -e")
-    node = version("node", "--version")
+    node = versions["node"]
     node_ok = (node_major(node) or 0) >= 18
     add("기본 도구", "Node.js 18 이상 (agent-desktop용)", node_ok, node or "없음",
         "" if node_ok else "winget install --id OpenJS.NodeJS.LTS -e")
 
-    agent_desktop = version("agent-desktop", "version")
+    agent_desktop = versions["agent-desktop"]
     add("agent-desktop", "agent-desktop CLI", agent_desktop is not None, agent_desktop or "없음",
         "" if agent_desktop else "npm install -g agent-desktop")
 
@@ -1009,11 +1034,13 @@ def doctor_checks(projects: list[Path], blender_ports: list[int], version=tool_v
     add("Blender", "Claude 설정에 MCP for Blender 등록", configured,
         blender_cfg.origin if configured else (blender_cfg.warning or "없음"),
         "" if configured else "uvx mcp-for-blender setup --dry-run  (확인 후 --yes)")
+    progress("Blender 창 찾는 중...")
     running = discover_blender(blender_ports)
     add("Blender", "응답하는 Blender 창", bool(running) if exes else None,
         ", ".join(f"{b.name}@{b.port}" for b in running) or "없음",
         "" if running else "Blender를 열고 애드온 서버를 켜세요 (blender-open --port 9876)")
 
+    progress("Unity 에디터 찾는 중...")
     unity_cfg = detect_server_config()
     unity_configured = unity_cfg.origin != "default"
     add("Unity", "Claude 설정에 MCP for Unity 등록", unity_configured,
@@ -1068,6 +1095,11 @@ def doctor_checks(projects: list[Path], blender_ports: list[int], version=tool_v
     skill = Path.home() / ".claude" / "skills" / "claude-hand" / "SKILL.md"
     add("claude-hand", "감독 스킬", skill.exists(), str(skill) if skill.exists() else "없음",
         "" if skill.exists() else "uv run tools/claude_hand.py sync")
+    progress("이전 버전 흔적 확인 중...")
+    entry = claude_mcp_get() if claude else None
+    if entry is not None and entry.exists and entry.scope == "local":
+        add("갱신", "이전 버전의 local 범위 채팅 등록 (.mcp.json보다 먼저 쓰임)", False, entry.scope, "uv run tools/claude_hand.py update")
+    checks.extend(stale_checks(agents_dir, Path.home() / ".claude" / "skills"))
     return checks
 
 
@@ -1093,7 +1125,12 @@ def plan_chat_config(root: Path = REPO_ROOT, runner: str = "uv run -q --no-proje
     mcp_path = root / ".mcp.json"
     mcp = read_json_file(mcp_path)
     parts = runner.split()
-    entry = {"command": parts[0], "args": [*parts[1:], (root / "tools" / "chat_channel.py").as_posix()]}
+    entry = {
+        "command": parts[0],
+        "args": [*parts[1:], (root / "tools" / "chat_channel.py").as_posix()],
+        # Passed on explicitly: Claude Code is not documented to hand its whole environment to MCP servers.
+        "env": {"CLAUDE_HAND_SUPERVISOR": "${CLAUDE_HAND_SUPERVISOR:-0}"},
+    }
     if mcp.get("mcpServers", {}).get(CHAT_SERVER_NAME) != entry:
         mcp.setdefault("mcpServers", {})[CHAT_SERVER_NAME] = entry
         plan[mcp_path] = mcp
@@ -1159,16 +1196,38 @@ def chat_add_command(runner: str = "uv run -q --no-project") -> list[str]:
     return ["claude", "mcp", "add", "--scope", "local", CHAT_SERVER_NAME, "--", *runner.split(), str(CHAT_CHANNEL_SCRIPT)]
 
 
-def chat_server_registered(run=subprocess.run, which=shutil.which) -> bool | None:
+@dataclass
+class McpEntry:
+    exists: bool
+    scope: str = ""        # "local" / "project" / "user" as `claude mcp get` reports it
+    pending: bool = False  # .mcp.json server waiting for the user's approval
+    raw: str = ""
+
+
+def claude_mcp_get(name: str = CHAT_SERVER_NAME, cwd: Path = REPO_ROOT, run=subprocess.run, which=shutil.which) -> McpEntry | None:
+    """What Claude Code itself resolves for this folder (None when the claude CLI is missing)."""
     exe = which("claude")
     if not exe:
         return None
     try:
-        proc = run([exe, "mcp", "get", CHAT_SERVER_NAME], cwd=str(REPO_ROOT), capture_output=True, text=True,
-                   errors="replace", timeout=30)
+        proc = run([exe, "mcp", "get", name], cwd=str(cwd), capture_output=True, text=True, errors="replace", timeout=60)
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return proc.returncode == 0
+    out = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0 or "No MCP server named" in out:
+        return McpEntry(False, raw=out)
+    scope = ""
+    for line in out.splitlines():
+        if line.strip().lower().startswith("scope:"):
+            text = line.lower()
+            scope = next((s for s in ("local", "project", "user") if s in text), text.split(":", 1)[1].strip())
+            break
+    return McpEntry(True, scope=scope, pending="pending approval" in out.lower(), raw=out)
+
+
+def chat_server_registered(run=subprocess.run, which=shutil.which) -> bool | None:
+    entry = claude_mcp_get(run=run, which=which)
+    return None if entry is None else entry.exists
 
 
 def blender_chat_targets(base: Path | None = None) -> list[Path]:
@@ -1268,8 +1327,169 @@ def cmd_blender_install_chat(args: argparse.Namespace) -> int:
     return 1
 
 
+def chat_home(env=os.environ) -> Path:
+    return Path(env.get("CLAUDE_HAND_HOME") or Path.home() / ".claude-hand") / "chat"
+
+
+def read_chat_files(home: Path | None = None) -> tuple[dict | None, dict | None]:
+    home = home or chat_home()
+    def load(name):
+        try:
+            return json.loads((home / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+    return load("server.json"), load("status.json")
+
+
+def chat_status_report(home: Path | None = None, mcp_entry=claude_mcp_get, fetch=None, root: Path = REPO_ROOT) -> list[str]:
+    """Plain-language diagnosis of why a panel does or does not reach the supervisor."""
+    lines: list[str] = []
+    server, status = read_chat_files(home)
+    entry = mcp_entry()
+    config = read_json_file(root / ".mcp.json").get("mcpServers", {}).get(CHAT_SERVER_NAME)
+    if config is None:
+        lines.append("!! 이 폴더의 .mcp.json에 claude-hand-chat이 없습니다 → uv run tools/claude_hand.py chat-setup")
+    elif "CLAUDE_HAND_SUPERVISOR" not in (config.get("env") or {}):
+        lines.append("!! .mcp.json이 이전 버전 형식입니다 → uv run tools/claude_hand.py chat-setup 으로 고치세요")
+    if entry is not None and entry.exists and entry.scope == "local":
+        lines.append("!! 이전 버전이 local 범위로 등록한 claude-hand-chat이 남아 있어 .mcp.json보다 먼저 쓰입니다 "
+                     "→ uv run tools/claude_hand.py update (또는 claude mcp remove claude-hand-chat -s local)")
+    if entry is not None and entry.pending:
+        lines.append("!! .mcp.json의 claude-hand-chat이 승인 대기 중입니다 → start-supervisor.cmd로 연 Claude Code에서 승인하세요 "
+                     "(거절했었다면 claude mcp reset-project-choices 후 다시)")
+    if server:
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{server['port']}/v1/status",
+                                         headers={"X-Claude-Hand-Token": server.get("token", "")})
+            state = (fetch or (lambda r: json.loads(urllib.request.urlopen(r, timeout=3).read().decode("utf-8"))))(req)
+        except (OSError, ValueError, KeyError) as exc:
+            lines.append(f"!! server.json은 있지만 채널 서버가 응답하지 않습니다({exc}). 감독 세션이 비정상 종료됐을 수 있습니다 "
+                         "→ start-supervisor.cmd로 다시 여세요")
+        else:
+            if state.get("claude_connected"):
+                lines.append(f"OK 감독 세션이 채팅을 받고 있습니다 (포트 {server['port']}, 채팅 {', '.join(state.get('chats', [])) or '아직 없음'})")
+            else:
+                lines.append("!! 채널 서버는 떴지만 Claude Code와의 연결이 아직 끝나지 않았습니다. 잠시 뒤 다시 확인하세요")
+    elif status and status.get("mode") == "passive":
+        lines.append(f"!! 채널 서버가 대기 모드로 떴습니다: {status.get('reason')}")
+        lines.append("   → 감독 세션은 claude-hand 폴더의 start-supervisor.cmd로 여세요. 데스크톱 앱이나 그냥 연 claude는 채팅을 받지 않습니다")
+    elif status and status.get("mode") == "stopped":
+        lines.append("!! 감독 세션이 종료됐습니다 → start-supervisor.cmd로 다시 여세요")
+    else:
+        lines.append("!! 채널 서버가 아직 한 번도 시작되지 않았습니다")
+        lines.append("   → start-supervisor.cmd로 연 Claude Code에서 /mcp 를 입력해 claude-hand-chat 상태를 보세요 "
+                     "(⏸ 승인 대기면 승인, failed면 uv가 PATH에 있는지와 chat-setup 점검 결과를 확인)")
+    if os.environ.get("CLAUDE_HAND_HOME"):
+        lines.append(f"-- CLAUDE_HAND_HOME={os.environ['CLAUDE_HAND_HOME']} 가 설정돼 있습니다. Unity·Blender도 같은 값을 써야 합니다")
+    return lines
+
+
+def cmd_chat_status(args: argparse.Namespace) -> int:
+    lines = chat_status_report()
+    for line in lines:
+        print(line)
+    return 0 if any(line.startswith("OK ") for line in lines) and not any(line.startswith("!! ") for line in lines) else 1
+
+
+def parse_generated_agent(text: str) -> BlenderInstance | Instance | None:
+    """Rebuild the instance a generated subagent file was made for (to re-render it after an update)."""
+    pin = re.search(r'--pin \\"(.+?)\\"', text)
+    app = re.search(r"--app (unity|blender)\b", text)
+    if not pin:
+        return None
+    name, _, tail = pin.group(1).rpartition("@")
+    if (app.group(1) if app else "unity") == "blender":
+        path = re.search(r"파일 `([^`]*)`, MCP for Blender 포트", text)
+        filepath = path.group(1) if path and path.group(1) != "저장 안 된 파일" else ""
+        return BlenderInstance(port=int(tail), filepath=filepath) if tail.isdigit() else None
+    path = re.search(r"\(경로: `([^`]*)`\)", text)
+    return Instance(name=name, hash=tail, path=path.group(1) if path else "")
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    """After `git pull`: bring an earlier install up to this version without losing what was set up."""
+    prefix = "(dry run) " if args.dry_run else ""
+    agents_dir = Path(args.agents_dir).expanduser()
+    skills_dir = Path(args.skills_dir).expanduser()
+
+    # 1. Subagents: re-render the ones that exist with the current templates, plus any newly open windows.
+    unity, blender = [], []
+    for path in sorted(agents_dir.glob("*.md")) if agents_dir.is_dir() else []:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if GENERATED_MARKER in text:
+            inst = parse_generated_agent(text)
+            (blender if isinstance(inst, BlenderInstance) else unity).append(inst) if inst else None
+    server = detect_server_config()
+    live_unity = gather_instances(server, [], include_dead=False)
+    live_blender = discover_blender(parse_ports(args.blender_ports))
+    unity = list({i.id: i for i in [*unity, *live_unity]}.values())
+    blender = list({b.port: b for b in [*blender, *live_blender]}.values())
+    blender_server = detect_blender_config() if blender else None
+    result = sync_agents(unity, agents_dir, server, args.runner, prune=False, dry_run=args.dry_run,
+                         blender=blender, blender_server=blender_server)
+    print(f"{prefix}하위 세션: 고침 {len(result.written)}개, 그대로 {len(result.unchanged)}개")
+
+    # 2. Supervisor skill (and the folder name the first version used).
+    print(f"{prefix}감독 스킬: {install_skill(skills_dir, args.dry_run)}")
+    old_skill = skills_dir / "claude-hand-unity" / "SKILL.md"
+    if old_skill.exists() and "name: claude-hand-unity" in old_skill.read_text(encoding="utf-8", errors="replace"):
+        print(f"{prefix}지움: 예전 이름의 스킬 {old_skill.parent}")
+        if not args.dry_run:
+            shutil.rmtree(old_skill.parent)
+
+    # 3. Chat: drop the earlier version's local registration (it wins over .mcp.json), then set up again.
+    entry = claude_mcp_get()
+    chat_used = (entry is not None and entry.exists) or (REPO_ROOT / ".mcp.json").exists() or find_chat_addon_installs() \
+        or any(read_chat_files())
+    if entry is not None and entry.exists and entry.scope == "local":
+        print(f"{prefix}지움: 이전 버전의 local 범위 claude-hand-chat 등록")
+        if not args.dry_run:
+            subprocess.run([shutil.which("claude") or "claude", "mcp", "remove", CHAT_SERVER_NAME, "-s", "local"], cwd=str(REPO_ROOT))
+    if chat_used:
+        code = cmd_chat_setup(argparse.Namespace(runner=args.runner, no_check=False, register_local=False, dry_run=args.dry_run))
+        if code != 0:
+            return code
+        for target in sorted({p.parent for p in find_chat_addon_installs()}):
+            installed = target / (CHAT_ADDON_MODULE + ".py")
+            if installed.read_bytes() != CHAT_ADDON_SOURCE.read_bytes():
+                print(f"{prefix}고침: Blender 채팅 애드온 {installed} (Blender를 다시 열어야 적용됩니다)")
+                if not args.dry_run:
+                    shutil.copy2(CHAT_ADDON_SOURCE, installed)
+        print("감독 세션을 열어 두었다면 닫고 start-supervisor.cmd로 다시 여세요.")
+    else:
+        print("채팅은 아직 설정하지 않았습니다(원하면 chat-setup).")
+    return 0
+
+
+def stale_checks(agents_dir: Path, skills_dir: Path) -> list[Check]:
+    """Things an earlier claude-hand left behind that `update` refreshes."""
+    checks = []
+    installed = skills_dir / "claude-hand" / "SKILL.md"
+    if installed.exists() and installed.read_text(encoding="utf-8") != SKILL_SOURCE.read_text(encoding="utf-8"):
+        checks.append(Check("갱신", "설치된 감독 스킬이 저장소 버전과 다름", False, str(installed), "uv run tools/claude_hand.py update"))
+    outdated = []
+    for path in sorted(agents_dir.glob("*.md")) if agents_dir.is_dir() else []:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        inst = parse_generated_agent(text) if GENERATED_MARKER in text else None
+        if inst is None:
+            continue
+        files = build_agent_files([] if isinstance(inst, BlenderInstance) else [inst], detect_server_config(),
+                                  [inst] if isinstance(inst, BlenderInstance) else [], detect_blender_config(), "uv run -q --no-project")
+        if path.name in files and files[path.name] != text:
+            outdated.append(path.name)
+    if outdated:
+        checks.append(Check("갱신", "이전 버전으로 만든 하위 세션 정의", False, ", ".join(outdated), "uv run tools/claude_hand.py update"))
+    for addon in find_chat_addon_installs():
+        if addon.read_bytes() != CHAT_ADDON_SOURCE.read_bytes():
+            checks.append(Check("갱신", "설치된 Blender 채팅 애드온이 저장소 버전과 다름", False, str(addon), "uv run tools/claude_hand.py update"))
+    return checks
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
-    checks = doctor_checks([Path(p).expanduser() for p in args.unity_project], parse_ports(args.blender_ports))
+    started = time.time()
+    progress = None if args.json else (lambda message: print("  " + message, file=sys.stderr, flush=True))
+    checks = doctor_checks([Path(p).expanduser() for p in args.unity_project], parse_ports(args.blender_ports),
+                           progress=progress)
     if args.json:
         print(json.dumps([asdict(c) for c in checks], ensure_ascii=False, indent=2))
         return 0
@@ -1284,6 +1504,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"       고치기: {c.fix}")
     missing = [c for c in checks if c.ok is False]
     print(f"\n빠진 항목 {len(missing)}개" if missing else "\n모두 준비됐습니다.")
+    print(f"(진단 {time.time() - started:.1f}초)")
     return 0
 
 
@@ -1498,6 +1719,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_bic.add_argument("--blender-exe", help="path to blender.exe used to enable the add-on")
     p_bic.add_argument("--dry-run", action="store_true")
     p_bic.set_defaults(func=cmd_blender_install_chat)
+
+    p_cst = sub.add_parser("chat-status", help="explain why a chat panel does or does not reach the supervisor")
+    p_cst.set_defaults(func=cmd_chat_status)
+
+    p_up = sub.add_parser("update", help="after git pull: refresh subagents, skill, chat setup and the Blender add-on")
+    p_up.add_argument("--agents-dir", default=str(Path.home() / ".claude" / "agents"))
+    p_up.add_argument("--skills-dir", default=str(Path.home() / ".claude" / "skills"))
+    p_up.add_argument("--blender-ports", default=DEFAULT_BLENDER_PORTS)
+    p_up.add_argument("--runner", default="uv run -q --no-project")
+    p_up.add_argument("--dry-run", action="store_true")
+    p_up.set_defaults(func=cmd_update)
 
     p_guard = sub.add_parser("guard", help="PreToolUse hook (used by generated subagents)")
     p_guard.add_argument("--pin", required=True)

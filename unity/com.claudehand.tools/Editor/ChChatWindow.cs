@@ -102,6 +102,32 @@ namespace ClaudeHand.Editor
             }
         }
 
+        /// <summary>Why there is no server.json, from the status.json the channel writes on every start.</summary>
+        private static string DescribeMissingServer()
+        {
+            try
+            {
+                var path = Path.Combine(Path.GetDirectoryName(ServerFile) ?? string.Empty, "status.json");
+                if (File.Exists(path))
+                {
+                    var status = JObject.Parse(File.ReadAllText(path));
+                    var mode = status.Value<string>("mode");
+                    if (mode == "passive")
+                    {
+                        return "채널 서버가 대기 중입니다: " + status.Value<string>("reason") +
+                               ". 감독 세션을 claude-hand 폴더의 start-supervisor.cmd로 여세요.";
+                    }
+                    if (mode == "stopped") return "감독 세션이 종료됐습니다. start-supervisor.cmd로 다시 여세요.";
+                }
+            }
+            catch (Exception)
+            {
+                // fall through to the generic message
+            }
+            return "감독 세션의 채널 서버가 시작되지 않았습니다. Claude Code에서 /mcp로 claude-hand-chat 상태를 보거나, " +
+                   "claude-hand 폴더에서 uv run tools/claude_hand.py chat-status 를 실행하세요.";
+        }
+
         private static async Task<JObject> Call(ServerInfo server, HttpMethod method, string path, object body, CancellationToken token)
         {
             using (var request = new HttpRequestMessage(method, $"http://127.0.0.1:{server.port}{path}"))
@@ -126,7 +152,7 @@ namespace ClaudeHand.Editor
                 var server = ReadServer();
                 if (server == null)
                 {
-                    SetStatus("감독 세션이 실행 중이 아닙니다. claude-hand 폴더의 start-supervisor.cmd로 Claude Code를 여세요.");
+                    SetStatus(DescribeMissingServer());
                     if (!await Delay(3000, token)) return;
                     continue;
                 }

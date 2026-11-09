@@ -541,6 +541,7 @@ class ChatSetupTests(unittest.TestCase):
             self.assertEqual(mcp["mcpServers"]["other"], {"command": "x"})
             entry = mcp["mcpServers"][ch.CHAT_SERVER_NAME]
             self.assertEqual(entry["command"], "uv")
+            self.assertEqual(entry["env"], {"CLAUDE_HAND_SUPERVISOR": "${CLAUDE_HAND_SUPERVISOR:-0}"})
             self.assertEqual(entry["args"][:3], ["run", "-q", "--no-project"])
             self.assertTrue(entry["args"][-1].endswith("/tools/chat_channel.py") and Path(entry["args"][-1]).is_absolute())
             settings = json.loads((root / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
@@ -587,6 +588,8 @@ class ChatSetupTests(unittest.TestCase):
         class Done:
             def __init__(self, code):
                 self.returncode = code
+                self.stdout = "claude-hand-chat:\n  Scope: Project config\n" if code == 0 else 'No MCP server named "x"'
+                self.stderr = ""
         self.assertTrue(ch.chat_server_registered(run=lambda *a, **k: Done(0), which=lambda _: "claude"))
         self.assertFalse(ch.chat_server_registered(run=lambda *a, **k: Done(1), which=lambda _: "claude"))
         self.assertIsNone(ch.chat_server_registered(which=lambda _: None))
@@ -616,6 +619,108 @@ class ChatSetupTests(unittest.TestCase):
     def test_enable_script_is_valid_python(self):
         ast.parse(ch.ENABLE_CHAT_ADDON)
         self.assertIn(f"addon_utils.enable('{ch.CHAT_ADDON_MODULE}'", ch.ENABLE_CHAT_ADDON)
+
+
+
+class UpdateAndStatusTests(unittest.TestCase):
+    class Done:
+        def __init__(self, out, code=0):
+            self.stdout, self.stderr, self.returncode = out, "", code
+
+    def test_claude_mcp_get_parsing(self):
+        local = "claude-hand-chat:\n  Scope: Local config (private to you in this project)\n  Status: ✓ Connected\n"
+        pending = "claude-hand-chat:\n  Scope: Project config (shared via .mcp.json)\n  Status: ⏸ Pending approval\n"
+        entry = ch.claude_mcp_get(run=lambda *a, **k: self.Done(local), which=lambda _: "claude")
+        self.assertEqual((entry.exists, entry.scope, entry.pending), (True, "local", False))
+        entry = ch.claude_mcp_get(run=lambda *a, **k: self.Done(pending), which=lambda _: "claude")
+        self.assertEqual((entry.scope, entry.pending), ("project", True))
+        missing = ch.claude_mcp_get(run=lambda *a, **k: self.Done('No MCP server named "claude-hand-chat".'), which=lambda _: "claude")
+        self.assertFalse(missing.exists)
+        self.assertIsNone(ch.claude_mcp_get(which=lambda _: None))
+
+    def write_chat_files(self, home, server=None, status=None):
+        (home).mkdir(parents=True, exist_ok=True)
+        if server:
+            (home / "server.json").write_text(json.dumps(server), encoding="utf-8")
+        if status:
+            (home / "status.json").write_text(json.dumps(status), encoding="utf-8")
+
+    def report(self, tmp, mcp_entry=None, fetch=None, mcp_json=None):
+        root = Path(tmp) / "repo"
+        root.mkdir(exist_ok=True)
+        if mcp_json is not None:
+            (root / ".mcp.json").write_text(json.dumps(mcp_json), encoding="utf-8")
+        return "\n".join(ch.chat_status_report(Path(tmp) / "chat", mcp_entry=lambda: mcp_entry, fetch=fetch, root=root))
+
+    GOOD_MCP = {"mcpServers": {"claude-hand-chat": {"command": "uv", "args": [], "env": {"CLAUDE_HAND_SUPERVISOR": "x"}}}}
+
+    def test_status_serving(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_chat_files(Path(tmp) / "chat", server={"port": 8765, "token": "t"})
+            text = self.report(tmp, fetch=lambda req: {"claude_connected": True, "chats": ["unity-mygame"]}, mcp_json=self.GOOD_MCP)
+        self.assertIn("OK 감독 세션이 채팅을 받고 있습니다", text)
+        self.assertNotIn("!!", text)
+
+    def test_status_passive_explains_the_fix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_chat_files(Path(tmp) / "chat", status={"mode": "passive", "reason": "채널 플래그 없이 연 Claude Code 세션"})
+            text = self.report(tmp, mcp_json=self.GOOD_MCP)
+        self.assertIn("대기 모드", text)
+        self.assertIn("start-supervisor.cmd", text)
+
+    def test_status_flags_old_local_registration_and_old_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old = {"mcpServers": {"claude-hand-chat": {"command": "uv", "args": []}}}
+            text = self.report(tmp, mcp_entry=ch.McpEntry(True, scope="local"), mcp_json=old)
+        self.assertIn("local 범위", text)
+        self.assertIn("이전 버전 형식", text)
+        self.assertIn("한 번도 시작되지 않았습니다", text)
+
+    def test_status_stale_server_file(self):
+        def down(req):
+            raise OSError("connection refused")
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_chat_files(Path(tmp) / "chat", server={"port": 8765, "token": "t"})
+            text = self.report(tmp, fetch=down, mcp_json=self.GOOD_MCP)
+        self.assertIn("응답하지 않습니다", text)
+
+    def test_generated_agents_round_trip(self):
+        unity = ch.Instance(name="My Game", hash="aaaa1111", path="C:/Projects/My Game")
+        blender = ch.BlenderInstance(port=9877, filepath="C:/Art/props (v2).blend")
+        files = ch.build_agent_files([unity], ch.ServerConfig(transport="stdio"), [blender], None, "uv run")
+        back = {name: ch.parse_generated_agent(text) for name, text in files.items()}
+        self.assertEqual((back["unity-my-game.md"].id, back["unity-my-game.md"].path), (unity.id, unity.path))
+        self.assertEqual((back["blender-props-v2.md"].port, back["blender-props-v2.md"].filepath), (9877, blender.filepath))
+        untitled = ch.build_agent_files([], None, [ch.BlenderInstance(port=9878)], None, "uv run")
+        self.assertEqual(ch.parse_generated_agent(next(iter(untitled.values()))).filepath, "")
+
+    def test_stale_checks_and_update_refresh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            agents, skills = Path(tmp) / "agents", Path(tmp) / "skills"
+            inst = ch.Instance(name="MyGame", hash="aaaa1111")
+            ch.write_agent_files(ch.build_agent_files([inst], ch.ServerConfig(transport="stdio"), [], None, "uv run -q --no-project"), agents)
+            agent_file = agents / "unity-mygame.md"
+            agent_file.write_text(agent_file.read_text(encoding="utf-8").replace("## 작업 순서", "## old"), encoding="utf-8")
+            (skills / "claude-hand").mkdir(parents=True)
+            (skills / "claude-hand" / "SKILL.md").write_text("old skill", encoding="utf-8")
+            (skills / "claude-hand-unity").mkdir()
+            (skills / "claude-hand-unity" / "SKILL.md").write_text("---\nname: claude-hand-unity\n---\n", encoding="utf-8")
+            with unittest.mock.patch.object(ch, "candidate_config_files", lambda cwd=None: []), \
+                 unittest.mock.patch.object(ch, "find_chat_addon_installs", lambda base=None: []):
+                items = {c.item for c in ch.stale_checks(agents, skills)}
+                self.assertIn("설치된 감독 스킬이 저장소 버전과 다름", items)
+                self.assertIn("이전 버전으로 만든 하위 세션 정의", items)
+                out = io.StringIO()
+                with unittest.mock.patch("sys.stdout", out), \
+                     unittest.mock.patch.object(ch, "claude_mcp_get", lambda **kw: None), \
+                     unittest.mock.patch.object(ch, "read_chat_files", lambda home=None: (None, None)), \
+                     unittest.mock.patch.object(ch, "discover_stdio", lambda *a, **k: []), \
+                     unittest.mock.patch.object(ch, "discover_blender", lambda *a, **k: []), \
+                     unittest.mock.patch.object(ch, "REPO_ROOT", Path(tmp) / "repo"):
+                    ch.main(["update", "--agents-dir", str(agents), "--skills-dir", str(skills)])
+                self.assertEqual(ch.stale_checks(agents, skills), [])
+            self.assertFalse((skills / "claude-hand-unity").exists())
+            self.assertIn("## 작업 순서", agent_file.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

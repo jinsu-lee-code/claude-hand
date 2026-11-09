@@ -132,4 +132,6 @@ Interaction Mode를 **바꾸기 전과 후**에 각각 해 봅니다. Edit > Pre
    - `sync --allow-tools`를 했다면 하위 세션의 Unity·Blender 조작에도 버튼이 뜨지 않아야 해요.
 9. Unity 창을 최소화했다가 다시 열었을 때, 그리고 스크립트를 고쳐 Unity가 다시 컴파일한 뒤에도 대화 기록이 남아 있는지 봅니다.
 
+채팅창에 감독 세션이 없다고 나오면 `uv run tools/claude_hand.py chat-status` 출력과 채팅창에 뜬 문구를 그대로 알려주세요. 이전 버전을 쓰다가 받았다면 먼저 `uv run tools/claude_hand.py update`를 하세요.
+
 > 결과 알려주세요: 3·6번의 담당 표시, 답이 어느 창으로 왔는지, 5번에서 맥락이 이어졌는지, 8번 권한 버튼이 동작했는지, 1분 넘게 답이 없었다면 Claude Code 창에 무엇이 떠 있었는지

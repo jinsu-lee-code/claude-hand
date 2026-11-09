@@ -61,6 +61,20 @@ def read_server():
         return None
 
 
+def describe_missing_server():
+    """Why there is no server.json, from the status.json the channel writes on every start."""
+    try:
+        status = json.loads((server_file().parent / "status.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        status = {}
+    if status.get("mode") == "passive":
+        return f"채널 서버가 대기 중입니다: {status.get('reason')}. 감독 세션을 claude-hand 폴더의 start-supervisor.cmd로 여세요."
+    if status.get("mode") == "stopped":
+        return "감독 세션이 종료됐습니다. start-supervisor.cmd로 다시 여세요."
+    return ("감독 세션의 채널 서버가 시작되지 않았습니다. Claude Code에서 /mcp로 claude-hand-chat 상태를 보거나, "
+            "claude-hand 폴더에서 uv run tools/claude_hand.py chat-status 를 실행하세요.")
+
+
 def call(server, method, path, body=None, timeout=10):
     data = json.dumps(body).encode("utf-8") if body is not None else None
     request = urllib.request.Request(
@@ -85,7 +99,7 @@ def poll_loop():
         with _identity_lock:
             window, pin = _identity["window"], _identity["pin"]
         if not server or not window:
-            _inbox.put(("status", "감독 세션이 실행 중이 아닙니다. claude-hand 폴더의 start-supervisor.cmd로 Claude Code를 여세요."))
+            _inbox.put(("status", describe_missing_server()))
             _stop.wait(3)
             continue
         if server.get("pid") != server_pid:  # a new supervisor session starts with an empty history

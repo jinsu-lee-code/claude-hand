@@ -89,13 +89,37 @@ uv run tools/claude_hand.py sync --allow-tools    # (선택) 하위 세션의 Un
 - **채팅을 받는 건 `start-supervisor`로 연 세션뿐입니다.** 이 폴더에서 그냥 연 Claude Code도 채널 서버를 띄우지만 채팅은 받지 않습니다. 채널 없는 세션이 채팅을 가로채지 않게 하기 위해서입니다. 감독 세션은 하나만 여세요.
 - 채팅창과 채널은 내 PC 안(127.0.0.1)에서만, 토큰을 아는 프로그램끼리만 통신합니다. 토큰은 `%USERPROFILE%\.claude-hand\chat\server.json`에 있습니다. 방화벽 규칙은 필요 없고, 방화벽 창이 떠도 허용하지 않아도 됩니다.
 
+### 채팅창에 "감독 세션" 관련 메시지가 뜰 때
+
+```powershell
+uv run tools/claude_hand.py chat-status
+```
+지금 상태와 고치는 방법을 알려줍니다. 흔한 원인은 이렇습니다.
+- 감독 세션을 `start-supervisor.cmd`가 아닌 방법(데스크톱 앱, 그냥 `claude`)으로 열었다. 채널 서버가 대기 모드로 뜨고, 채팅창에 그 이유가 보입니다.
+- 이전 버전의 등록이 남아 있다 → 아래 **새 버전 받기**를 하세요.
+- `.mcp.json` 서버 승인 대기나 거절 → `/mcp`에서 승인하세요. 거절했었다면 `claude mcp reset-project-choices`를 하세요.
+
+채널 서버는 다음 경우에만 채팅을 받습니다.
+- `start-supervisor`가 넘긴 표시(`CLAUDE_HAND_SUPERVISOR=1`, `.mcp.json`의 `env`로 전달)가 있을 때
+- 자기를 띄운 Claude Code가 이 서버를 채널로 불러왔을 때(`--dangerously-load-development-channels server:claude-hand-chat`)
+
+## 새 버전 받기 (이미 설치한 경우)
+
+```powershell
+git pull
+uv run tools/claude_hand.py update     # 하위 세션·감독 스킬·채팅 설정·Blender 애드온을 새 버전으로 (--dry-run으로 미리 보기)
+```
+- 그다음 감독 세션을 `start-supervisor.cmd`로 다시 엽니다.
+- 세팅 스킬로 할 때는 **`git pull` 뒤에 Claude Code를 다시 시작한 다음** "세팅 이어서 해줘"라고 하세요. 스킬 내용은 세션을 시작할 때 읽혀서, 받기 전에 연 세션은 옛 순서를 따릅니다.
+- `update`는 이전 버전이 남긴 등록도 정리합니다. 이전 `chat-setup`이 local 범위로 등록한 채널은 새 `.mcp.json`보다 먼저 쓰여서 채팅을 막습니다.
+
 ## 들어 있는 것
 
 | 위치 | 내용 |
 |---|---|
 | `.claude/skills/claude-hand-setup/` | 처음 세팅 스킬입니다. 이 폴더에서 Claude Code를 열면 바로 쓸 수 있습니다. |
 | `skills/orchestrator/` | 평소에 감독 세션이 따르는 규칙(스킬)입니다. `sync`가 `~/.claude/skills/claude-hand/`에 설치합니다. |
-| `tools/claude_hand.py` | 하위 세션 생성(`list`, `sync`), 안전장치(`guard`), 세팅 도우미(`doctor`, `unity-install`, `unity-open`, `blender-open`, `chat-setup`, `blender-install-chat`)가 들어 있습니다. |
+| `tools/claude_hand.py` | 하위 세션 생성(`list`, `sync`), 안전장치(`guard`), 세팅 도우미(`doctor`, `update`, `unity-install`, `unity-open`, `blender-open`, `chat-setup`, `blender-install-chat`, `chat-status`)가 들어 있습니다. |
 | `tools/chat_channel.py` | 채팅 채널 서버입니다. Claude Code가 실행하는 MCP 서버이고, Unity·Blender 채팅창과는 로컬 HTTP로 통신합니다. |
 | `unity/com.claudehand.tools/` | Unity 패키지입니다. MCP for Unity에 `ch_*` 도구 6개와 채팅창(Window > Claude Hand > Chat)을 추가합니다. |
 | `blender/claude_hand_chat.py` | Blender 채팅 패널 애드온입니다. |

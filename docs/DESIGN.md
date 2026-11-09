@@ -151,7 +151,17 @@ Blender N 패널 애드온 (urllib)  ─┼──▶ chat_channel.py ──stdio
 - **등록:** 채널 문서의 예시처럼 저장소 루트의 `.mcp.json`에 등록한다. 다만 저장소에 커밋하지 않고, 각 PC에서 `chat-setup`이 절대 경로로 만든다. 만드는 김에 `.claude/settings.local.json`에 `reply` 도구 허용 규칙도 넣는다. 그러지 않으면 답장마다 허락을 묻는다. 둘 다 `.gitignore`에 있다.
   - 이 시제품을 만든 개발 세션은 같은 폴더에서 돌고 있어서, 설정 파일을 직접 커밋하려다 "자기 설정 변경"으로 막혔다. 이 판단도 각 PC에서 만드는 쪽이 맞다는 근거다.
   - `.mcp.json`이 문서대로 안 불러와지는 버전이면 `chat-setup --register-local`(`claude mcp add --scope local`)로 등록한다.
-- **감독만 채팅을 받는다.** `.mcp.json`은 그 폴더에서 연 모든 세션이 채널 서버를 띄우게 한다. 그래서 서버는 `CLAUDE_HAND_SUPERVISOR=1`일 때만 HTTP를 열고 `server.json`을 쓴다. 이 값은 `start-supervisor`가 설정한다. 그 밖의 세션에서는 MCP에는 정상 응답하지만 채팅창은 받지 않는다(passive). 채널 플래그 없이 연 세션이 채팅을 가로채 메시지가 사라지는 일을 막는다.
+- **감독만 채팅을 받는다.** `.mcp.json`은 그 폴더에서 연 모든 세션이 채널 서버를 띄우게 한다. 그래서 서버는 감독일 때만 HTTP를 열고 `server.json`을 쓴다. 그 밖의 세션에서는 MCP에는 정상 응답하지만 채팅창은 받지 않는다(passive). 채널 플래그 없이 연 세션이 채팅을 가로채 메시지가 사라지는 일을 막는다. 감독인지는 두 가지로 판단한다.
+  1. `CLAUDE_HAND_SUPERVISOR=1`: `start-supervisor`가 설정하고, `.mcp.json`의 `env`에 `${CLAUDE_HAND_SUPERVISOR:-0}`로 명시해 넘긴다. Claude Code가 MCP 서버에 자기 환경변수를 다 넘기는지는 문서에 없고, `${VAR}` 확장은 문서에 있다. 첫 시제품은 환경변수가 그대로 넘어간다고 가정했다가, 실제 PC에서 "감독 세션 없음"이 나왔다.
+  2. 부모 프로세스 확인: 위로 올라가며 **가장 가까운 Claude Code 프로세스**를 찾는다(실행 파일 이름에 claude가 있거나, claude-code를 실행하는 node·bun). 그 명령줄에 `--dangerously-load-development-channels`(또는 `--channels`)와 `server:claude-hand-chat`이 있으면 감독이다. Windows는 PowerShell CIM, 그 밖은 `ps`로 읽는다. 사용자가 `start-supervisor` 없이 직접 채널 플래그로 열어도 동작한다. 가까운 Claude Code만 보는 건, 중간에 낀 셸의 명령줄 글자에 속지 않기 위해서다(개발 중 실제로 이렇게 오탐이 났다).
+- **상태 기록:** 시작할 때마다 `~/.claude-hand/chat/status.json`에 상태(serving, passive, stopped)와 이유를 남긴다. `server.json`이 없을 때 채팅창은 이 파일을 읽고 "대기 중: 채널 플래그 없이 연 세션" 같은 정확한 원인을 보여준다. `claude_hand.py chat-status`는 여기에 설정 형식, 예전 local 등록, 승인 대기, 응답 없는 `server.json`까지 함께 진단한다.
+- **갱신:** `update`가 다음을 한 번에 한다.
+  - 기존 하위 세션 정의를 그 안의 `--pin`에서 다시 읽어 새 템플릿으로 다시 쓴다
+  - 감독 스킬을 다시 설치하고, 첫 버전의 `claude-hand-unity` 폴더를 지운다
+  - 예전 local 범위 채널 등록을 지운다. local이 project보다 우선하기 때문이다
+  - `chat-setup`을 다시 실행해 점검까지 한다
+  - 옛 Blender 채팅 애드온을 바꾼다
+  `doctor`의 [갱신] 항목이 이런 흔적을 찾아낸다.
 - **첫 실행 시간:** MCP 서버 시작 제한은 기본 30초다(`MCP_TIMEOUT`). `chat-setup`이 `uv run … chat_channel.py --check`를 한 번 돌려 uv가 Python을 미리 받게 하고, 포트와 저장 폴더를 점검한다. `start-supervisor`는 `MCP_TIMEOUT=60000`으로 여유를 둔다.
 - **요구 사항 확인(`doctor`):**
   - Claude Code 2.1.234 이상: 이 버전부터 채널에 권한 요청이 전달된다.
@@ -220,6 +230,7 @@ Blender N 패널 애드온 (urllib)  ─┼──▶ chat_channel.py ──stdio
 | 14 | `.mcp.json`으로 등록한 서버를 `--dangerously-load-development-channels server:claude-hand-chat`이 채널로 불러온다(문서 예시와 같음). `.mcp.json`의 절대 경로 인자가 그대로 쓰인다 | `chat-setup --register-local`로 등록한다 |
 | 15 | 감독이 같은 `chat_id`에 같은 하위 세션을 계속 이어 쓴다(지침을 따르는지) | 지침을 고치거나, 채널 서버가 agent id를 기억해 메타로 넘긴다 |
 | 16 | Unity 에디터가 비활성일 때도 `async` 이어 받기가 늦지 않게 돈다 | 폴링을 `EditorApplication.update`로 옮긴다 |
+| 17 | Windows에서 PowerShell `Get-CimInstance Win32_Process`가 채널 서버 시작 중에 30초 안에 끝난다(보통 1~2초) | 환경변수 경로만 쓴다 |
 
 ## 다음 단계 (2단계 후보)
 

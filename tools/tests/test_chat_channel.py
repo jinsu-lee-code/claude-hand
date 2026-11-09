@@ -220,9 +220,12 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(self.read()["params"], {"request_id": "abcde", "behavior": "deny"})
 
     def test_server_file_removed_on_exit(self):
+        status = json.loads((self.server_file.parent / "status.json").read_text(encoding="utf-8"))
+        self.assertEqual(status["mode"], "serving")
         self.proc.stdin.close()
         self.proc.wait(5)
         self.assertFalse(self.server_file.exists())
+        self.assertEqual(json.loads((self.server_file.parent / "status.json").read_text(encoding="utf-8"))["mode"], "stopped")
         self.proc.stdin = open(os.devnull, "w")  # tearDown closes it again
 
 
@@ -254,6 +257,66 @@ class ModeTests(unittest.TestCase):
     def test_is_supervisor(self):
         self.assertTrue(cc.is_supervisor({"CLAUDE_HAND_SUPERVISOR": "1"}))
         self.assertFalse(cc.is_supervisor({}))
+        self.assertFalse(cc.is_supervisor({"CLAUDE_HAND_SUPERVISOR": "0"}))  # what .mcp.json passes when unset
+
+    def test_passive_start_is_recorded_for_the_panels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {**os.environ, "CLAUDE_HAND_HOME": str(Path(tmp) / "home"), "CLAUDE_HAND_AGENTS_DIR": str(Path(tmp) / "a")}
+            env.pop("CLAUDE_HAND_SUPERVISOR", None)
+            subprocess.run([sys.executable, str(TOOL)], input="", capture_output=True, text=True, env=env, timeout=30)
+            status = json.loads((Path(tmp) / "home" / "chat" / "status.json").read_text(encoding="utf-8"))
+        self.assertEqual(status["mode"], "passive")
+        self.assertIn("start-supervisor", status["reason"])
+
+    @unittest.skipIf(sys.platform == "win32", "uses ps and a symlinked launcher")
+    def test_detects_a_claude_parent_started_with_the_channel(self):
+        """A process whose argv[0] is .../claude and whose arguments load this server as a channel
+        starts the channel server: it must serve the panels without CLAUDE_HAND_SUPERVISOR."""
+        with tempfile.TemporaryDirectory() as tmp:
+            launcher = Path(tmp) / "claude"
+            launcher.symlink_to(sys.executable)
+            env = {**os.environ, "CLAUDE_HAND_HOME": str(Path(tmp) / "home"), "CLAUDE_HAND_AGENTS_DIR": str(Path(tmp) / "a"),
+                   "CLAUDE_HAND_CHAT_PORT": "18785"}
+            env.pop("CLAUDE_HAND_SUPERVISOR", None)
+            child = f"import subprocess, sys; subprocess.run([sys.executable, {str(TOOL)!r}], input='', text=True)"
+            for flags in (["--dangerously-load-development-channels", "server:claude-hand-chat"], []):
+                subprocess.run([str(launcher), "-c", child, *flags], env=env, timeout=60, capture_output=True)
+                status = json.loads((Path(tmp) / "home" / "chat" / "status.json").read_text(encoding="utf-8"))
+                expected = "stopped" if flags else "passive"  # serving, then stopped when stdin closed
+                self.assertEqual(status["mode"], expected, status)
+
+
+class AncestorTests(unittest.TestCase):
+    TABLE = {
+        10: (9, "python tools/chat_channel.py"),
+        9: (8, "uv run -q --no-project tools/chat_channel.py"),
+        8: (7, '"C:\\Users\\me\\.local\\bin\\claude.exe" --dangerously-load-development-channels server:claude-hand-chat'),
+        7: (1, "cmd.exe /c start-supervisor.cmd"),
+    }
+
+    def test_nearest_claude_with_channel_flag(self):
+        self.assertIsNotNone(cc.channel_ancestor(self.TABLE, 10))
+
+    def test_claude_without_flag_stops_the_search(self):
+        table = dict(self.TABLE)
+        table[8] = (7, "claude.exe")
+        table[7] = (1, "claude --dangerously-load-development-channels server:claude-hand-chat")  # an outer session
+        self.assertIsNone(cc.channel_ancestor(table, 10))
+
+    def test_wrapper_text_is_not_claude(self):
+        table = {10: (9, "python x"), 9: (1, "/bin/bash -c 'echo --channels server:claude-hand-chat' /root/.claude/x")}
+        self.assertIsNone(cc.channel_ancestor(table, 10))
+
+    def test_npm_installed_cli(self):
+        self.assertTrue(cc.is_claude_code("node C:/Users/me/AppData/Roaming/npm/node_modules/@anthropic-ai/claude-code/cli.js"))
+        self.assertFalse(cc.is_claude_code("node server.js"))
+
+    def test_decision_survives_a_broken_process_listing(self):
+        def broken():
+            raise OSError("no ps")
+        serving, reason = cc.supervisor_decision(env={}, table_fn=broken)
+        self.assertFalse(serving)
+        self.assertIn("no ps", reason)
 
 
 if __name__ == "__main__":
