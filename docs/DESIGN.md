@@ -201,6 +201,14 @@ Blender N 패널 애드온 (urllib)  ─┼──▶ chat_channel.py ──stdio
 - `if (...)` 블록 안의 echo에는 괄호를 쓰지 않는다. `)`가 블록을 일찍 닫는다.
 - 테스트가 이 두 가지를 검사한다.
 
+## Claude 데스크톱 앱 Code 탭에서 쓰기 (`mode desktop`)
+
+- Code 탭의 로컬 세션은 Claude Code다. 문서에 "로컬 세션은 `~/.claude/skills/`의 개인 스킬을 읽는다", 권한 요청 버튼, 하위 세션을 보여주는 Background tasks 창이 나온다. 그래서 감독 스킬과 `unity-*`/`blender-*` 하위 세션을 그대로 쓴다.
+- Channels는 데스크톱 앱 문서에 없다. 그래서 Unity·Blender 채팅창은 이 모드에서 연결되지 않는다. 데스크톱 세션이 띄운 채널 서버는 가장 가까운 Claude Code 프로세스에 채널 옵션이 없어서 대기 모드로 남는다. 따라서 같은 폴더에서 CLI 감독과 같이 써도 채팅을 가로채지 않는다.
+- 시작 스크립트(`preflight`)가 돌지 않으니, 감독이 하위 세션 없는 프로젝트를 만나면 `sync`를 직접 실행한다. 설치되는 감독 스킬은 `{{CLAUDE_HAND}}` 자리에 이 저장소의 절대 경로를 넣어서, 어느 폴더에서 열어도 명령이 맞는다(`rendered_skill`).
+- `mode desktop`은 `config.json`에 기록된다. `doctor`는 채팅 항목을 "필요 없음"으로 바꾸고, Unity·Blender 채팅창은 "데스크톱 앱 Code 탭에서 대화하세요"를 먼저 보여준다(버튼으로 채팅창 모드도 켤 수 있다).
+- 확인 안 된 것: Code 탭이 `~/.claude/agents`의 사용자 하위 세션(인라인 `mcpServers`와 `hooks` 포함)과 저장소 `.claude/skills`를 CLI와 똑같이 읽는지(가정 21). 문서 페이지의 확인한 부분에는 개인 스킬만 명시돼 있다.
+
 ## 처음 세팅 (claude-hand-setup 스킬)
 
 처음 쓰는 사람이 Claude Code에 "세팅해줘"라고만 하면 되게 하는 것이 목표다. 스킬은 저장소의 `.claude/skills/`에 있어서, 저장소 폴더에서 Claude Code를 열면 바로 쓸 수 있다.
@@ -262,6 +270,7 @@ Blender N 패널 애드온 (urllib)  ─┼──▶ chat_channel.py ──stdio
 | 18 | `settings.local.json`의 `enabledMcpjsonServers`가 `.mcp.json` 승인 질문을 없앤다(문서는 local 파일의 승인이 믿는 폴더에서 적용된다고만 함) | 처음 한 번 질문에 답한다(안내 문구가 있음) |
 | 19 | Unity·Blender 버튼의 `cmd /c start "Claude Hand" <script>`가 새 콘솔 창을 연다 | 바탕화면 아이콘을 쓴다 |
 | 20 | `--remote-control`과 `--dangerously-load-development-channels`를 한 세션에 같이 쓸 수 있다 | `remote-control off`로 끄고, 필요할 때 그 창에서 `/remote-control`을 입력한다 |
+| 21 | 데스크톱 앱 Code 탭이 `~/.claude/agents`의 하위 세션(인라인 MCP 서버·훅 포함)과 저장소의 `.claude/skills`를 읽는다 | 하위 세션이 안 보이면 채팅창 모드(Claude Hand 창)를 쓴다 |
 
 ## 다음 단계 (2단계 후보)
 

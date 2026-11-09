@@ -37,7 +37,14 @@ uv run tools/claude_hand.py doctor
 ```
 Unity 프로젝트 경로를 알면 `--unity-project "<경로>"`를 붙인다. 모르면 사용자에게 물어본다. 여러 개면 여러 번 붙인다.
 
-결과를 짧은 표로 보여준다. 그다음 빠진 항목에 맞춰 아래 1~8단계 중 필요한 것만 계획으로 제시하고 고르게 한다. 각 선택지 설명에 무엇이 바뀌는지 적는다.
+결과를 짧은 표로 보여준다.
+
+**먼저 어디서 대화할지 묻는다**(AskUserQuestion). 계획이 여기서 갈린다.
+- **Claude 데스크톱 앱의 Code 탭에서만**(가장 간단): 검은 창도 Channels도 필요 없다. 대신 Unity·Blender 안 채팅창은 쓰지 않는다. 그 창을 쓰려면 Channels가 필요한데, 데스크톱 앱에서는 문서상 지원되지 않는다. 7단계(채팅창)와 8단계(바로가기)는 건너뛰고, 끝에 `uv run tools/claude_hand.py mode desktop`을 실행한다. 그러면 `doctor`가 채팅 항목을 "필요 없음"으로 표시한다.
+- **Unity·Blender 채팅창에서**: 7·8단계까지 한다. 원하면 8-1단계(데스크톱 앱에서 진행 보기)도 한다.
+- 어느 쪽인지 모르겠다고 하면 데스크톱 앱 방식을 먼저 권한다. 나중에 `mode panels`와 7·8단계로 언제든 바꿀 수 있다.
+
+그다음 빠진 항목에 맞춰 아래 1~8단계 중 필요한 것만 계획으로 제시하고 고르게 한다. 각 선택지 설명에 무엇이 바뀌는지 적는다.
 - 1단계: winget으로 프로그램 설치
 - 2단계: npm 전역 설치
 - 3단계: Blender 애드온 폴더와 MCP 클라이언트 설정 파일
@@ -197,6 +204,14 @@ uv run tools/claude_hand.py remote-control on
   - Team·Enterprise는 관리자가 켜야 한다.
   - 명령이 `ANTHROPIC_API_KEY`나 `ANTHROPIC_BASE_URL`, Bedrock·Vertex 사용을 발견하면 "주의"로 알려 준다.
 - Channels 옵션과 같이 쓰는 것은 문서로 확인되지 않았다. Claude Hand가 이상하게 시작되면 `remote-control off`로 끄고 다시 켜 보게 한다.
+
+## 데스크톱 앱 모드로 끝낼 때 사용자에게 알릴 것
+
+- Claude 데스크톱 앱 → **Code** 탭 → 폴더를 하나 고르고(아무 폴더나 됨, 예: Unity 프로젝트 폴더) 그냥 말하면 된다. 예: "MyGame 씬에 큐브 3개 만들어줘", "props.blend의 Rock을 MyGame에 넣어줘".
+- 일을 맡은 하위 세션은 앱 오른쪽 위 **⋮ > Background tasks**에서 보인다. 허락 요청은 앱 안의 버튼으로 답한다.
+- 새 Unity 프로젝트나 Blender 파일을 열고 그 이름으로 말하면 감독이 담당을 직접 만든다. 이때 명령 실행 허락을 한 번 묻는다.
+- 일반 채팅 탭(Code 탭이 아닌 곳)에서는 이 스킬이 동작하지 않는다. 하위 세션과 안전장치가 Claude Code 기능이기 때문이다.
+- 처음 세팅을 Code 탭에서 하는데 `claude-hand-setup` 스킬이 보이지 않으면, claude-hand 폴더를 연 상태에서 "README의 처음 설치대로 해줘"라고 하게 한다.
 
 ## 9. 마무리
 

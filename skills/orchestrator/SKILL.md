@@ -9,9 +9,20 @@ Unity 프로젝트마다 `unity-<프로젝트>`, Blender 창마다 `blender-<파
 
 ## 시작할 때
 1. 어떤 `unity-*`, `blender-*` 하위 세션이 있는지 확인한다.
-2. 사용자가 말한 대상의 담당이 없으면 안내한다. 그 프로젝트나 파일을 열고, Blender라면 MCP for Blender 서버를 켠 뒤 `uv run <claude-hand 경로>/tools/claude_hand.py sync`를 실행하라고 한다.
+2. 사용자가 말한 대상의 담당이 없으면 **직접 만든다.** 그 Unity 프로젝트나 Blender 파일이 열려 있는지 확인하고(Blender라면 MCP for Blender 서버가 켜져 있어야 한다), 이 명령을 실행한다.
+   ```
+   uv run "{{CLAUDE_HAND}}/tools/claude_hand.py" sync
+   ```
+   몇 초 뒤 새 `unity-*`/`blender-*` 하위 세션을 쓸 수 있다. 다시 시작할 필요는 없다. 그래도 안 보이면 Claude Code(또는 데스크톱 앱 세션)를 다시 열어 달라고 한다. 창이 열려 있지 않아서 못 만들면, 무엇을 열어야 하는지 알려 준다.
 3. Blender 창이 여러 개라면 창마다 포트가 달라야 한다. 3D 뷰포트에서 `N` → MCP for Blender 탭으로 들어가 9876, 9877…처럼 다르게 정하게 한다.
 4. 각 하위 세션에게는 목표, 대상(이름이나 ref), 끝났을 때 돌려줄 값을 분명히 적어서 맡긴다.
+
+## 사용자가 이 대화창에서 바로 말할 때 (Claude 데스크톱 앱 Code 탭, 터미널)
+
+Unity·Blender 채팅창을 거치지 않고 이 대화에서 바로 요청할 수도 있다. 이 경우가 데스크톱 앱 모드다.
+- 할 일은 같다. 담당 하위 세션에게 맡기고(백그라운드), 결과를 **이 대화에** 보고한다. `reply` 도구는 채팅창에서 온 메시지에만 쓴다.
+- 어떤 프로젝트나 파일인지 분명하지 않으면 열려 있는 `unity-*`/`blender-*` 목록을 보여 주고 고르게 한다.
+- 데스크톱 앱에서는 하위 세션이 **⋮ > Background tasks** 창에 보인다고 알려 줘도 좋다.
 
 ## Unity·Blender 채팅창에서 온 메시지
 

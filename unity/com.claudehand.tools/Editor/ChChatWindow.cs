@@ -110,6 +110,19 @@ namespace ClaudeHand.Editor
         {
             try
             {
+                var config = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(ServerFile)) ?? string.Empty, "config.json");
+                if (File.Exists(config) && JObject.Parse(File.ReadAllText(config)).Value<string>("mode") == "desktop")
+                {
+                    return "데스크톱 앱 모드입니다. Claude 데스크톱 앱의 Code 탭에서 대화하세요. " +
+                           "이 채팅창에서도 대화하려면 아래 버튼으로 Claude Hand를 켜세요.";
+                }
+            }
+            catch (Exception)
+            {
+                // fall through to the server status
+            }
+            try
+            {
                 var path = Path.Combine(Path.GetDirectoryName(ServerFile) ?? string.Empty, "status.json");
                 if (File.Exists(path))
                 {

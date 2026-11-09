@@ -29,6 +29,8 @@ Everyday start (so nobody has to open a terminal):
   preflight            Run by start-supervisor each time: refresh subagents, check nothing is
                        already running, explain the first-run prompts.
   shortcut             Put a "Claude Hand" icon on the Desktop and in the Start menu.
+  mode                 panels/desktop: talk in the Unity/Blender chat panels, or only in the Claude
+                       desktop app's Code tab (no Claude Hand window, no channel needed).
   remote-control       on/off/status: show the supervisor and its subagents in the Claude
                        desktop app (Code tab), claude.ai/code and the mobile app.
 
@@ -722,11 +724,17 @@ def sync_agents(instances: list[Instance], agents_dir: Path, server: ServerConfi
     return write_agent_files(files, agents_dir, prune=prune, dry_run=dry_run)
 
 
+def rendered_skill(root: Path = REPO_ROOT) -> str:
+    """The supervisor skill as installed: {{CLAUDE_HAND}} becomes this checkout's folder, so the skill can run
+    claude_hand.py itself from any working folder (the Desktop app's Code tab has no start script)."""
+    return SKILL_SOURCE.read_text(encoding="utf-8").replace("{{CLAUDE_HAND}}", root.as_posix())
+
+
 def install_skill(skills_dir: Path, dry_run: bool = False) -> Path:
     target = skills_dir / "claude-hand" / "SKILL.md"
     if not dry_run:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(SKILL_SOURCE.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+        target.write_text(rendered_skill(), encoding="utf-8", newline="\n")
     return target
 
 
@@ -1079,6 +1087,8 @@ def doctor_checks(projects: list[Path], blender_ports: list[int], version=tool_v
             str(editor) if editor else "Unity Hub 기본 위치에서 못 찾음",
             "" if editor else "Unity Hub에서 해당 버전을 설치하거나 Hub로 직접 여세요")
 
+    desktop_mode = read_user_config().get("mode") == "desktop"
+    chat_start = len(checks)
     claude_v = parse_claude_version(claude)
     relay_ok = claude_v is not None and claude_v >= MIN_CLAUDE_FOR_PERMISSION_RELAY
     add("채팅", "Claude Code 2.1.234 이상 (채팅창의 허용/거부 버튼)", relay_ok if claude else None, claude or "없음",
@@ -1097,6 +1107,10 @@ def doctor_checks(projects: list[Path], blender_ports: list[int], version=tool_v
     chat_addons = find_chat_addon_installs()
     add("채팅", "Blender 채팅 애드온", bool(chat_addons) if exes else None, ", ".join(map(str, chat_addons[:3])) or "설치 안 됨",
         "" if chat_addons else "uv run tools/claude_hand.py blender-install-chat")
+    if desktop_mode:  # talking in the desktop app's Code tab: the chat-panel pieces are optional
+        for check in checks[chat_start:]:
+            if check.ok is False:
+                check.ok, check.detail = None, check.detail + " (데스크톱 앱 모드라 필요 없음)"
 
     agents_dir = Path.home() / ".claude" / "agents"
     generated = sorted(p.name for p in agents_dir.glob("*.md") if GENERATED_MARKER in p.read_text(encoding="utf-8", errors="replace")) \
@@ -1466,7 +1480,7 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     except SystemExit as exc:
         print(f"하위 세션을 만들지 못했습니다: {exc}")
     skill = Path.home() / ".claude" / "skills" / "claude-hand" / "SKILL.md"
-    if not skill.exists() or skill.read_text(encoding="utf-8") != SKILL_SOURCE.read_text(encoding="utf-8"):
+    if not skill.exists() or skill.read_text(encoding="utf-8") != rendered_skill():
         install_skill(Path.home() / ".claude" / "skills")
     config = read_user_config(home)
     LAUNCH_ARGS_FILE.write_text(launch_args(config) + "\n", encoding="utf-8")
@@ -1508,6 +1522,27 @@ def shortcut_files(platform=sys.platform, home: Path | None = None) -> dict[Path
     return {home / "Desktop" / "claude-hand.desktop": (
         "[Desktop Entry]\nType=Application\nName=Claude Hand\n"
         f"Exec={script}\nTerminal=true\nComment=Start the Claude Hand supervisor\n")}
+
+
+MODES = {
+    "panels": "Unity·Blender 채팅창에서 대화 (Claude Hand 창이 켜져 있어야 함)",
+    "desktop": "Claude 데스크톱 앱의 Code 탭에서 대화 (Claude Hand 창·채팅창 연결이 필요 없음)",
+}
+
+
+def cmd_mode(args: argparse.Namespace) -> int:
+    home = claude_hand_home()
+    config = read_user_config(home)
+    if args.mode:
+        config["mode"] = args.mode
+        write_json_files({home / "config.json": config})
+        write_user_config(home)
+    mode = config.get("mode", "panels")
+    print(f"쓰는 방식: {mode} - {MODES.get(mode, '')}")
+    if mode == "desktop":
+        print("  Claude 데스크톱 앱 > Code 탭에서 아무 폴더나 열고 대화하면 됩니다(감독 스킬 claude-hand가 쓰입니다).")
+        print("  하위 세션은 앱의 ⋮ > Background tasks 에서 보입니다. 새 프로젝트·파일은 감독이 알아서 준비합니다.")
+    return 0
 
 
 def cmd_remote_control(args: argparse.Namespace) -> int:
@@ -1692,7 +1727,7 @@ def stale_checks(agents_dir: Path, skills_dir: Path) -> list[Check]:
     """Things an earlier claude-hand left behind that `update` refreshes."""
     checks = []
     installed = skills_dir / "claude-hand" / "SKILL.md"
-    if installed.exists() and installed.read_text(encoding="utf-8") != SKILL_SOURCE.read_text(encoding="utf-8"):
+    if installed.exists() and installed.read_text(encoding="utf-8") != rendered_skill():
         checks.append(Check("갱신", "설치된 감독 스킬이 저장소 버전과 다름", False, str(installed), "uv run tools/claude_hand.py update"))
     outdated = []
     for path in sorted(agents_dir.glob("*.md")) if agents_dir.is_dir() else []:
@@ -1951,6 +1986,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_pre.add_argument("--runner", default="uv run -q --no-project")
     p_pre.add_argument("--blender-ports", default=DEFAULT_BLENDER_PORTS)
     p_pre.set_defaults(func=cmd_preflight)
+
+    p_mode = sub.add_parser("mode", help="where you talk to Claude Hand: panels (Unity/Blender) or desktop (Code tab)")
+    p_mode.add_argument("mode", nargs="?", choices=sorted(MODES))
+    p_mode.set_defaults(func=cmd_mode)
 
     p_rc = sub.add_parser("remote-control", help="show the supervisor in the Claude desktop app (Remote Control)")
     p_rc.add_argument("action", nargs="?", choices=["on", "off", "status"], default="status")

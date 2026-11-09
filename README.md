@@ -45,6 +45,28 @@ uv run tools/claude_hand.py remote-control on     # 끄려면 off
 - Team·Enterprise는 관리자가 Remote Control을 켜야 합니다.
 - 이미 켜져 있는 Claude Hand에서는 그 창에 `/remote-control`을 입력하면 바로 연결됩니다.
 
+## Claude 데스크톱 앱에서 쓰기
+
+**Claude 데스크톱 앱의 Code 탭**에서 바로 쓸 수 있습니다. Code 탭은 내 PC에서 도는 Claude Code라서 감독 스킬, 하위 세션, 안전장치가 그대로 동작합니다. 고를 수 있는 방식은 두 가지입니다.
+
+| | 데스크톱 앱 모드 (`mode desktop`) | 채팅창 모드 (기본) |
+|---|---|---|
+| 대화하는 곳 | 데스크톱 앱 Code 탭 | Unity·Blender 안의 채팅창 |
+| 검은 Claude Hand 창 | 필요 없음 | 필요(최소화) |
+| Channels(리서치 프리뷰) | 필요 없음 | 필요 |
+| 선택한 오브젝트 자동 첨부 | 안 됨. 이름으로 말해야 함 | 됨 |
+| 허락 요청 | 앱 안의 버튼 | 채팅창의 버튼 |
+| 하위 세션 보기 | 앱 ⋮ > **Background tasks** | `remote-control on`이면 데스크톱 앱에서 |
+| 새 프로젝트·파일 | 감독이 `sync`를 직접 실행(명령 허락 1번) | 자동 |
+
+데스크톱 앱 모드로 쓰는 법:
+1. 세팅할 때 "데스크톱 앱에서만 쓸래"라고 하거나 `uv run tools/claude_hand.py mode desktop`을 실행합니다.
+2. Claude 데스크톱 앱 → **Code** 탭 → 폴더를 하나 고르고(아무 폴더나 됩니다) 말하면 됩니다. 예: "MyGame 씬에 큐브 3개 만들어줘".
+
+알아둘 점:
+- Unity·Blender 안 채팅창은 Channels가 있어야 연결되는데, 데스크톱 앱에서는 문서상 Channels를 지원하지 않습니다. 그래서 데스크톱 앱 모드에서는 대화를 앱에서 합니다. 두 방식을 같이 써도 됩니다(`mode panels`).
+- 일반 **채팅** 탭에서는 이 스킬이 동작하지 않습니다. **Code** 탭에서만 동작합니다.
+
 ## 처음 설치: Claude에게 맡기기
 
 필요한 건 **Claude Code**와 이 저장소뿐입니다.
@@ -144,7 +166,7 @@ uv run tools/claude_hand.py update     # 하위 세션·감독 스킬·채팅 �
 |---|---|
 | `.claude/skills/claude-hand-setup/` | 처음 세팅 스킬입니다. 이 폴더에서 Claude Code를 열면 바로 쓸 수 있습니다. |
 | `skills/orchestrator/` | 평소에 감독 세션이 따르는 규칙(스킬)입니다. `sync`가 `~/.claude/skills/claude-hand/`에 설치합니다. |
-| `tools/claude_hand.py` | 하위 세션 생성(`list`, `sync`), 안전장치(`guard`), 세팅 도우미(`doctor`, `update`, `unity-install`, `unity-open`, `blender-open`, `chat-setup`, `blender-install-chat`, `chat-status`)가 들어 있습니다. |
+| `tools/claude_hand.py` | 하위 세션 생성(`list`, `sync`), 안전장치(`guard`), 세팅 도우미(`doctor`, `update`, `mode`, `unity-install`, `unity-open`, `blender-open`, `chat-setup`, `blender-install-chat`, `chat-status`, `shortcut`, `remote-control`)가 들어 있습니다. |
 | `tools/chat_channel.py` | 채팅 채널 서버입니다. Claude Code가 실행하는 MCP 서버이고, Unity·Blender 채팅창과는 로컬 HTTP로 통신합니다. |
 | `unity/com.claudehand.tools/` | Unity 패키지입니다. MCP for Unity에 `ch_*` 도구 6개와 채팅창(Window > Claude Hand > Chat)을 추가합니다. |
 | `blender/claude_hand_chat.py` | Blender 채팅 패널 애드온입니다. |

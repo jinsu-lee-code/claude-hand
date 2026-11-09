@@ -860,5 +860,47 @@ class RemoteControlTests(unittest.TestCase):
         self.assertEqual(out, "[--remote-control][--name][Claude Hand][--resume][x]")
 
 
+
+class DesktopModeTests(unittest.TestCase):
+    def test_installed_skill_knows_where_claude_hand_is(self):
+        text = ch.rendered_skill(Path("/opt/claude-hand"))
+        self.assertNotIn("{{CLAUDE_HAND}}", text)
+        self.assertIn('uv run "/opt/claude-hand/tools/claude_hand.py" sync', text)
+        self.assertIn("{{CLAUDE_HAND}}", ch.SKILL_SOURCE.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as tmp:
+            installed = ch.install_skill(Path(tmp))
+            self.assertEqual(installed.read_text(encoding="utf-8"), ch.rendered_skill())
+
+    def test_mode_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            out = io.StringIO()
+            with unittest.mock.patch.dict("os.environ", {"CLAUDE_HAND_HOME": str(home)}), unittest.mock.patch("sys.stdout", out):
+                ch.main(["mode", "desktop"])
+                self.assertEqual(ch.read_user_config(home)["mode"], "desktop")
+                ch.main(["mode"])
+            self.assertIn("Code 탭", out.getvalue())
+
+    def test_doctor_does_not_ask_for_chat_pieces_in_desktop_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / ".claude-hand").mkdir()
+            (home / ".claude-hand" / "config.json").write_text(json.dumps({"mode": "desktop"}), encoding="utf-8")
+            versions = {"claude": "2.1.300", "uv": "uv", "git": "git", "node": "v20", "agent-desktop": "1"}
+            with unittest.mock.patch.dict("os.environ", {"HOME": str(home), "USERPROFILE": str(home), "APPDATA": str(home),
+                                                          "CLAUDE_HAND_HOME": str(home / ".claude-hand")}), \
+                 unittest.mock.patch.object(ch.Path, "home", lambda: home), \
+                 unittest.mock.patch.object(ch, "candidate_config_files", lambda cwd=None: []), \
+                 unittest.mock.patch.object(ch, "discover_blender", lambda ports, request=None: []), \
+                 unittest.mock.patch.object(ch, "find_blender_executables", lambda **kw: []), \
+                 unittest.mock.patch.object(ch, "claude_mcp_get", lambda **kw: None), \
+                 unittest.mock.patch.object(ch, "plan_chat_config", lambda root=None, runner=None: {Path(".mcp.json"): {}}):
+                checks = ch.doctor_checks([], [9876], version=lambda *cmd: versions[cmd[0]])
+        chat = [c for c in checks if c.area == "채팅"]
+        self.assertTrue(chat)
+        self.assertTrue(all(c.ok is not False for c in chat), [(c.item, c.ok) for c in chat])
+        self.assertTrue(any("필요 없음" in c.detail for c in chat))
+
+
 if __name__ == "__main__":
     unittest.main()

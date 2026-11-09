@@ -68,6 +68,12 @@ def read_server():
 def describe_missing_server():
     """Why there is no server.json, from the status.json the channel writes on every start."""
     try:
+        if json.loads((server_file().parent.parent / "config.json").read_text(encoding="utf-8")).get("mode") == "desktop":
+            return ("데스크톱 앱 모드입니다. Claude 데스크톱 앱의 Code 탭에서 대화하세요. "
+                    "이 패널에서도 대화하려면 아래 버튼으로 Claude Hand를 켜세요.")
+    except (OSError, ValueError):
+        pass
+    try:
         status = json.loads((server_file().parent / "status.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         status = {}
