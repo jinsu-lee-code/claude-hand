@@ -804,6 +804,50 @@ class EverydayStartTests(unittest.TestCase):
             _, again, _, _ = self.run_preflight(tmp)
             self.assertNotIn("처음에는", again)
 
+    def test_supervisor_resumes_its_own_conversation(self):
+        a, b, c, d = (f"{n}" * 8 + "-1111-1111-1111-111111111111" for n in "abcd")
+        used = lambda sid: sid == b  # only b has a transcript
+        made = lambda: d
+        # a first start with this version carries on from the newest earlier Claude Hand conversation
+        self.assertEqual(ch.supervisor_session({}, transcript=used, latest=lambda: c, new_id=made), (["--resume", c], c, True))
+        # nothing earlier: a new conversation with an id chosen now
+        self.assertEqual(ch.supervisor_session({}, transcript=used, latest=lambda: None, new_id=made), (["--session-id", d], d, False))
+        # the remembered one has a transcript: open it again
+        self.assertEqual(ch.supervisor_session({"supervisor_session": b}, transcript=used, latest=lambda: c, new_id=made),
+                         (["--resume", b], b, True))
+        # remembered but never used (new-session, or closed before any message): start that one, not an older one
+        self.assertEqual(ch.supervisor_session({"supervisor_session": a}, transcript=used, latest=lambda: c, new_id=made),
+                         (["--session-id", a], a, False))
+
+    def test_earlier_supervisor_conversation_is_found_by_its_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, config = Path(tmp) / "claude-hand", Path(tmp) / "cfg"
+            root.mkdir()
+            folder = config / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(root.resolve()))
+            folder.mkdir(parents=True)
+            supervisor = folder / "aaaaaaaa-1111-1111-1111-111111111111.jsonl"
+            supervisor.write_text('{"type":"custom-title","customTitle":"Claude Hand","sessionId":"x"}\n', encoding="utf-8")
+            os.utime(supervisor, (1_000_000, 1_000_000))
+            (folder / "bbbbbbbb-1111-1111-1111-111111111111.jsonl").write_text('{"type":"user"}\n', encoding="utf-8")  # newer, plain
+            self.assertEqual(ch.latest_supervisor_session(root, config), supervisor.stem)
+            self.assertEqual(ch.session_transcript(supervisor.stem, config), supervisor)
+            self.assertIsNone(ch.session_transcript("cccccccc-1111-1111-1111-111111111111", config))
+            self.assertIsNone(ch.session_transcript("../../etc", config))
+
+    def test_new_session_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            out = io.StringIO()
+            with unittest.mock.patch.dict("os.environ", {"CLAUDE_HAND_HOME": str(home)}), \
+                 unittest.mock.patch.object(ch, "supervisor_running", lambda home=None, fetch=None: False), \
+                 unittest.mock.patch("sys.stdout", out):
+                ch.main(["new-session"])
+            session = ch.read_user_config(home)["supervisor_session"]
+            self.assertRegex(session, r"^[0-9a-f-]{36}$")
+            self.assertEqual(ch.supervisor_session({"supervisor_session": session}, transcript=lambda s: None)[0],
+                             ["--session-id", session])
+            self.assertIn("새 대화", out.getvalue())
+
     def test_preflight_stops_a_second_supervisor(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, text, refreshed, _ = self.run_preflight(tmp, running=True)
@@ -859,7 +903,9 @@ class RemoteControlTests(unittest.TestCase):
                 self.assertIn("start_script", ch.read_user_config(home))
                 runner = EverydayStartTests()
                 _, text, _, _ = runner.run_preflight(tmp)
-                self.assertEqual((Path(tmp) / ".launch-args").read_text(encoding="utf-8").strip(), ch.launch_args({"remote_control": True}))
+                session = ch.read_user_config(home)["supervisor_session"]  # no earlier Claude Hand conversation here
+                self.assertEqual((Path(tmp) / ".launch-args").read_text(encoding="utf-8").strip(),
+                                 f"--session-id {session} " + ch.launch_args({"remote_control": True}))
                 ch.main(["remote-control", "off"])
                 self.assertFalse(ch.read_user_config(home)["remote_control"])
         self.assertIn("Code 탭", text)

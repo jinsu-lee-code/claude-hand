@@ -362,6 +362,40 @@ class EndToEndTests(unittest.TestCase):
 
 
 
+class HistoryTests(unittest.TestCase):
+    def test_panels_get_their_conversation_back_after_a_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            agents, history = Path(tmp) / "agents", Path(tmp) / "history"
+            write_agents(agents)
+            hub = cc.ChatHub(lambda message: None, agents)
+            hub.use_history(history)
+            hub.initialized = True
+            hub.post_user_message("unity", "MyGame", "큐브 하나 만들어줘")
+            hub.permission_request({"request_id": "abcde", "tool_name": "Bash", "description": "x", "input_preview": "y"})
+            hub.reply("unity-mygame", "만들었어요")
+            restarted = cc.ChatHub(lambda message: None, agents)
+            restarted.use_history(history)
+            items = restarted.logs["unity-mygame"]
+            self.assertEqual([(i["kind"], i["text"]) for i in items], [("user", "큐브 하나 만들어줘"), ("reply", "만들었어요")])
+            self.assertEqual([i["seq"] for i in items], [1, 2])  # numbered afresh; panels start over with a new server
+            self.assertEqual(restarted.seq, 2)
+            restarted.reply("unity-mygame", "다음 답")
+            self.assertEqual(restarted.logs["unity-mygame"][-1]["seq"], 3)
+
+    def test_history_is_capped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            agents, history = Path(tmp) / "agents", Path(tmp) / "history"
+            write_agents(agents)
+            hub = cc.ChatHub(lambda message: None, agents)
+            hub.use_history(history)
+            for n in range(cc.LOG_LIMIT + 20):
+                hub.reply("unity-mygame", f"답 {n}")
+            restarted = cc.ChatHub(lambda message: None, agents)
+            restarted.use_history(history)
+            self.assertEqual(len(restarted.logs["unity-mygame"]), cc.LOG_LIMIT)
+            self.assertEqual(restarted.logs["unity-mygame"][-1]["text"], f"답 {cc.LOG_LIMIT + 19}")
+
+
 class LongTextTests(unittest.TestCase):
     def test_long_text_is_cut_visibly(self):
         self.assertEqual(cc.clip("짧은 답", cc.MAX_TEXT), "짧은 답")

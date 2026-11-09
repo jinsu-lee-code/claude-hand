@@ -44,6 +44,22 @@
 
 테스트: `tools/tests` 160개 OK (skipped 17). Blender 안 14개 중 13개(나머지 1개는 위 실행 환경 문제). Unity 컴파일 오류 없음.
 
+## 14단계: 대화 이어 쓰기 (같은 날 추가)
+
+테스트 중 사용자 지적: 작업은 며칠씩 이어지는데, Claude Hand를 켤 때마다 새 Claude Code 세션이 생겨(이날만 "Claude Hand" 세션 18개) 감독이 이전 대화를 모르고, 데스크톱 앱에도 따로 뜨고, 채팅창 기록도 비워짐. 대화 파일은 디스크에 남지만 이어지지 않음.
+
+- `tools/claude_hand.py`: preflight가 `~/.claude-hand/config.json`의 `supervisor_session`을 `--resume`으로 엶. 처음 한 번은 이 폴더에서 가장 최근의 "Claude Hand" 대화(Remote Control 이름)를 이어받고, 이전 것이 없으면 `--session-id`로 정한 새 ID. 정해 두고 아직 메시지가 없는 ID는 그대로 `--session-id`. `new-session` 명령으로 다음 시작을 새 대화로(이전 대화는 `claude --resume` 목록에 남음). 시작 안내에 "지난 대화를 이어서 엽니다" / "새 대화로 시작합니다".
+- `tools/chat_channel.py`: 감독 채널 서버가 창마다 최근 대화(나·Claude, 100개)를 `~/.claude-hand/chat/history/<chat_id>.json`에 저장하고 시작할 때 불러옴(번호는 새로 매김, 허락 요청은 저장 안 함). 감독 지침에 "다시 켠 뒤 이전 하위 세션이 없으면 새로 맡긴다" 추가.
+- TEST-PLAN 14단계 추가. 테스트 165개 OK.
+
+| 확인 | 결과 | 메모 |
+|---|---|---|
+| A. 이어서 열기 | 됨 | 첫 재시작에 이날 마지막 감독 대화 `2bfcab59…`를 이어받음(`--resume`). 이후 재시작도 같은 ID, 대화 파일 하나로 이어짐 |
+| B. 기억 | 됨 | 다시 켠 뒤 "마지막으로 한 작업"에 재시작 전 작업으로 답함. 데스크톱 앱에도 이전 대화 보임 |
+| C. 채팅창 기록 | 됨 | Unity 3개·Blender 5개 저장, 다시 켠 뒤 채팅창에 남아 있음 |
+| D. 하위 세션 | 됨 | 이어 연 뒤 시킨 일은 감독이 하위 세션을 새로 띄워(`Agent`) 처리 |
+| E. 새로 시작 | 확인 안 함 | `new-session`은 단위 테스트만 |
+
 ## 남은 것·참고
 
 - **`Bash(uv run *)` 미리 허용**: 새 `settings.local.json`이 이 폴더 세션의 `uv run …`을 허락 없이 실행하게 함. 12단계 E에서 본 `list` 같은 확인창은 이제 안 뜸. `uv run`은 아무 스크립트나 돌릴 수 있어 범위가 넓음.

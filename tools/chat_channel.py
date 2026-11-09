@@ -83,8 +83,11 @@ INSTRUCTIONS = (
     "is about a Unity or Blender window and says 'this', 'the selected one' or 'here' without naming it, call "
     "current_context to see what is selected where and which window was used last. After work requested that way "
     "finishes, also call reply for each window it changed, with that window's chat_id from current_context, "
-    "origin \"desktop\" and request set to a one-line summary of what was asked, so the window's chat panel keeps its whole history."
+    "origin \"desktop\" and request set to a one-line summary of what was asked, so the window's chat panel keeps its whole history. "
+    "Claude Hand resumes this same conversation when it is restarted, but subagents started before a restart may be gone: "
+    "if SendMessage to one fails, hand the window's request to its subagent anew."
 )
+HISTORY_KINDS = ("user", "reply")  # what a panel shows again after a restart; permission prompts do not outlive it
 
 REPLY_TOOL = {
     "name": "reply",
@@ -193,6 +196,35 @@ class ChatHub:
         self.initialized = False
         self.in_use = False  # Claude has called a tool or asked a permission: the session is past its start-up prompts
         self.on_first_use = None  # callable(): run once when in_use becomes true (minimizes the Claude Hand window)
+        self.history_dir: Path | None = None  # where each chat's recent messages are kept across restarts
+
+    def use_history(self, directory: Path) -> None:
+        """Keep each chat's recent messages in `directory` and show the saved ones again, so a panel still has its
+        conversation after Claude Hand restarts. Numbered afresh: panels start over when the server changes."""
+        self.history_dir = directory
+        with self.cond:
+            for path in sorted(directory.glob("*.json")) if directory.is_dir() else []:
+                try:
+                    saved = json.loads(path.read_text(encoding="utf-8"))
+                    chat_id, items = str(saved["chat_id"]), saved["items"]
+                except (OSError, ValueError, KeyError, TypeError):
+                    continue
+                kept = [dict(item) for item in items if isinstance(item, dict) and item.get("kind") in HISTORY_KINDS]
+                for item in kept[-LOG_LIMIT:]:
+                    self.seq += 1
+                    item["seq"] = self.seq
+                    self.logs.setdefault(chat_id, []).append(item)
+
+    def _save_history(self, chat_id: str) -> None:
+        items = [item for item in self.logs.get(chat_id, []) if item.get("kind") in HISTORY_KINDS]
+        name = re.sub(r"[^\w.-]", "_", chat_id) or "chat"
+        try:
+            self.history_dir.mkdir(parents=True, exist_ok=True)
+            tmp = self.history_dir / f"{name}.{os.getpid()}.tmp"
+            tmp.write_text(json.dumps({"chat_id": chat_id, "items": items}, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, self.history_dir / f"{name}.json")
+        except OSError as exc:  # a full disk or a locked file must not stop the chat
+            log("could not save the chat history:", exc)
 
     def _append(self, chat_id: str, item: dict) -> dict:
         self.seq += 1
@@ -200,6 +232,8 @@ class ChatHub:
         log_items = self.logs.setdefault(chat_id, [])
         log_items.append(item)
         del log_items[:-LOG_LIMIT]
+        if self.history_dir is not None and item.get("kind") in HISTORY_KINDS:
+            self._save_history(chat_id)
         self.cond.notify_all()
         return item
 
@@ -809,6 +843,7 @@ def main(argv: list[str] | None = None) -> int:
         mcp.serve()
         return 0
     mcp.hub.auto_sync = lambda agents_dir: refresh_agents(agents_dir=agents_dir)
+    mcp.hub.use_history(home / "chat" / "history")
     if sys.platform == "win32" and minimize_after_start(home):
         # Not at start: Claude Code may still be showing its development-channel confirmation in that window.
         # The first tool call or permission request means the session is past it.

@@ -36,6 +36,8 @@ Everyday start (so nobody has to open a terminal):
                        Claude desktop app (Code tab), claude.ai/code and the mobile app.
   minimize             on/off/status (default on, Windows): minimize the Claude Hand window once
                        the session is in use.
+  new-session          Start the next Claude Hand as a new conversation (each start otherwise resumes
+                       the same one, so work carries over from day to day).
 
 Run with uv (already installed for MCP for Unity) or any Python 3.10+:
   uv run tools/claude_hand.py list
@@ -55,6 +57,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -1496,6 +1499,48 @@ def inherited_session_env(env=os.environ, persistent: set[str] | None = None) ->
                   and not name.upper().startswith(USER_ENV_PREFIXES) and name.upper() not in persistent)
 
 
+def claude_config_dir(env=os.environ) -> Path:
+    return Path(env.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+
+
+def session_transcript(session_id: str, config_dir: Path | None = None) -> Path | None:
+    """The transcript Claude Code keeps for `session_id`, or None if that conversation never got a message."""
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", session_id or ""):
+        return None
+    return next(iter(((config_dir or claude_config_dir()) / "projects").glob(f"*/{session_id}.jsonl")), None)
+
+
+def latest_supervisor_session(root: Path = REPO_ROOT, config_dir: Path | None = None) -> str | None:
+    """The newest earlier Claude Hand conversation started in this folder (Remote Control names it), to carry on."""
+    folder = (config_dir or claude_config_dir()) / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(root.resolve()))
+    marker = f'"customTitle":"{REMOTE_CONTROL_NAME}"'
+    paths = sorted(folder.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True) if folder.is_dir() else []
+    for path in paths:
+        try:
+            with path.open(encoding="utf-8", errors="replace") as transcript:
+                if marker in transcript.read(65536):
+                    return path.stem
+        except OSError:
+            continue
+    return None
+
+
+def supervisor_session(config: dict, transcript=session_transcript, latest=latest_supervisor_session,
+                       new_id=lambda: str(uuid.uuid4())) -> tuple[list[str], str, bool]:
+    """(claude arguments, session id, resumed?): every start opens the same supervisor conversation, so the work
+    and the Claude desktop app's "Claude Hand" carry on across restarts and days; Claude Code compacts it as it
+    grows. A first start with this version carries on from the newest earlier one. `new-session` starts afresh."""
+    session = config.get("supervisor_session") or ""
+    if session and transcript(session):
+        return ["--resume", session], session, True
+    if not session:
+        earlier = latest()
+        if earlier:
+            return ["--resume", earlier], earlier, True
+        session = new_id()
+    return ["--session-id", session], session, False  # chosen but never used yet (no message, so no transcript)
+
+
 def launch_args(config: dict, env=os.environ) -> str:
     """Extra arguments for the supervisor's `claude` command, one line, as start-supervisor pastes it.
     Remote Control is left out when this login cannot use it (it would only print an error at start)."""
@@ -1592,10 +1637,16 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     if not skill.exists() or skill.read_text(encoding="utf-8") != rendered_skill():
         install_skill(Path.home() / ".claude" / "skills")
     config = read_user_config(home)
-    LAUNCH_ARGS_FILE.write_text(launch_args(config) + "\n", encoding="utf-8")
+    session_args, session, resumed = supervisor_session(config)
+    if config.get("supervisor_session") != session:
+        config["supervisor_session"] = session
+        write_json_files({home / "config.json": config})
+    LAUNCH_ARGS_FILE.write_text(" ".join([*session_args, launch_args(config)]).strip() + "\n", encoding="utf-8")
     inherited = inherited_session_env()
     LAUNCH_ARGS_FILE.with_name(".launch-unset").write_text("".join(f"{name}\n" for name in inherited), encoding="utf-8")
     print(BANNER)
+    print(" 지난 대화를 이어서 엽니다. 새 대화로 시작하려면: uv run tools/claude_hand.py new-session" if resumed
+          else " 새 대화로 시작합니다. 다음부터는 켤 때마다 이 대화를 이어서 엽니다.")
     if inherited:
         print(f" 다른 Claude Code 세션에서 켜져서, 그 세션의 표시 변수 {len(inherited)}개를 지우고 따로 시작합니다.")
     if remote_control_wanted(config):
@@ -1687,6 +1738,17 @@ def cmd_start(args: argparse.Namespace) -> int:
     print("     창은 세션이 일을 시작하면 저절로 최소화됩니다. 닫지는 마세요.")
     if remote_control_wanted(read_user_config(home)) and not remote_control_problems():
         print(f"  2. Claude 데스크톱 앱의 Code 탭 세션 목록에서 '{REMOTE_CONTROL_NAME}'을 여세요. 거기서 대화하면 됩니다.")
+    return 0
+
+
+def cmd_new_session(args: argparse.Namespace) -> int:
+    home = claude_hand_home()
+    config = read_user_config(home)
+    config["supervisor_session"] = str(uuid.uuid4())
+    write_json_files({home / "config.json": config})
+    print("다음에 Claude Hand를 켜면 새 대화로 시작합니다. 지금까지의 대화는 지워지지 않고 claude --resume 목록에 남습니다.")
+    if supervisor_running(home):
+        print("지금 켜져 있는 Claude Hand는 그대로입니다. 닫고 다시 켜면 새 대화가 됩니다.")
     return 0
 
 
@@ -2217,6 +2279,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_start = sub.add_parser("start", help="open the Claude Hand window (the supervisor session)")
     p_start.add_argument("--dry-run", action="store_true")
     p_start.set_defaults(func=cmd_start)
+
+    p_ns = sub.add_parser("new-session", help="start the next Claude Hand as a new conversation (it resumes the same one otherwise)")
+    p_ns.set_defaults(func=cmd_new_session)
 
     p_min = sub.add_parser("minimize", help="minimize the Claude Hand window once it is in use (Windows)")
     p_min.add_argument("action", nargs="?", choices=["on", "off", "status"], default="status")
