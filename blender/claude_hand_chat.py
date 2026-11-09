@@ -86,7 +86,7 @@ def describe_missing_server():
 
 
 STARTING_MESSAGE = ("Claude Hand 창을 여는 중입니다. 그 창에 확인 질문이 보이면 화살표 키로 고르고 Enter를 눌러 주세요"
-                    "(개발용 채널 경고는 계속하는 쪽). 연결되면 이 패널이 이어서 진행합니다.")
+                    "(개발용 채널 경고는 I am using this for local development). 연결되면 이 패널이 이어서 진행합니다.")
 
 
 def starting():

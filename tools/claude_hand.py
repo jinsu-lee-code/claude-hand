@@ -1396,8 +1396,8 @@ def cmd_chat_setup(args: argparse.Namespace) -> int:
             return 1
         print(f"점검 통과: Python {result.get('python')}, 포트 {result.get('port')} 사용 가능, 하위 세션 {len(result.get('agents', []))}개")
 
-    print("다음: start-supervisor.cmd 로 감독 세션을 여세요. 처음 한 번은 개발용 채널 경고와")
-    print("      .mcp.json 서버(claude-hand-chat) 사용 승인 창이 뜹니다. 내용을 읽고 승인하세요.")
+    print("다음: start-supervisor.cmd 로 감독 세션을 여세요. 켤 때마다 개발용 채널 경고가 뜨고(I am using this for")
+    print("      local development), 처음 한 번은 .mcp.json 서버(claude-hand-chat) 사용 승인 창도 뜹니다. 내용을 읽고 승인하세요.")
     return 0
 
 
@@ -1522,13 +1522,13 @@ BANNER = """\
    Unity   : Window > Claude Hand > Chat
    Blender : 3D 뷰포트에서 N > Claude Hand 탭
  이 창은 닫지 마세요. 닫으면 채팅이 멈춥니다. 일을 시작하면 저절로 최소화됩니다.
- 개발용 채널(claude-hand-chat) 경고가 뜨면 계속하는 쪽을 고르세요.
+ 켤 때마다 개발용 채널(claude-hand-chat) 경고가 뜹니다: I am using this for local development 를 고르세요.
 ────────────────────────────────────────────────────────"""
 
 FIRST_RUN_GUIDE = """\
 처음에는 Claude Code가 몇 가지를 확인합니다. 화살표 키로 고르고 Enter를 누르세요.
   - 이 폴더(claude-hand)를 믿는지: 믿는다(Yes)를 고르세요.
-  - 개발용 채널(claude-hand-chat) 경고: 내용을 읽고 계속하는 쪽을 고르세요.
+  - 개발용 채널(claude-hand-chat) 경고(켤 때마다 뜸): I am using this for local development 를 고르세요.
   - (뜨면) MCP 서버 claude-hand-chat 사용: 사용하는 쪽을 고르세요.
   - 로그인을 묻으면 화면 안내대로 로그인하세요.
   - 데스크톱 앱에서 보려면 구독(Pro·Max 등) 계정 로그인이 필요합니다. /status 로 확인하고, 아니면 /login 하세요."""
@@ -1648,7 +1648,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         print(f"Claude Hand 창을 열지 못했습니다: {exc}. 바탕화면의 Claude Hand 아이콘을 누르세요.")
         return 1
     print("Claude Hand 창을 열었습니다.")
-    print("  1. 새로 뜬 'Claude Hand' 창에 확인 질문이 보이면 화살표 키로 고르고 Enter를 누르세요(개발용 채널 경고는 계속하는 쪽).")
+    print("  1. 새로 뜬 'Claude Hand' 창에 개발용 채널 경고가 뜹니다(켤 때마다). I am using this for local development 를 고르고 Enter.")
     print("     창은 세션이 일을 시작하면 저절로 최소화됩니다. 닫지는 마세요.")
     if remote_control_wanted(read_user_config(home)) and not remote_control_problems():
         print(f"  2. Claude 데스크톱 앱의 Code 탭 세션 목록에서 '{REMOTE_CONTROL_NAME}'을 여세요. 거기서 대화하면 됩니다.")

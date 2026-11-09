@@ -918,7 +918,7 @@ class StartCommandTests(unittest.TestCase):
     def test_opens_the_window_and_says_where_to_look(self):
         code, text, launched = self.run_start()
         self.assertEqual((code, launched), (0, [1]))
-        self.assertIn("확인 질문", text)
+        self.assertIn("I am using this for local development", text)
         self.assertIn("Code 탭", text)
 
     def test_already_running_or_inside_the_supervisor(self):

@@ -25,7 +25,7 @@ Unity·Blender 안의 채팅창 ──(claude-hand-chat 채널)──┐
 1. Unity(**Window > Claude Hand > Chat**)나 Blender(3D 뷰포트 `N` > **Claude Hand**)의 채팅창에 바로 말합니다.
    - Claude Hand가 꺼져 있으면 채팅창이 켜고, 연결되면 그 메시지를 보냅니다.
    - 바탕화면의 **Claude Hand** 아이콘이나 채팅창의 **[Claude Hand 시작]** 버튼으로 먼저 켜도 됩니다.
-2. 검은 Claude Hand 창이 뜹니다. 그 창에 확인 질문이 보이면 화살표 키로 고르고 Enter를 누릅니다(개발용 채널 경고는 계속하는 쪽). Claude Code의 보안 확인이라 claude-hand가 대신 답하지 않습니다.
+2. 검은 Claude Hand 창이 뜹니다. **켤 때마다** 개발용 채널 경고가 나오니 "I am using this for local development"를 고르고 Enter를 누릅니다. 직접 만든 채널에 Claude Code가 늘 묻는 보안 확인이라 claude-hand가 대신 답하지 않고, 개인 계정에서는 끌 수도 없습니다.
 3. 세션이 일을 시작하면 그 창은 저절로 최소화됩니다(Windows). **닫지는 마세요.** 닫으면 채팅이 멈춥니다.
 
 이게 전부입니다.
