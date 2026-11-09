@@ -173,6 +173,25 @@ Blender N 패널 애드온 (urllib)  ─┼──▶ chat_channel.py ──stdio
   - Blender: 통신은 백그라운드 스레드에서 하고, bpy는 메인 스레드 타이머에서만 만진다. 입력칸에서 Enter를 치면 보낸다.
 - **검증:** 채널 서버는 실제 프로세스로 띄워 MCP 핸드셰이크, 메시지 전달, `reply`, 권한 중계를 끝까지 테스트했다. Blender 애드온은 실제 Blender 5.0.1에서 채널 서버와 주고받기, 권한 버튼, 화면 없는 활성화까지 테스트했다. Unity 창은 스텁 컴파일만 했다.
 
+## 쉬운 시작: 터미널을 몰라도 쓰기
+
+목표: 세팅이 끝난 뒤에는 **아이콘 하나나 버튼 하나**로 시작한다. 그 밖에 기억할 것(폴더, 명령, `sync`)이 없게 한다.
+
+| 막히던 지점 | 바꾼 것 |
+|---|---|
+| 터미널을 열고 폴더로 가서 명령 입력 | 바탕화면·시작 메뉴 "Claude Hand" 바로가기(`shortcut`, Windows는 PowerShell WScript.Shell로 .lnk), 원하면 시작프로그램(`--startup`) |
+| 감독 세션이 꺼져 있는지 모름 | Unity·Blender 채팅창이 꺼진 상태를 알아채고 **[Claude Hand 시작]** 버튼을 보여준다. 버튼은 `~/.claude-hand/config.json`의 `start_script`를 연다. 이 파일은 `chat-setup`·`preflight`·`update`가 기록하고, Unity는 패키지 위치로도 찾는다. Windows는 `cmd /c start "Claude Hand" …`로 새 창을 연다 |
+| 새 프로젝트·파일마다 `sync` | ① 시작할 때 `preflight`가 열린 창의 하위 세션을 만들거나 고친다. ② 채널이 하위 세션 없는 창의 메시지를 받으면 그 자리에서 같은 일을 한다(창마다 20초에 한 번까지). Claude Code는 `~/.claude/agents`의 새 파일을 다시 시작하지 않아도 읽는다. 다만 세션이 시작될 때 없던 폴더의 첫 파일은 예외라서, `preflight`가 폴더를 먼저 만든다 |
+| 두 번 실행해 감독이 둘 | `preflight`가 살아 있는 `server.json`을 보면 "이미 실행 중"을 출력하고 종료 코드 3으로 끝낸다. 시작 스크립트는 Claude Code를 열지 않는다 |
+| 첫 실행의 낯선 확인 창들 | `.mcp.json` 서버를 `settings.local.json`의 `enabledMcpjsonServers`로 미리 승인한다(믿는 폴더에서만 적용된다고 문서에 나옴). 줄일 수 없는 폴더 신뢰·개발용 채널 경고는 `preflight`가 처음 한 번 무엇을 고르면 되는지 한국어로 미리 보여준다 |
+| 창이 그냥 사라짐 | 시작 스크립트가 uv·claude가 없으면 쉬운 말로 알리고 멈춘다(`pause`). Claude Code가 오류로 끝나도 멈춘다. 창 제목을 "Claude Hand"로 해서 작업 표시줄에서 찾기 쉽게 했다 |
+| Claude Code 명령이 없음(데스크톱 앱만 씀) | `doctor`가 찾아내고 `winget install Anthropic.ClaudeCode`를 안내한다. 세팅 스킬은 기본 도구 단계에서 설치한다 |
+
+배치 파일 주의점:
+- 한국어 메시지가 깨지지 않게 `chcp 65001`을 맨 앞에 둔다. BOM은 넣지 않는다(첫 줄이 깨진다).
+- `if (...)` 블록 안의 echo에는 괄호를 쓰지 않는다. `)`가 블록을 일찍 닫는다.
+- 테스트가 이 두 가지를 검사한다.
+
 ## 처음 세팅 (claude-hand-setup 스킬)
 
 처음 쓰는 사람이 Claude Code에 "세팅해줘"라고만 하면 되게 하는 것이 목표다. 스킬은 저장소의 `.claude/skills/`에 있어서, 저장소 폴더에서 Claude Code를 열면 바로 쓸 수 있다.
@@ -231,6 +250,8 @@ Blender N 패널 애드온 (urllib)  ─┼──▶ chat_channel.py ──stdio
 | 15 | 감독이 같은 `chat_id`에 같은 하위 세션을 계속 이어 쓴다(지침을 따르는지) | 지침을 고치거나, 채널 서버가 agent id를 기억해 메타로 넘긴다 |
 | 16 | Unity 에디터가 비활성일 때도 `async` 이어 받기가 늦지 않게 돈다 | 폴링을 `EditorApplication.update`로 옮긴다 |
 | 17 | Windows에서 PowerShell `Get-CimInstance Win32_Process`가 채널 서버 시작 중에 30초 안에 끝난다(보통 1~2초) | 환경변수 경로만 쓴다 |
+| 18 | `settings.local.json`의 `enabledMcpjsonServers`가 `.mcp.json` 승인 질문을 없앤다(문서는 local 파일의 승인이 믿는 폴더에서 적용된다고만 함) | 처음 한 번 질문에 답한다(안내 문구가 있음) |
+| 19 | Unity·Blender 버튼의 `cmd /c start "Claude Hand" <script>`가 새 콘솔 창을 연다 | 바탕화면 아이콘을 쓴다 |
 
 ## 다음 단계 (2단계 후보)
 

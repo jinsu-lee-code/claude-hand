@@ -49,7 +49,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from claude_hand import GENERATED_MARKER, slug  # noqa: E402
+from claude_hand import GENERATED_MARKER, refresh_agents, slug  # noqa: E402
 
 SERVER_NAME = "claude-hand-chat"
 SERVER_VERSION = "0.1.0"
@@ -59,6 +59,7 @@ MAX_TEXT = 8000
 MAX_CONTEXT = 3000
 MAX_WAIT_SECONDS = 30
 LOG_LIMIT = 500  # items kept per chat
+AUTO_SYNC_INTERVAL = 20.0  # seconds between automatic subagent refreshes for the same window
 
 INSTRUCTIONS = (
     "This channel connects chat panels inside Unity and Blender windows to you. A message arrives as "
@@ -69,8 +70,9 @@ INSTRUCTIONS = (
     "Hand the request to that subagent. For the same chat_id keep resuming the same subagent with SendMessage "
     "instead of starting a new one, so each window keeps its own conversation. When a request involves other "
     "windows (moving objects between projects, Blender to Unity), coordinate the other subagents as the claude-hand "
-    "skill describes, and report back in the chat_id the request came from. If agent is \"none\", reply that this "
-    "window has no subagent yet and that `uv run tools/claude_hand.py sync` creates one. For work that takes "
+    "skill describes, and report back in the chat_id the request came from. If agent is \"none\", the window's subagent could "
+    "not be made automatically: reply that MCP for Unity should show Connected (Window > MCP for Unity) or the "
+    "MCP for Blender server should be on, then ask them to send the message again. For work that takes "
     "more than a few seconds, send a short reply first saying what you are doing, then the result."
 )
 
@@ -147,9 +149,11 @@ def resolve_window(agents: list[AgentEntry], app: str, window: str, pin: str = "
 class ChatHub:
     """Chats, replies and permission requests, shared by the MCP loop and the HTTP threads."""
 
-    def __init__(self, emit, agents_dir: Path):
+    def __init__(self, emit, agents_dir: Path, auto_sync=None):
         self.emit = emit  # callable(dict): writes one JSON-RPC message to Claude Code
         self.agents_dir = agents_dir
+        self.auto_sync = auto_sync  # callable(agents_dir): makes subagents for open windows (None = never)
+        self._last_sync: dict[tuple[str, str], float] = {}
         self.cond = threading.Condition()
         self.seq = 0
         self.logs: dict[str, list[dict]] = {}
@@ -167,7 +171,22 @@ class ChatHub:
         return item
 
     def resolve(self, app: str, window: str, pin: str = "") -> tuple[str, str | None]:
-        return resolve_window(load_agents(self.agents_dir), app, window, pin)
+        chat_id, agent = resolve_window(load_agents(self.agents_dir), app, window, pin)
+        if agent is None and self.auto_sync is not None:
+            # A window opened after the supervisor started: make its subagent now instead of asking
+            # the user to run `sync`. Claude Code picks up new files in ~/.claude/agents by itself.
+            with self.cond:
+                now = time.time()
+                due = now - self._last_sync.get((app, window), 0.0) >= AUTO_SYNC_INTERVAL
+                if due:
+                    self._last_sync[(app, window)] = now
+            if due:
+                try:
+                    self.auto_sync(self.agents_dir)
+                except (Exception, SystemExit) as exc:  # sync refuses to overwrite hand-written files
+                    log("automatic subagent refresh failed:", exc)
+                chat_id, agent = resolve_window(load_agents(self.agents_dir), app, window, pin)
+        return chat_id, agent
 
     def post_user_message(self, app: str, window: str, text: str, pin: str = "", context: str = "") -> dict:
         chat_id, agent = self.resolve(app, window, pin)
@@ -575,6 +594,7 @@ def main(argv: list[str] | None = None) -> int:
             pass
         mcp.serve()
         return 0
+    mcp.hub.auto_sync = lambda agents_dir: refresh_agents(agents_dir=agents_dir)
     token = secrets.token_urlsafe(32)
     env_port = os.environ.get("CLAUDE_HAND_CHAT_PORT")
     httpd = start_http(mcp.hub, token, int(env_port) if env_port else None)

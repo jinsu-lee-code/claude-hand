@@ -37,17 +37,19 @@ uv run tools/claude_hand.py doctor
 ```
 Unity 프로젝트 경로를 알면 `--unity-project "<경로>"`를 붙인다. 모르면 사용자에게 물어본다. 여러 개면 여러 번 붙인다.
 
-결과를 짧은 표로 보여준다. 그다음 빠진 항목에 맞춰 아래 1~7단계 중 필요한 것만 계획으로 제시하고 고르게 한다. 각 선택지 설명에 무엇이 바뀌는지 적는다.
+결과를 짧은 표로 보여준다. 그다음 빠진 항목에 맞춰 아래 1~8단계 중 필요한 것만 계획으로 제시하고 고르게 한다. 각 선택지 설명에 무엇이 바뀌는지 적는다.
 - 1단계: winget으로 프로그램 설치
 - 2단계: npm 전역 설치
 - 3단계: Blender 애드온 폴더와 MCP 클라이언트 설정 파일
 - 4단계: Unity 프로젝트의 Packages/manifest.json, Claude Code MCP 설정
 - 5단계: Unity 에디터 환경설정
 - 6단계: `~/.claude/agents`, `~/.claude/skills`
-- 7단계: 이 폴더의 `.mcp.json`과 `.claude/settings.local.json`(채팅 채널 등록, 답장 도구 허용), Blender 애드온 폴더(채팅 애드온), 선택하면 하위 세션 도구 허용 규칙
+- 7단계: 이 폴더의 `.mcp.json`과 `.claude/settings.local.json`(채팅 채널 등록, 답장 도구 허용, 채널 서버 사전 승인), Blender 애드온 폴더(채팅 애드온), 선택하면 하위 세션 도구 허용 규칙
+- 8단계: 바탕화면과 시작 메뉴의 "Claude Hand" 바로가기, 선택하면 Windows 시작프로그램
 
 ## 1. 기본 도구 (빠진 것만)
 
+- Claude Code 명령(`claude`): `winget install Anthropic.ClaudeCode`. 데스크톱 앱만 쓰던 사람은 이 명령이 없을 수 있다. 감독 세션이 이 명령으로 열리기 때문에 꼭 필요하다.
 - uv: `winget install --id astral-sh.uv -e`
 - git: `winget install --id Git.Git -e` (Unity가 MCP for Unity를 받을 때 필요)
 - Node.js 18 이상: `winget install --id OpenJS.NodeJS.LTS -e` (agent-desktop용)
@@ -157,17 +159,33 @@ Unity와 Blender 안에서 바로 채팅하려면 아래를 한다. 계획을 �
    ```
    uv run tools/claude_hand.py sync --allow-tools
    ```
-5. **사용자에게 알린다.**
-   - 채팅을 쓰려면 감독 세션을 **`start-supervisor.cmd`**로 열어야 한다. 이 파일은 저장소 폴더로 이동하고, 이 세션이 감독이라는 표시(`CLAUDE_HAND_SUPERVISOR=1`)와 넉넉한 MCP 시작 시간(`MCP_TIMEOUT=60000`)을 설정한 뒤, `--dangerously-load-development-channels server:claude-hand-chat`으로 Claude Code를 연다.
-   - 처음 한 번은 개발용 채널 경고와 `.mcp.json` 서버(claude-hand-chat) 사용 승인 창이 뜬다. 사용자가 직접 읽고 승인한다.
-   - 이 폴더에서 그냥 연 Claude Code(지금 이 세션 포함)도 채널 서버를 띄우지만 채팅은 받지 않는다. 채널이 없는 세션이 채팅을 가로채지 않게 하기 위해서다. 그래서 세팅이 끝나면 `start-supervisor.cmd`로 다시 열어야 한다.
-   - Channels는 아직 리서치 프리뷰다. 감독 세션은 하나만 연다.
-   - `start-supervisor.cmd`로 연 뒤에도 채팅이 들어오지 않을 수 있다. 예를 들어 `/mcp`에 claude-hand-chat이 없거나, 채널로 인식되지 않는 경우다. 그러면 대체 방식으로 다시 등록하고 감독 세션을 다시 연다.
+5. **사용자에게 알린다.** 길게 설명하지 말고 이것만 말한다.
+   - 앞으로는 Unity나 Blender 채팅창의 **[Claude Hand 시작]** 버튼, 또는 바탕화면의 **Claude Hand** 아이콘만 누르면 된다. 8단계에서 만든다.
+   - 새로 뜨는 검은 창이 Claude Hand다. **닫지 말고 최소화**해 둔다.
+   - 처음 한 번은 그 창에서 확인 질문 몇 개에 답한다. 폴더 신뢰, 개발용 채널 경고, 채널 서버 사용 같은 것이다. 무엇을 고르면 되는지 그 창에 안내가 나온다.
+   - 새 Unity 프로젝트나 Blender 파일을 열어도 따로 할 일이 없다. 그 창에서 처음 메시지를 보내면 담당 하위 세션이 자동으로 만들어진다.
+   - 참고(사용자가 궁금해하면): Channels는 리서치 프리뷰다. 감독 세션은 한 번에 하나만 열린다(두 번 누르면 "이미 실행 중"이라고 나온다). 지금 이 세팅용 세션은 채팅을 받지 않는다.
+   - `start-supervisor`로 열었는데도 채팅이 들어오지 않을 수 있다. 예를 들어 `/mcp`에 claude-hand-chat이 없을 때다. 그러면 대체 방식으로 다시 등록한다.
      ```
      uv run tools/claude_hand.py chat-setup --register-local
      ```
 
-## 8. 마무리
+## 8. 바로가기 만들기
+
+Claude Hand를 켜는 아이콘을 만든다. 컴퓨터에 익숙하지 않은 사람에게 가장 중요한 단계다.
+```
+uv run tools/claude_hand.py shortcut --dry-run
+uv run tools/claude_hand.py shortcut
+```
+- 바탕화면과 시작 메뉴에 "Claude Hand"가 생긴다. 지울 때는 `shortcut --remove`.
+- 컴퓨터를 켤 때마다 자동으로 켜고 싶은지 물어본다. 원하면 `shortcut --startup`을 쓴다. 단점도 말한다. 컴퓨터를 켤 때마다 검은 창이 하나 떠서 계속 남아 있다.
+- 바로가기는 `start-supervisor.cmd`를 실행한다. 이 파일은 실행할 때마다 다음을 알아서 한다(`preflight`).
+  - 열린 창의 하위 세션 준비
+  - 채팅 설정 맞추기
+  - 이미 켜져 있는지 확인
+  - 처음 한 번 안내
+
+## 9. 마무리
 
 `doctor`를 다시 실행해 남은 항목을 표로 보고한다. 끝으로 다음을 안내한다.
 - `docs/TEST-PLAN.md`의 확인 순서
@@ -176,7 +194,7 @@ Unity와 Blender 안에서 바로 채팅하려면 아래를 한다. 계획을 �
 
 ## 채팅창에 감독 세션이 없다고 나올 때
 
-`uv run tools/claude_hand.py chat-status`를 실행하고, 출력에 적힌 대로 고친다. 흔한 원인은 이렇다.
+먼저 채팅창의 **[Claude Hand 시작]** 버튼을 눌러 보게 한다. 대부분은 감독 세션이 꺼져 있는 경우다. 그래도 안 되면 `uv run tools/claude_hand.py chat-status`를 실행하고, 출력에 적힌 대로 고친다. 흔한 원인은 이렇다.
 1. **감독 세션을 `start-supervisor.cmd`가 아닌 방법으로 열었다.** 데스크톱 앱이나 그냥 실행한 `claude`가 이 경우다. 채널 서버가 대기 모드로 뜨고, 채팅창에 그 이유가 보인다.
 2. **이전 버전의 local 범위 등록이 남아 있다** → `update`
 3. **`.mcp.json` 서버가 승인 대기 중이거나 거절됐다** → 감독 세션에서 `/mcp`로 확인하고 승인한다. 거절했었다면 `claude mcp reset-project-choices` 후 다시 연다.

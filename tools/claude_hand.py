@@ -25,6 +25,11 @@ First-time setup helpers (used by the claude-hand-setup skill, safe to run by ha
   chat-status          Explain why a chat panel does or does not reach the supervisor.
   update               After `git pull`: refresh everything an earlier version set up.
 
+Everyday start (so nobody has to open a terminal):
+  preflight            Run by start-supervisor each time: refresh subagents, check nothing is
+                       already running, explain the first-run prompts.
+  shortcut             Put a "Claude Hand" icon on the Desktop and in the Start menu.
+
 Run with uv (already installed for MCP for Unity) or any Python 3.10+:
   uv run tools/claude_hand.py list
   uv run tools/claude_hand.py sync
@@ -69,6 +74,8 @@ SUPERVISOR_COMMAND = f"claude --dangerously-load-development-channels server:{CH
 CHAT_REPLY_RULE = f"mcp__{CHAT_SERVER_NAME}__reply"
 MIN_CLAUDE_FOR_PERMISSION_RELAY = (2, 1, 234)
 THIRD_PARTY_PROVIDER_ENV = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
+START_SCRIPT = REPO_ROOT / ("start-supervisor.cmd" if sys.platform == "win32" else "start-supervisor.sh")
+SHORTCUT_NAME = "Claude Hand"
 
 
 # --------------------------------------------------------------------------- data
@@ -1007,8 +1014,8 @@ def doctor_checks(projects: list[Path], blender_ports: list[int], version=tool_v
         futures = {name: pool.submit(version, *cmd) for name, cmd in tools.items()}
         versions = {name: future.result() for name, future in futures.items()}
     claude = versions["claude"]
-    add("기본 도구", "Claude Code CLI", claude is not None, claude or "없음",
-        "" if claude else "https://claude.com/claude-code 에서 설치")
+    add("기본 도구", "Claude Code CLI (claude 명령)", claude is not None, claude or "없음",
+        "" if claude else ("winget install Anthropic.ClaudeCode" if sys.platform == "win32" else "curl -fsSL https://claude.ai/install.sh | bash"))
     uv = versions["uv"]
     add("기본 도구", "uv", uv is not None, uv or "없음", "" if uv else "winget install --id astral-sh.uv -e")
     git = versions["git"]
@@ -1136,9 +1143,18 @@ def plan_chat_config(root: Path = REPO_ROOT, runner: str = "uv run -q --no-proje
         plan[mcp_path] = mcp
     settings_path = root / ".claude" / "settings.local.json"
     settings = read_json_file(settings_path)
+    changed = False
     allow = settings.setdefault("permissions", {}).setdefault("allow", [])
     if CHAT_REPLY_RULE not in allow:
         allow.append(CHAT_REPLY_RULE)
+        changed = True
+    # Approves this folder's .mcp.json entry up front so the first start asks one question fewer.
+    # Claude Code applies approvals from settings.local.json only once the folder is trusted.
+    enabled = settings.setdefault("enabledMcpjsonServers", [])
+    if CHAT_SERVER_NAME not in enabled:
+        enabled.append(CHAT_SERVER_NAME)
+        changed = True
+    if changed:
         plan[settings_path] = settings
     return plan
 
@@ -1282,6 +1298,8 @@ def cmd_chat_setup(args: argparse.Namespace) -> int:
         if not args.dry_run:
             write_json_files(plan)
 
+    if not args.dry_run:
+        write_user_config()
     if args.dry_run or args.no_check:
         print(prefix + "건너뜀: 채널 서버 미리 실행(--check)")
     else:
@@ -1327,8 +1345,156 @@ def cmd_blender_install_chat(args: argparse.Namespace) -> int:
     return 1
 
 
+def claude_hand_home(env=os.environ) -> Path:
+    return Path(env.get("CLAUDE_HAND_HOME") or Path.home() / ".claude-hand")
+
+
 def chat_home(env=os.environ) -> Path:
-    return Path(env.get("CLAUDE_HAND_HOME") or Path.home() / ".claude-hand") / "chat"
+    return claude_hand_home(env) / "chat"
+
+
+def write_user_config(home: Path | None = None, root: Path = REPO_ROOT, start_script: Path = START_SCRIPT) -> Path:
+    """~/.claude-hand/config.json: where this claude-hand lives, so the Unity and Blender panels can
+    start the supervisor with one button."""
+    home = home or claude_hand_home()
+    path = home / "config.json"
+    data = read_json_file(path)
+    wanted = {**data, "repo": root.as_posix(), "start_script": start_script.as_posix()}
+    if wanted != data:
+        write_json_files({path: wanted})
+    return path
+
+
+def supervisor_running(home: Path | None = None, fetch=None) -> bool:
+    server, _ = read_chat_files((home or claude_hand_home()) / "chat")
+    if not server:
+        return False
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{server['port']}/v1/status",
+                                     headers={"X-Claude-Hand-Token": server.get("token", "")})
+        state = (fetch or (lambda r: json.loads(urllib.request.urlopen(r, timeout=2).read().decode("utf-8"))))(req)
+    except (OSError, ValueError, KeyError):
+        return False
+    return bool(state.get("ok"))
+
+
+def refresh_agents(agents_dir: Path | None = None, runner: str = "uv run -q --no-project",
+                   blender_ports: str = DEFAULT_BLENDER_PORTS) -> SyncResult:
+    """Make or refresh a subagent for every Unity/Blender window open right now; keep the others.
+    Used by preflight and by the chat channel when a panel's window has no subagent yet."""
+    agents_dir = agents_dir or Path.home() / ".claude" / "agents"
+    server = detect_server_config()
+    unity = gather_instances(server, [], include_dead=False)
+    blender = discover_blender(parse_ports(blender_ports))
+    if not unity and not blender:
+        return SyncResult()
+    return sync_agents(unity, agents_dir, server, runner, blender=blender,
+                       blender_server=detect_blender_config() if blender else None)
+
+
+BANNER = """\
+────────────────────────────────────────────────────────
+ Claude Hand 감독 세션
+   Unity   : Window > Claude Hand > Chat
+   Blender : 3D 뷰포트에서 N > Claude Hand 탭
+ 이 창은 닫지 말고 최소화해 두세요. 닫으면 채팅이 멈춥니다.
+────────────────────────────────────────────────────────"""
+
+FIRST_RUN_GUIDE = """\
+처음에는 Claude Code가 몇 가지를 확인합니다. 화살표 키로 고르고 Enter를 누르세요.
+  - 이 폴더(claude-hand)를 믿는지: 믿는다(Yes)를 고르세요.
+  - 개발용 채널(claude-hand-chat) 경고: 내용을 읽고 계속하는 쪽을 고르세요.
+  - (뜨면) MCP 서버 claude-hand-chat 사용: 사용하는 쪽을 고르세요.
+  - 로그인을 묻으면 화면 안내대로 로그인하세요."""
+
+
+def cmd_preflight(args: argparse.Namespace) -> int:
+    """What start-supervisor runs before Claude Code, so starting needs nothing else from the user."""
+    home = claude_hand_home()
+    write_user_config(home)
+    if supervisor_running(home):
+        print("Claude Hand가 이미 실행 중입니다. 작업 표시줄에서 'Claude Hand' 창을 찾아 그 창을 쓰세요.")
+        return 3
+    try:
+        plan = plan_chat_config(REPO_ROOT, args.runner)
+        if plan:
+            write_json_files(plan)
+            print("채팅 설정을 맞췄습니다.")
+    except SystemExit as exc:
+        print(f"채팅 설정을 고치지 못했습니다: {exc}")
+    # Claude Code watches ~/.claude/agents for new subagents, except the first file in a folder that did
+    # not exist when the session started; make sure the folder exists before Claude Code starts.
+    (Path.home() / ".claude" / "agents").mkdir(parents=True, exist_ok=True)
+    try:
+        result = refresh_agents(runner=args.runner, blender_ports=args.blender_ports)
+        if result.written:
+            print("열려 있는 창의 하위 세션을 준비했습니다: " + ", ".join(p.stem for p in result.written))
+    except SystemExit as exc:
+        print(f"하위 세션을 만들지 못했습니다: {exc}")
+    skill = Path.home() / ".claude" / "skills" / "claude-hand" / "SKILL.md"
+    if not skill.exists() or skill.read_text(encoding="utf-8") != SKILL_SOURCE.read_text(encoding="utf-8"):
+        install_skill(Path.home() / ".claude" / "skills")
+    print(BANNER)
+    marker = home / "first-run-done"
+    if not marker.exists():
+        print(FIRST_RUN_GUIDE)
+        marker.write_text(time.strftime("%Y-%m-%d %H:%M:%S"), encoding="utf-8")
+    return 0
+
+
+SHORTCUT_PS = r"""
+$ws = New-Object -ComObject WScript.Shell
+$folders = @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))
+if ($env:CH_STARTUP -eq '1') { $folders += [Environment]::GetFolderPath('Startup') }
+foreach ($folder in $folders) {
+  $path = Join-Path $folder ($env:CH_NAME + '.lnk')
+  if ($env:CH_REMOVE -eq '1') { if (Test-Path $path) { Remove-Item $path; Write-Output "removed $path" }; continue }
+  $lnk = $ws.CreateShortcut($path)
+  $lnk.TargetPath = $env:CH_TARGET
+  $lnk.WorkingDirectory = $env:CH_DIR
+  $lnk.Description = 'Unity, Blender chat panels: start the Claude Hand supervisor'
+  $lnk.Save()
+  Write-Output "created $path"
+}
+"""
+
+
+def shortcut_files(platform=sys.platform, home: Path | None = None) -> dict[Path, str]:
+    """Non-Windows launchers: {path: contents}. Windows uses .lnk files made through PowerShell."""
+    home = home or Path.home()
+    script = START_SCRIPT.as_posix()
+    if platform == "darwin":
+        return {home / "Desktop" / f"{SHORTCUT_NAME}.command": f"#!/bin/sh\nexec '{script}'\n"}
+    return {home / "Desktop" / "claude-hand.desktop": (
+        "[Desktop Entry]\nType=Application\nName=Claude Hand\n"
+        f"Exec={script}\nTerminal=true\nComment=Start the Claude Hand supervisor\n")}
+
+
+def cmd_shortcut(args: argparse.Namespace) -> int:
+    if sys.platform == "win32":
+        env = {**os.environ, "CH_NAME": SHORTCUT_NAME, "CH_TARGET": str(START_SCRIPT), "CH_DIR": str(REPO_ROOT),
+               "CH_STARTUP": "1" if args.startup else "0", "CH_REMOVE": "1" if args.remove else "0"}
+        if args.dry_run:
+            print(f"(dry run) 바탕화면과 시작 메뉴{'와 시작프로그램' if args.startup else ''}에 '{SHORTCUT_NAME}' "
+                  f"바로가기 {'삭제' if args.remove else '만들기'} → {START_SCRIPT}")
+            return 0
+        proc = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", SHORTCUT_PS], env=env,
+                              capture_output=True, text=True, errors="replace", timeout=60)
+        print((proc.stdout or proc.stderr).strip())
+        return proc.returncode
+    for path, text in shortcut_files().items():
+        if args.dry_run:
+            print(f"(dry run) {'삭제' if args.remove else '만들기'}: {path}")
+            continue
+        if args.remove:
+            path.unlink(missing_ok=True)
+            print(f"removed {path}")
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        path.chmod(0o755)
+        print(f"created {path}")
+    return 0
 
 
 def read_chat_files(home: Path | None = None) -> tuple[dict | None, dict | None]:
@@ -1719,6 +1885,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_bic.add_argument("--blender-exe", help="path to blender.exe used to enable the add-on")
     p_bic.add_argument("--dry-run", action="store_true")
     p_bic.set_defaults(func=cmd_blender_install_chat)
+
+    p_pre = sub.add_parser("preflight", help="run by start-supervisor before Claude Code starts")
+    p_pre.add_argument("--runner", default="uv run -q --no-project")
+    p_pre.add_argument("--blender-ports", default=DEFAULT_BLENDER_PORTS)
+    p_pre.set_defaults(func=cmd_preflight)
+
+    p_sc = sub.add_parser("shortcut", help='put a "Claude Hand" icon on the Desktop and in the Start menu')
+    p_sc.add_argument("--startup", action="store_true", help="also start Claude Hand when Windows starts")
+    p_sc.add_argument("--remove", action="store_true")
+    p_sc.add_argument("--dry-run", action="store_true")
+    p_sc.set_defaults(func=cmd_shortcut)
 
     p_cst = sub.add_parser("chat-status", help="explain why a chat panel does or does not reach the supervisor")
     p_cst.set_defaults(func=cmd_chat_status)

@@ -21,6 +21,8 @@ bl_info = {
 import json
 import os
 import queue
+import subprocess
+import sys
 import textwrap
 import threading
 import time
@@ -39,6 +41,8 @@ WRAP_WIDTH = 38
 _entries = []            # main thread only
 _status = ["연결 중..."]  # main thread only
 _last_user = [0.0]       # main thread only
+_server_missing = [False]  # main thread only
+_start_requested = [0.0]   # main thread only
 _inbox = queue.Queue()   # (event, payload) from worker threads
 _identity = {"window": None, "pin": None}  # written on the main thread, read by the poller
 _identity_lock = threading.Lock()
@@ -99,6 +103,7 @@ def poll_loop():
         with _identity_lock:
             window, pin = _identity["window"], _identity["pin"]
         if not server or not window:
+            _inbox.put(("missing", True))
             _inbox.put(("status", describe_missing_server()))
             _stop.wait(3)
             continue
@@ -117,6 +122,7 @@ def poll_loop():
                 _inbox.put(("status", f"담당: {agent}" if agent else
                             "이 Blender 창의 하위 세션이 없습니다. uv run tools/claude_hand.py sync 를 실행하세요."))
             query = urllib.parse.urlencode({"chat_id": chat_id, "after": after, "wait": POLL_WAIT_SECONDS})
+            _inbox.put(("missing", False))
             updates = call(server, "GET", f"/v1/updates?{query}", timeout=POLL_WAIT_SECONDS + 15)
             if updates.get("ok") is False:
                 server_pid = None
@@ -126,6 +132,7 @@ def poll_loop():
                 _inbox.put(("items", updates["items"]))
             after = updates.get("next", after)
         except (OSError, ValueError) as exc:
+            _inbox.put(("missing", True))
             _inbox.put(("status", f"감독 세션에 연결할 수 없습니다: {exc}"))
             _stop.wait(3)
 
@@ -179,9 +186,45 @@ def send_text(text, include_context=True):
     return True
 
 
+def find_start_script():
+    """start-supervisor next to the claude-hand checkout, from ~/.claude-hand/config.json (written by setup)."""
+    try:
+        config = json.loads((server_file().parent.parent / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    script = config.get("start_script")
+    return script if script and Path(script).exists() else None
+
+
+def start_supervisor():
+    script = find_start_script()
+    if not script:
+        _status[0] = "start-supervisor를 찾지 못했습니다. 바탕화면의 Claude Hand 아이콘을 누르세요."
+        return False
+    if sys.platform == "win32":
+        cmd = ["cmd", "/c", "start", "Claude Hand", script]
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    elif sys.platform == "darwin":
+        cmd, flags = ["open", "-a", "Terminal", script], 0
+    else:
+        cmd, flags = ["x-terminal-emulator", "-e", script], 0
+    try:
+        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
+    except OSError as exc:
+        _status[0] = f"Claude Hand를 시작하지 못했습니다: {exc}"
+        return False
+    _start_requested[0] = time.time()
+    _status[0] = "Claude Hand 창을 여는 중입니다..."
+    return True
+
+
 def apply_event(event, payload):
     if event == "status":
         _status[0] = payload
+    elif event == "missing":
+        _server_missing[0] = bool(payload)
+        if not payload:
+            _start_requested[0] = 0.0
     elif event == "reset":
         _entries.clear()
     elif event == "sent":
@@ -249,6 +292,16 @@ class CLAUDEHAND_OT_send(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CLAUDEHAND_OT_start(bpy.types.Operator):
+    bl_idname = "claude_hand.start_supervisor"
+    bl_label = "Claude Hand 시작"
+    bl_description = "Open the Claude Hand supervisor window (start-supervisor)"
+
+    def execute(self, context):
+        start_supervisor()
+        return {"FINISHED"}
+
+
 class CLAUDEHAND_OT_permission(bpy.types.Operator):
     bl_idname = "claude_hand.chat_permission"
     bl_label = "권한 응답"
@@ -270,7 +323,18 @@ class CLAUDEHAND_PT_chat(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text=_status[0])
+        for line in wrap(_status[0]):
+            layout.label(text=line)
+        if _server_missing[0]:
+            starting = _start_requested[0] and time.time() - _start_requested[0] < 90
+            row = layout.row()
+            row.scale_y = 1.6
+            row.enabled = not starting
+            row.operator(CLAUDEHAND_OT_start.bl_idname, text="여는 중... 새 창을 확인하세요" if starting else "Claude Hand 시작", icon="PLAY")
+            hint = ("새 창이 뜹니다. 처음 한 번은 그 창에서 확인 질문에 답해 주세요(화살표 키, Enter). 그 창은 최소화해 두세요."
+                    if starting else "Claude Hand(감독 세션)가 꺼져 있습니다. 버튼을 누르면 켜집니다.")
+            for line in wrap(hint):
+                layout.label(text=line)
         box = layout.box()
         if not _entries:
             box.label(text="아직 대화가 없습니다.")
@@ -310,7 +374,7 @@ def wrap(text):
     return lines
 
 
-CLASSES = (CLAUDEHAND_OT_send, CLAUDEHAND_OT_permission, CLAUDEHAND_PT_chat)
+CLASSES = (CLAUDEHAND_OT_send, CLAUDEHAND_OT_start, CLAUDEHAND_OT_permission, CLAUDEHAND_PT_chat)
 
 
 def register():

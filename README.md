@@ -20,6 +20,16 @@ Unity·Blender 안의 채팅창 ──(claude-hand-chat 채널)──┐
 > 상태: **0.1 시제품.** C# 코드는 Unity API 스텁으로 컴파일만 확인했고, 실제 Unity·Blender에서는 아직 실행하지 않았습니다.
 > [docs/TEST-PLAN.md](docs/TEST-PLAN.md)의 순서대로 확인해 주세요.
 
+## 매일 쓰는 법
+
+1. 바탕화면의 **Claude Hand** 아이콘을 더블클릭합니다. 또는 Unity·Blender 채팅창의 **[Claude Hand 시작]** 버튼을 누릅니다.
+2. 검은 창이 하나 뜹니다. **닫지 말고 최소화**해 두세요. 처음 한 번은 그 창에서 확인 질문에 답합니다(화살표 키로 고르고 Enter).
+3. Unity(**Window > Claude Hand > Chat**)나 Blender(3D 뷰포트 `N` > **Claude Hand**)에서 채팅합니다.
+
+이게 전부입니다.
+- 새 프로젝트나 파일을 열어도 따로 할 일이 없습니다. 처음 메시지를 보내면 그 창 담당이 자동으로 만들어집니다.
+- 아이콘을 두 번 눌러도 "이미 실행 중"이라고 알려 줄 뿐 둘이 열리지 않습니다.
+
 ## 처음 설치: Claude에게 맡기기
 
 필요한 건 **Claude Code**와 이 저장소뿐입니다.
@@ -77,7 +87,7 @@ uv run tools/claude_hand.py chat-setup            # 채널 등록 + 답장 도�
 uv run tools/claude_hand.py blender-install-chat  # Blender 채팅 애드온 설치·활성화
 uv run tools/claude_hand.py sync --allow-tools    # (선택) 하위 세션의 Unity·Blender 도구를 묻지 않고 실행
 ```
-그다음 감독 세션을 **`start-supervisor.cmd`**로 엽니다.
+그다음 감독 세션을 엽니다. 바탕화면 아이콘, 채팅창의 **[Claude Hand 시작]** 버튼, `start-supervisor.cmd` 중 어느 것이든 됩니다. 아이콘은 `uv run tools/claude_hand.py shortcut`으로 만들고, 컴퓨터를 켤 때 자동으로 켜려면 `--startup`을 붙입니다.
 
 `chat-setup`이 하는 일:
 - 이 폴더에 `.mcp.json`(채널 등록)과 `.claude/settings.local.json`(답장 도구 `mcp__claude-hand-chat__reply` 자동 허용)을 만듭니다. 기존 내용은 유지하고, 둘 다 git에 올라가지 않습니다.
@@ -123,7 +133,7 @@ uv run tools/claude_hand.py update     # 하위 세션·감독 스킬·채팅 �
 | `tools/chat_channel.py` | 채팅 채널 서버입니다. Claude Code가 실행하는 MCP 서버이고, Unity·Blender 채팅창과는 로컬 HTTP로 통신합니다. |
 | `unity/com.claudehand.tools/` | Unity 패키지입니다. MCP for Unity에 `ch_*` 도구 6개와 채팅창(Window > Claude Hand > Chat)을 추가합니다. |
 | `blender/claude_hand_chat.py` | Blender 채팅 패널 애드온입니다. |
-| `start-supervisor.cmd` / `.sh` | 채널을 켜고 감독 세션을 엽니다. |
+| `start-supervisor.cmd` / `.sh` | 감독 세션을 엽니다. 바탕화면 아이콘과 채팅창 버튼이 이 파일을 실행합니다. 열 때마다 `preflight`가 하위 세션과 설정을 맞추고, 이미 켜져 있으면 알려 줍니다. |
 | `docs/` | [설계](docs/DESIGN.md), [PC 검증 순서](docs/TEST-PLAN.md) |
 
 ### 추가되는 Unity 도구

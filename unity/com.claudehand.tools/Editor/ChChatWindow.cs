@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -35,6 +36,8 @@ namespace ClaudeHand.Editor
         private int _serverPid;
         private double _lastUserMessageTime = -1;
         private bool _sending;
+        private bool _serverMissing;
+        private double _startRequestedAt = -1;
         private CancellationTokenSource _polling;
 
         private sealed class Entry
@@ -152,6 +155,7 @@ namespace ClaudeHand.Editor
                 var server = ReadServer();
                 if (server == null)
                 {
+                    SetServerMissing(true);
                     SetStatus(DescribeMissingServer());
                     if (!await Delay(3000, token)) return;
                     continue;
@@ -176,6 +180,7 @@ namespace ClaudeHand.Editor
                         _agent = resolved.Value<string>("agent");
                     }
 
+                    SetServerMissing(false);
                     SetStatus(_agent != null
                         ? $"담당: {_agent}"
                         : "이 프로젝트의 하위 세션이 없습니다. uv run tools/claude_hand.py sync 를 실행하세요.");
@@ -196,6 +201,7 @@ namespace ClaudeHand.Editor
                 }
                 catch (Exception ex)
                 {
+                    SetServerMissing(true);
                     SetStatus("감독 세션에 연결할 수 없습니다: " + ex.Message);
                     if (!await Delay(3000, token)) return;
                 }
@@ -309,6 +315,70 @@ namespace ClaudeHand.Editor
             }
         }
 
+        private void SetServerMissing(bool missing)
+        {
+            if (_serverMissing == missing) return;
+            _serverMissing = missing;
+            if (!missing) _startRequestedAt = -1;
+            Repaint();
+        }
+
+        /// <summary>start-supervisor next to this claude-hand: from ~/.claude-hand/config.json (written by setup),
+        /// else from where this package is installed (claude-hand/unity/com.claudehand.tools).</summary>
+        private static string FindStartScript()
+        {
+            try
+            {
+                var config = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(ServerFile)) ?? string.Empty, "config.json");
+                if (File.Exists(config))
+                {
+                    var script = JObject.Parse(File.ReadAllText(config)).Value<string>("start_script");
+                    if (!string.IsNullOrEmpty(script) && File.Exists(script)) return script;
+                }
+            }
+            catch (Exception)
+            {
+                // fall back to the package location
+            }
+            var repo = Path.GetFullPath(Path.Combine(Path.GetFullPath("Packages/com.claudehand.tools"), "..", ".."));
+            var name = Application.platform == RuntimePlatform.WindowsEditor ? "start-supervisor.cmd" : "start-supervisor.sh";
+            var candidate = Path.Combine(repo, name);
+            return File.Exists(candidate) ? candidate : null;
+        }
+
+        private void StartSupervisor()
+        {
+            var script = FindStartScript();
+            if (script == null)
+            {
+                SetStatus("start-supervisor를 찾지 못했습니다. 바탕화면의 Claude Hand 아이콘을 누르거나 claude-hand 폴더의 start-supervisor.cmd를 실행하세요.");
+                return;
+            }
+            try
+            {
+                ProcessStartInfo info;
+                if (Application.platform == RuntimePlatform.WindowsEditor)
+                {
+                    info = new ProcessStartInfo("cmd.exe", $"/c start \"Claude Hand\" \"{script}\"") { UseShellExecute = false, CreateNoWindow = true };
+                }
+                else if (Application.platform == RuntimePlatform.OSXEditor)
+                {
+                    info = new ProcessStartInfo("open", $"-a Terminal \"{script}\"") { UseShellExecute = false };
+                }
+                else
+                {
+                    info = new ProcessStartInfo("x-terminal-emulator", $"-e \"{script}\"") { UseShellExecute = false };
+                }
+                Process.Start(info);
+                _startRequestedAt = EditorApplication.timeSinceStartup;
+                SetStatus("Claude Hand 창을 여는 중입니다...");
+            }
+            catch (Exception ex)
+            {
+                SetStatus("Claude Hand를 시작하지 못했습니다: " + ex.Message);
+            }
+        }
+
         private void SetStatus(string status)
         {
             if (_status == status) return;
@@ -320,7 +390,20 @@ namespace ClaudeHand.Editor
 
         private void OnGUI()
         {
-            EditorGUILayout.LabelField(_status, EditorStyles.miniLabel);
+            EditorGUILayout.LabelField(_status, EditorStyles.wordWrappedMiniLabel);
+            if (_serverMissing)
+            {
+                bool starting = _startRequestedAt > 0 && EditorApplication.timeSinceStartup - _startRequestedAt < 90;
+                GUI.enabled = !starting;
+                if (GUILayout.Button(starting ? "여는 중... (새로 뜬 Claude Hand 창을 확인하세요)" : "▶  Claude Hand 시작", GUILayout.Height(36)))
+                {
+                    StartSupervisor();
+                }
+                GUI.enabled = true;
+                EditorGUILayout.HelpBox(starting
+                    ? "새 창이 뜹니다. 처음 한 번은 그 창에서 확인 질문에 답해 주세요(화살표 키로 고르고 Enter). 그 창은 닫지 말고 최소화해 두세요."
+                    : "Claude Hand(감독 세션)가 꺼져 있습니다. 버튼을 누르면 켜집니다.", MessageType.Info);
+            }
 
             _scroll = GUILayout.BeginScrollView(_scroll);
             foreach (var entry in _entries)

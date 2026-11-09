@@ -111,6 +111,27 @@ class HubTests(unittest.TestCase):
                                    "params": {"request_id": "abcde", "behavior": "allow"}})
         self.assertEqual(self.hub.updates("blender-props", 0, 0)[-1]["kind"], "permission_resolved")
 
+    def test_window_without_subagent_gets_one_automatically(self):
+        calls = []
+        def fake_sync(agents_dir):
+            calls.append(agents_dir)
+            files = ch.build_agent_files([ch.Instance(name="NewGame", hash="bbbb2222")], ch.ServerConfig(transport="stdio"), [], None, "uv run")
+            ch.write_agent_files(files, agents_dir)
+        self.hub.auto_sync = fake_sync
+        self.assertEqual(self.hub.resolve("unity", "NewGame"), ("unity-newgame", "unity-newgame"))
+        self.assertEqual(len(calls), 1)
+        self.hub.resolve("unity", "Ghost")  # no such window anywhere: tries once...
+        self.hub.resolve("unity", "Ghost")  # ...then waits before trying again
+        self.assertEqual(len(calls), 2)
+        self.hub.resolve("unity", "MyGame")  # already has a subagent: no refresh
+        self.assertEqual(len(calls), 2)
+
+    def test_failed_auto_sync_does_not_break_resolve(self):
+        def broken(agents_dir):
+            raise SystemExit("hand-written file in the way")
+        self.hub.auto_sync = broken
+        self.assertEqual(self.hub.resolve("unity", "Other"), ("unity-other", None))
+
     def test_late_window_sees_open_permission(self):
         self.hub.permission_request({"request_id": "fghij", "tool_name": "Write", "description": "", "input_preview": ""})
         self.hub.post_user_message("unity", "MyGame", "hi")

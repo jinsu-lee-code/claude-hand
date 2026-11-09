@@ -4,6 +4,7 @@ Needs Blender's Python module (`pip install bpy`); skipped when it is not import
 """
 
 import importlib.util
+import json
 import os
 import secrets
 import sys
@@ -84,6 +85,25 @@ class BlenderChatAddonTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: self.emitted[-1]["method"] == "notifications/claude/channel/permission", addon))
         self.assertEqual(self.emitted[-1]["params"], {"request_id": "abcde", "behavior": "allow"})
         self.assertTrue(wait_for(lambda: any(e.get("behavior") == "allow" for e in addon._entries), addon))
+
+    def test_start_button_opens_the_supervisor(self):
+        addon = self.addon
+        script = Path(os.environ["CLAUDE_HAND_HOME"]) / "start-supervisor.cmd"
+        script.write_text("", encoding="utf-8")
+        (Path(os.environ["CLAUDE_HAND_HOME"]) / "config.json").write_text(json.dumps({"start_script": str(script)}), encoding="utf-8")
+        launched = []
+        import unittest.mock
+        with unittest.mock.patch.object(addon.subprocess, "Popen", lambda cmd, **kw: launched.append(cmd)):
+            bpy.ops.claude_hand.start_supervisor()
+        self.assertEqual(launched[0][-1], str(script))
+        self.assertIn("여는 중", addon._status[0])
+
+    def test_missing_supervisor_shows_the_button(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        (Path(os.environ["CLAUDE_HAND_HOME"]) / "chat" / "server.json").unlink()
+        self.assertTrue(wait_for(lambda: self.addon._server_missing[0], self.addon))
+        self.httpd = cc.start_http(self.hub, "x", port=18791)  # tearDown shuts this one down
 
     def test_panel_draw_does_not_fail(self):
         self.assertTrue(hasattr(bpy.types, "CLAUDEHAND_PT_chat"))

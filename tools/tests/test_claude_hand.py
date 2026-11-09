@@ -3,6 +3,7 @@
 import ast
 import io
 import json
+import os
 import re
 import socket
 import sys
@@ -497,7 +498,7 @@ class SetupHelperTests(unittest.TestCase):
                  unittest.mock.patch.object(ch, "chat_server_registered", lambda **kw: False):
                 checks = ch.doctor_checks([project], [9876], version=lambda *cmd: versions[cmd[0]])
         by_item = {c.item: c for c in checks}
-        self.assertTrue(by_item["Claude Code CLI"].ok)
+        self.assertTrue(by_item["Claude Code CLI (claude 명령)"].ok)
         self.assertFalse(by_item["git (Unity가 MCP for Unity를 받을 때 필요)"].ok)
         self.assertIn("winget install", by_item["git (Unity가 MCP for Unity를 받을 때 필요)"].fix)
         self.assertFalse(by_item["Node.js 18 이상 (agent-desktop용)"].ok)
@@ -546,6 +547,7 @@ class ChatSetupTests(unittest.TestCase):
             self.assertTrue(entry["args"][-1].endswith("/tools/chat_channel.py") and Path(entry["args"][-1]).is_absolute())
             settings = json.loads((root / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
             self.assertEqual(settings["permissions"]["allow"], ["Bash(git status)", ch.CHAT_REPLY_RULE])
+            self.assertEqual(settings["enabledMcpjsonServers"], [ch.CHAT_SERVER_NAME])
             self.assertEqual(settings["model"], "keep-me")
             self.assertEqual(ch.plan_chat_config(root, "uv run -q --no-project"), {})  # second run changes nothing
 
@@ -721,6 +723,99 @@ class UpdateAndStatusTests(unittest.TestCase):
                 self.assertEqual(ch.stale_checks(agents, skills), [])
             self.assertFalse((skills / "claude-hand-unity").exists())
             self.assertIn("## 작업 순서", agent_file.read_text(encoding="utf-8"))
+
+
+
+class EverydayStartTests(unittest.TestCase):
+    def test_start_scripts(self):
+        cmd = (ch.REPO_ROOT / "start-supervisor.cmd").read_bytes()
+        self.assertFalse(cmd.startswith(b"\xef\xbb\xbf"), "a BOM breaks the first line of a batch file")
+        text = cmd.decode("utf-8")
+        self.assertIn("\r\n", text)
+        self.assertLess(text.index("chcp 65001"), text.index("echo [Claude Hand]"))  # Korean messages need the UTF-8 code page
+        self.assertLess(text.index("preflight"), text.index("claude --dangerously"))
+        inside = False
+        for line in text.splitlines():
+            t = line.strip()
+            if t.startswith("if ") and t.endswith("("):
+                inside = True
+            elif t == ")":
+                inside = False
+            elif inside and t.startswith("echo"):
+                self.assertNotRegex(t, r"[()]", "a ) inside an if-block ends the block early")
+        sh = (ch.REPO_ROOT / "start-supervisor.sh").read_text(encoding="utf-8")
+        self.assertLess(sh.index("preflight"), sh.index("claude --dangerously"))
+
+    def test_user_config_records_the_start_script(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / "config.json").write_text(json.dumps({"keep": 1}), encoding="utf-8")
+            ch.write_user_config(home, root=Path("/repo"), start_script=Path("/repo/start-supervisor.cmd"))
+            config = json.loads((home / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(config, {"keep": 1, "repo": "/repo", "start_script": "/repo/start-supervisor.cmd"})
+
+    def test_supervisor_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            self.assertFalse(ch.supervisor_running(home))
+            (home / "chat").mkdir()
+            (home / "chat" / "server.json").write_text(json.dumps({"port": 1, "token": "t"}), encoding="utf-8")
+            self.assertTrue(ch.supervisor_running(home, fetch=lambda req: {"ok": True}))
+            def down(req):
+                raise OSError("refused")
+            self.assertFalse(ch.supervisor_running(home, fetch=down))
+
+    def run_preflight(self, tmp, running=False):
+        home = Path(tmp) / "home"
+        out = io.StringIO()
+        refreshed = []
+        with unittest.mock.patch.dict("os.environ", {"CLAUDE_HAND_HOME": str(home)}), \
+             unittest.mock.patch.object(ch.Path, "home", lambda: Path(tmp)), \
+             unittest.mock.patch.object(ch, "supervisor_running", lambda home=None, fetch=None: running), \
+             unittest.mock.patch.object(ch, "plan_chat_config", lambda root=None, runner=None: {}), \
+             unittest.mock.patch.object(ch, "refresh_agents", lambda **kw: refreshed.append(kw) or ch.SyncResult()), \
+             unittest.mock.patch("sys.stdout", out):
+            code = ch.main(["preflight"])
+        return code, out.getvalue(), refreshed, home
+
+    def test_preflight_first_and_later_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, text, refreshed, home = self.run_preflight(tmp)
+            self.assertEqual(code, 0)
+            self.assertIn("닫지 말고 최소화", text)
+            self.assertIn("처음에는", text)
+            self.assertEqual(len(refreshed), 1)
+            self.assertTrue((Path(tmp) / ".claude" / "agents").is_dir())  # exists before Claude Code starts
+            self.assertTrue((Path(tmp) / ".claude" / "skills" / "claude-hand" / "SKILL.md").exists())
+            self.assertTrue((home / "config.json").exists())
+            _, again, _, _ = self.run_preflight(tmp)
+            self.assertNotIn("처음에는", again)
+
+    def test_preflight_stops_a_second_supervisor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, text, refreshed, _ = self.run_preflight(tmp, running=True)
+        self.assertEqual(code, 3)
+        self.assertIn("이미 실행 중", text)
+        self.assertEqual(refreshed, [])
+
+    def test_shortcut_files(self):
+        home = Path("/home/me")
+        mac = ch.shortcut_files("darwin", home)
+        linux = ch.shortcut_files("linux", home)
+        self.assertEqual(list(mac), [home / "Desktop" / "Claude Hand.command"])
+        self.assertIn(ch.START_SCRIPT.as_posix(), next(iter(mac.values())))
+        self.assertIn("Terminal=true", next(iter(linux.values())))
+
+    @unittest.skipIf(sys.platform == "win32", "Windows shortcuts are .lnk files made by PowerShell")
+    def test_shortcut_command_creates_and_removes(self):
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.object(ch.Path, "home", lambda: Path(tmp)), \
+                unittest.mock.patch("sys.stdout", io.StringIO()):
+            ch.main(["shortcut"])
+            created = list((Path(tmp) / "Desktop").iterdir())
+            self.assertEqual(len(created), 1)
+            self.assertTrue(os.access(created[0], os.X_OK))
+            ch.main(["shortcut", "--remove"])
+            self.assertEqual(list((Path(tmp) / "Desktop").iterdir()), [])
 
 
 if __name__ == "__main__":
