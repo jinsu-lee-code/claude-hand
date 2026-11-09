@@ -493,7 +493,8 @@ class SetupHelperTests(unittest.TestCase):
                  unittest.mock.patch.object(ch.Path, "home", lambda: home), \
                  unittest.mock.patch.object(ch, "candidate_config_files", lambda cwd=None: []), \
                  unittest.mock.patch.object(ch, "discover_blender", lambda ports, request=None: []), \
-                 unittest.mock.patch.object(ch, "find_blender_executables", lambda **kw: []):
+                 unittest.mock.patch.object(ch, "find_blender_executables", lambda **kw: []), \
+                 unittest.mock.patch.object(ch, "chat_server_registered", lambda **kw: False):
                 checks = ch.doctor_checks([project], [9876], version=lambda *cmd: versions[cmd[0]])
         by_item = {c.item: c for c in checks}
         self.assertTrue(by_item["Claude Code CLI"].ok)
@@ -503,9 +504,58 @@ class SetupHelperTests(unittest.TestCase):
         self.assertEqual(by_item["agent-desktop CLI"].fix, "npm install -g agent-desktop")
         self.assertIn("mcp-for-blender setup", by_item["MCP for Blender 애드온"].fix)
         self.assertIn("claude mcp add", by_item["Claude 설정에 MCP for Unity 등록"].fix)
+        self.assertIn("chat-setup", by_item["채팅 채널 등록 (claude-hand 폴더)"].fix)
         package = by_item["프로젝트 MyGame: 패키지"]
         self.assertFalse(package.ok)
         self.assertIn("unity-install", package.fix)
+
+
+
+class ChatSetupTests(unittest.TestCase):
+    def test_channel_is_registered_for_this_folder_only(self):
+        cmd = ch.chat_add_command("uv run -q --no-project")
+        self.assertEqual(cmd[:7], ["claude", "mcp", "add", "--scope", "local", ch.CHAT_SERVER_NAME, "--"])
+        self.assertEqual(cmd[7:], ["uv", "run", "-q", "--no-project", str(ch.CHAT_CHANNEL_SCRIPT)])
+        self.assertTrue(ch.CHAT_CHANNEL_SCRIPT.exists() and ch.CHAT_ADDON_SOURCE.exists())
+        self.assertIn(f"server:{ch.CHAT_SERVER_NAME}", ch.SUPERVISOR_COMMAND)
+
+    def test_supervisor_scripts_use_the_same_command(self):
+        for name in ("start-supervisor.cmd", "start-supervisor.sh"):
+            self.assertIn(ch.SUPERVISOR_COMMAND, (ch.REPO_ROOT / name).read_text(encoding="utf-8"))
+
+    def test_registration_check(self):
+        class Done:
+            def __init__(self, code):
+                self.returncode = code
+        self.assertTrue(ch.chat_server_registered(run=lambda *a, **k: Done(0), which=lambda _: "claude"))
+        self.assertFalse(ch.chat_server_registered(run=lambda *a, **k: Done(1), which=lambda _: "claude"))
+        self.assertIsNone(ch.chat_server_registered(which=lambda _: None))
+
+    def test_chat_addon_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "Blender"
+            for version in ("4.2", "4.10", "3.6"):
+                (base / version / "scripts" / "addons").mkdir(parents=True)
+            self.assertEqual(ch.blender_chat_targets(base), [base / "4.10" / "scripts" / "addons"])  # newest, numerically
+            mcp = base / "4.2" / "scripts" / "addons" / ch.BLENDER_ADDON_FILE
+            mcp.write_text("", encoding="utf-8")
+            self.assertEqual(ch.blender_chat_targets(base), [mcp.parent])  # next to MCP for Blender
+            installed = mcp.parent / (ch.CHAT_ADDON_MODULE + ".py")
+            installed.write_text("", encoding="utf-8")
+            self.assertEqual(ch.find_chat_addon_installs(base), [installed])
+
+    def test_install_chat_dry_run_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            with unittest.mock.patch("sys.stdout", out), \
+                 unittest.mock.patch.object(ch, "find_blender_executables", lambda **kw: [Path("blender")]):
+                ch.main(["blender-install-chat", "--addons-dir", tmp, "--dry-run"])
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+            self.assertIn("--background", out.getvalue())
+
+    def test_enable_script_is_valid_python(self):
+        ast.parse(ch.ENABLE_CHAT_ADDON)
+        self.assertIn(f"addon_utils.enable('{ch.CHAT_ADDON_MODULE}'", ch.ENABLE_CHAT_ADDON)
 
 
 if __name__ == "__main__":

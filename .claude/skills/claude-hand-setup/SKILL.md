@@ -26,13 +26,14 @@ uv run tools/claude_hand.py doctor
 ```
 Unity 프로젝트 경로를 알면 `--unity-project "<경로>"`를 붙인다. 모르면 사용자에게 물어본다. 여러 개면 여러 번 붙인다.
 
-결과를 짧은 표로 보여준다. 그다음 빠진 항목에 맞춰 아래 1~6단계 중 필요한 것만 계획으로 제시하고 고르게 한다. 각 선택지 설명에 무엇이 바뀌는지 적는다.
+결과를 짧은 표로 보여준다. 그다음 빠진 항목에 맞춰 아래 1~7단계 중 필요한 것만 계획으로 제시하고 고르게 한다. 각 선택지 설명에 무엇이 바뀌는지 적는다.
 - 1단계: winget으로 프로그램 설치
 - 2단계: npm 전역 설치
 - 3단계: Blender 애드온 폴더와 MCP 클라이언트 설정 파일
 - 4단계: Unity 프로젝트의 Packages/manifest.json, Claude Code MCP 설정
 - 5단계: Unity 에디터 환경설정
 - 6단계: `~/.claude/agents`, `~/.claude/skills`
+- 7단계: 이 폴더의 Claude Code MCP 설정(채팅 채널), Blender 애드온 폴더(채팅 애드온)
 
 ## 1. 기본 도구 (빠진 것만)
 
@@ -113,11 +114,32 @@ uv run tools/claude_hand.py sync
 ```
 사용자에게 `/agents`에서 `unity-*`, `blender-*`가 보이는지 봐 달라고 한다. `~/.claude/agents` 폴더가 이번에 처음 생겼으면 Claude Code를 한 번 다시 시작해야 한다.
 
-## 7. 마무리
+## 7. Unity·Blender 채팅창 (사용자가 원할 때)
+
+Unity와 Blender 안에서 바로 채팅하려면 채널을 등록하고 Blender 애드온을 설치한다. 계획을 보여줄 때 이 단계도 선택지로 넣는다.
+1. 채널 등록: 이 저장소 폴더에서만 쓰이게 `local` 범위로 등록한다.
+   ```
+   uv run tools/claude_hand.py chat-setup --dry-run
+   uv run tools/claude_hand.py chat-setup
+   ```
+2. Blender 채팅 애드온: 애드온 폴더에 복사하고, Blender를 화면 없이 실행해서 켠다. 열려 있는 Blender는 다시 열어야 탭이 보인다.
+   ```
+   uv run tools/claude_hand.py blender-install-chat --dry-run
+   uv run tools/claude_hand.py blender-install-chat
+   ```
+3. Unity 채팅창은 Claude Hand Tools 패키지에 들어 있어서 따로 설치할 것이 없다. 메뉴는 **Window > Claude Hand > Chat**이다.
+4. 사용자에게 알린다.
+   - 채팅을 쓰려면 감독 세션을 **`start-supervisor.cmd`**로 열어야 한다. 이 파일은 저장소 폴더에서 `--dangerously-load-development-channels server:claude-hand-chat`을 붙여 Claude Code를 연다. 처음 열 때 개발용 채널 경고와 MCP 서버 승인 창이 뜨니, 내용을 읽고 사용자가 직접 승인한다.
+   - Channels는 아직 리서치 프리뷰 기능이다.
+   - 감독 세션은 하나만 연다. 여러 개 열면 마지막에 연 세션이 채팅을 받는다.
+   - 지금 이 세션은 채널 없이 열렸을 수 있다. 그렇다면 세팅이 끝난 뒤 `start-supervisor.cmd`로 다시 열어야 채팅이 연결된다.
+
+## 8. 마무리
 
 `doctor`를 다시 실행해 남은 항목을 표로 보고한다. 끝으로 다음을 안내한다.
 - `docs/TEST-PLAN.md`의 확인 순서
 - 평소에는 감독 스킬(`claude-hand`)이 쓰인다는 점
+- 채팅을 설치했다면 `start-supervisor.cmd`로 감독 세션을 다시 열어야 한다는 점
 
 ## 화면 조작 규칙 (agent-desktop)
 

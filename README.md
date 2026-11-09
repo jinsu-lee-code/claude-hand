@@ -8,6 +8,8 @@ Unity 에디터와 Blender 창을 여러 개 동시에 띄워 두고, **창마�
 - 처음 세팅과 대화상자 처리: [agent-desktop (vercel-labs)](https://github.com/vercel-labs/agent-desktop)
 
 ```
+Unity·Blender 안의 채팅창 ──(claude-hand-chat 채널)──┐
+                                                    ▼
 감독 세션 (Claude Code, 사용자와 대화)
  ├─ 하위 세션 unity-mygame      ── 전용 MCP 서버 (MyGame에 고정)  ── Unity 창: MyGame
  ├─ 하위 세션 unity-props       ── 전용 MCP 서버 (Props에 고정)   ── Unity 창: Props
@@ -41,6 +43,7 @@ Unity 에디터와 Blender 창을 여러 개 동시에 띄워 두고, **창마�
    - Unity 프로젝트에 패키지 추가
    - Unity 절전 설정
    - 하위 세션 생성
+   - 원하면 Unity·Blender 채팅창 연결
    - 명령어로 안 되는 화면 조작만 agent-desktop이 직접 합니다.
 4. **확인:** 마지막에 다시 진단해서 남은 항목을 알려줍니다.
 
@@ -51,14 +54,46 @@ Claude가 대신 하지 않고 **사용자에게 직접 부탁하는 것**도 �
 - 저장 안 된 Blender·Unity 창 닫기
 - Claude Code 재시작 (새 MCP 서버를 등록한 뒤 한 번 필요합니다)
 
+## 창마다 채팅하기
+
+Unity와 Blender 안에서 바로 채팅할 수 있습니다. **그 창에서 친 메시지는 그 창 담당 하위 세션에게 가고, 답도 그 창으로 옵니다.**
+- Unity: **Window > Claude Hand > Chat**
+- Blender: 3D 뷰포트 `N` 패널 > **Claude Hand** 탭
+
+```
+Unity 채팅창 ─┐            ┌─ unity-mygame (이 창의 대화를 계속 이어감)
+Blender 패널 ─┼─ 채널 ─ 감독 ┼─ blender-props
+             │  (토큰)     └─ 다른 창이 필요하면 감독이 함께 조율
+             └── 답장·권한 요청(허용/거부)이 같은 창으로 돌아옴
+```
+
+- 메시지에는 지금 선택한 오브젝트와 씬 정보가 함께 붙습니다. 그래서 "이거 복제해줘"처럼 말해도 됩니다. 끄는 체크박스가 있습니다.
+- 다른 창이 필요한 일도 그 창에서 말하면 됩니다. 예를 들어 Unity 창에서 "Blender props.blend의 Rock 가져와"라고 하면, 감독이 Blender 담당과 Unity 담당을 함께 써서 처리하고 결과를 그 Unity 창에 알려줍니다.
+- Claude가 도구를 실행하려고 허락을 구하면 채팅창에 **허용/거부** 버튼이 뜹니다.
+
+준비(세팅 스킬이 대신 해 줍니다):
+```powershell
+uv run tools/claude_hand.py chat-setup            # 채널을 이 폴더의 Claude Code에 등록
+uv run tools/claude_hand.py blender-install-chat  # Blender 채팅 애드온 설치·활성화
+```
+그다음 감독 세션을 **`start-supervisor.cmd`**로 엽니다. 저장소 폴더에서 채널을 켜고 Claude Code를 시작하는 파일입니다.
+
+알아둘 점:
+- Claude Code의 **Channels는 아직 리서치 프리뷰**입니다. 직접 만든 채널이라 `--dangerously-load-development-channels`로 켜야 하고, 처음에 경고와 승인 창이 뜹니다.
+- 감독 세션(Claude Code 창)이 켜져 있어야 채팅이 됩니다. 감독 세션은 하나만 여세요. 여러 개 열면 마지막에 연 세션이 채팅을 받습니다.
+- 채팅창과 채널은 내 PC 안(127.0.0.1)에서만, 토큰을 아는 프로그램끼리만 통신합니다. 토큰은 `%USERPROFILE%\.claude-hand\chat\server.json`에 있습니다.
+
 ## 들어 있는 것
 
 | 위치 | 내용 |
 |---|---|
 | `.claude/skills/claude-hand-setup/` | 처음 세팅 스킬입니다. 이 폴더에서 Claude Code를 열면 바로 쓸 수 있습니다. |
 | `skills/orchestrator/` | 평소에 감독 세션이 따르는 규칙(스킬)입니다. `sync`가 `~/.claude/skills/claude-hand/`에 설치합니다. |
-| `tools/claude_hand.py` | 하위 세션 생성(`list`, `sync`), 안전장치(`guard`), 세팅 도우미(`doctor`, `unity-install`, `unity-open`, `blender-open`)가 들어 있습니다. |
-| `unity/com.claudehand.tools/` | Unity 패키지입니다. MCP for Unity에 `ch_*` 도구 6개를 추가합니다. |
+| `tools/claude_hand.py` | 하위 세션 생성(`list`, `sync`), 안전장치(`guard`), 세팅 도우미(`doctor`, `unity-install`, `unity-open`, `blender-open`, `chat-setup`, `blender-install-chat`)가 들어 있습니다. |
+| `tools/chat_channel.py` | 채팅 채널 서버입니다. Claude Code가 실행하는 MCP 서버이고, Unity·Blender 채팅창과는 로컬 HTTP로 통신합니다. |
+| `unity/com.claudehand.tools/` | Unity 패키지입니다. MCP for Unity에 `ch_*` 도구 6개와 채팅창(Window > Claude Hand > Chat)을 추가합니다. |
+| `blender/claude_hand_chat.py` | Blender 채팅 패널 애드온입니다. |
+| `start-supervisor.cmd` / `.sh` | 채널을 켜고 감독 세션을 엽니다. |
 | `docs/` | [설계](docs/DESIGN.md), [PC 검증 순서](docs/TEST-PLAN.md) |
 
 ### 추가되는 Unity 도구

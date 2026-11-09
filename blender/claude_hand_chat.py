@@ -1,0 +1,325 @@
+"""Claude Hand Chat: talk to this Blender window's claude-hand subagent from the 3D Viewport sidebar.
+
+Messages go to the claude-hand-chat channel (tools/chat_channel.py in the claude-hand repo), which
+the supervisor Claude Code session runs; the supervisor hands them to blender-<file> and answers here.
+Networking runs on a background thread; everything that touches bpy runs on the main thread
+through a bpy.app.timers callback.
+
+Install: `uv run tools/claude_hand.py blender-install-chat` (or Preferences > Add-ons > Install).
+"""
+
+bl_info = {
+    "name": "Claude Hand Chat",
+    "author": "claude-hand",
+    "version": (0, 1, 0),
+    "blender": (3, 0, 0),
+    "location": "View3D > Sidebar (N) > Claude Hand",
+    "description": "Chat with this Blender window's claude-hand subagent",
+    "category": "Interface",
+}
+
+import json
+import os
+import queue
+import textwrap
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+import bpy
+
+POLL_WAIT_SECONDS = 20
+NO_REPLY_HINT_SECONDS = 60
+VISIBLE_ENTRIES = 12
+WRAP_WIDTH = 38
+
+_entries = []            # main thread only
+_status = ["연결 중..."]  # main thread only
+_last_user = [0.0]       # main thread only
+_inbox = queue.Queue()   # (event, payload) from worker threads
+_identity = {"window": None, "pin": None}  # written on the main thread, read by the poller
+_identity_lock = threading.Lock()
+_stop = threading.Event()
+_poller = [None]
+
+
+# --------------------------------------------------------------------------- server access (any thread)
+
+
+def server_file() -> Path:
+    home = os.environ.get("CLAUDE_HAND_HOME") or str(Path.home() / ".claude-hand")
+    return Path(home) / "chat" / "server.json"
+
+
+def read_server():
+    try:
+        return json.loads(server_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def call(server, method, path, body=None, timeout=10):
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{server['port']}{path}", data=data, method=method,
+        headers={"X-Claude-Hand-Token": server.get("token", ""), "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:  # 401 / 409 still carry a JSON body
+        try:
+            return json.loads(exc.read().decode("utf-8") or "{}")
+        except ValueError:
+            return {"ok": False, "error": str(exc)}
+
+
+def poll_loop():
+    """Background thread: long-polls the channel for this window's replies and permission prompts."""
+    chat_id, agent, after, server_pid = None, None, 0, None
+    while not _stop.is_set():
+        server = read_server()
+        with _identity_lock:
+            window, pin = _identity["window"], _identity["pin"]
+        if not server or not window:
+            _inbox.put(("status", "감독 세션이 실행 중이 아닙니다. claude-hand 폴더의 start-supervisor.cmd로 Claude Code를 여세요."))
+            _stop.wait(3)
+            continue
+        if server.get("pid") != server_pid:  # a new supervisor session starts with an empty history
+            server_pid, chat_id, agent, after = server.get("pid"), None, None, 0
+            _inbox.put(("reset", None))
+        try:
+            if chat_id is None or agent is None:
+                query = urllib.parse.urlencode({"app": "blender", "window": window, "pin": pin})
+                resolved = call(server, "GET", f"/v1/resolve?{query}")
+                if resolved.get("ok") is False:
+                    server_pid = None
+                    _stop.wait(1)
+                    continue
+                chat_id, agent = resolved.get("chat_id"), resolved.get("agent")
+                _inbox.put(("status", f"담당: {agent}" if agent else
+                            "이 Blender 창의 하위 세션이 없습니다. uv run tools/claude_hand.py sync 를 실행하세요."))
+            query = urllib.parse.urlencode({"chat_id": chat_id, "after": after, "wait": POLL_WAIT_SECONDS})
+            updates = call(server, "GET", f"/v1/updates?{query}", timeout=POLL_WAIT_SECONDS + 15)
+            if updates.get("ok") is False:
+                server_pid = None
+                _stop.wait(1)
+                continue
+            if updates.get("items"):
+                _inbox.put(("items", updates["items"]))
+            after = updates.get("next", after)
+        except (OSError, ValueError) as exc:
+            _inbox.put(("status", f"감독 세션에 연결할 수 없습니다: {exc}"))
+            _stop.wait(3)
+
+
+def post_in_background(path, body, on_done_event):
+    def run():
+        server = read_server()
+        if not server:
+            _inbox.put(("status", "감독 세션이 실행 중이 아닙니다."))
+            return
+        try:
+            _inbox.put((on_done_event, call(server, "POST", path, body)))
+        except (OSError, ValueError) as exc:
+            _inbox.put(("status", f"보내지 못했습니다: {exc}"))
+    threading.Thread(target=run, daemon=True).start()
+
+
+# --------------------------------------------------------------------------- main thread
+
+
+def window_identity():
+    """Same naming as `claude_hand.py sync`: <.blend name or untitled-PORT>@<MCP for Blender port>."""
+    scene = bpy.context.scene
+    port = int(getattr(scene, "blendermcp_port", 9876)) if scene else 9876
+    stem = Path(bpy.data.filepath).stem if bpy.data.filepath else ""
+    name = stem or f"untitled-{port}"
+    return name, f"{name}@{port}"
+
+
+def build_context():
+    layer = bpy.context.view_layer
+    selected = [o.name for o in layer.objects if o.select_get()][:10]
+    active = layer.objects.active
+    lines = [f"파일: {bpy.data.filepath or '(저장 안 됨)'}", f"씬: {bpy.context.scene.name}"]
+    if active is not None:
+        lines.append(f"활성 오브젝트: {active.name} ({active.type}, 모드 {active.mode})")
+    if selected:
+        lines.append("선택한 오브젝트: " + ", ".join(selected))
+    return "\n".join(lines)
+
+
+def send_text(text, include_context=True):
+    text = (text or "").strip()
+    if not text:
+        return False
+    window, pin = window_identity()
+    body = {"app": "blender", "window": window, "pin": pin, "text": text,
+            "context": build_context() if include_context else ""}
+    _last_user[0] = time.time()
+    post_in_background("/v1/messages", body, "sent")
+    return True
+
+
+def apply_event(event, payload):
+    if event == "status":
+        _status[0] = payload
+    elif event == "reset":
+        _entries.clear()
+    elif event == "sent":
+        if not payload.get("ok"):
+            _status[0] = "보내지 못했습니다: " + str(payload.get("error", "알 수 없는 오류"))
+        elif payload.get("delivered") is False:
+            _status[0] = "Claude 세션이 아직 연결 중입니다. 잠시 뒤 답이 옵니다."
+    elif event == "items":
+        for item in payload:
+            if item.get("kind") == "permission_resolved":
+                for entry in _entries:
+                    if entry.get("kind") == "permission" and entry.get("request_id") == item.get("request_id"):
+                        entry["behavior"] = item.get("behavior")
+                continue
+            if item.get("kind") == "reply":
+                _last_user[0] = 0.0
+            _entries.append(dict(item))
+
+
+def tick():
+    """Timer on Blender's main thread: refresh identity, apply worker results, redraw the sidebar."""
+    window, pin = window_identity()
+    with _identity_lock:
+        _identity["window"], _identity["pin"] = window, pin
+    changed = False
+    while True:
+        try:
+            event, payload = _inbox.get_nowait()
+        except queue.Empty:
+            break
+        apply_event(event, payload)
+        changed = True
+    if changed or (_last_user[0] and time.time() - _last_user[0] > NO_REPLY_HINT_SECONDS):
+        for window_ in getattr(bpy.context.window_manager, "windows", []):
+            for area in window_.screen.areas:
+                if area.type == "VIEW_3D":
+                    area.tag_redraw()
+    return 0.5
+
+
+def _on_input_update(self, context):
+    """Enter in the message field sends it."""
+    text = self.claude_hand_chat_input
+    if text.strip():
+        send_text(text, self.claude_hand_chat_context)
+        bpy.app.timers.register(_clear_input, first_interval=0.01)
+
+
+def _clear_input():
+    wm = bpy.context.window_manager
+    if wm.claude_hand_chat_input:
+        wm.claude_hand_chat_input = ""
+    return None
+
+
+class CLAUDEHAND_OT_send(bpy.types.Operator):
+    bl_idname = "claude_hand.chat_send"
+    bl_label = "보내기"
+    bl_description = "Send the message to this window's claude-hand subagent"
+
+    def execute(self, context):
+        wm = context.window_manager
+        if send_text(wm.claude_hand_chat_input, wm.claude_hand_chat_context):
+            wm.claude_hand_chat_input = ""
+        return {"FINISHED"}
+
+
+class CLAUDEHAND_OT_permission(bpy.types.Operator):
+    bl_idname = "claude_hand.chat_permission"
+    bl_label = "권한 응답"
+    bl_description = "Allow or deny the tool Claude asked to run"
+
+    request_id: bpy.props.StringProperty()
+    behavior: bpy.props.EnumProperty(items=[("allow", "허용", ""), ("deny", "거부", "")])
+
+    def execute(self, context):
+        post_in_background("/v1/permission", {"request_id": self.request_id, "behavior": self.behavior}, "permission_sent")
+        return {"FINISHED"}
+
+
+class CLAUDEHAND_PT_chat(bpy.types.Panel):
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Claude Hand"
+    bl_label = "Claude Hand Chat"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text=_status[0])
+        box = layout.box()
+        if not _entries:
+            box.label(text="아직 대화가 없습니다.")
+        for entry in _entries[-VISIBLE_ENTRIES:]:
+            kind = entry.get("kind")
+            col = box.column(align=True)
+            if kind in ("user", "reply"):
+                col.label(text="나" if kind == "user" else "Claude", icon="USER" if kind == "user" else "INFO")
+                for line in wrap(entry.get("text", "")):
+                    col.label(text=line)
+            elif kind == "permission":
+                col.label(text=f"'{entry.get('tool_name')}' 실행 허락 요청", icon="ERROR")
+                for line in wrap(" ".join(filter(None, [entry.get("description"), entry.get("input_preview")]))):
+                    col.label(text=line)
+                if entry.get("behavior"):
+                    col.label(text="→ 허용됨" if entry["behavior"] == "allow" else "→ 거부됨")
+                else:
+                    row = col.row(align=True)
+                    for behavior, label in (("allow", "허용"), ("deny", "거부")):
+                        op = row.operator(CLAUDEHAND_OT_permission.bl_idname, text=label)
+                        op.request_id = entry.get("request_id", "")
+                        op.behavior = behavior
+        if _last_user[0] and time.time() - _last_user[0] > NO_REPLY_HINT_SECONDS:
+            for line in wrap("1분 넘게 답이 없습니다. 감독 세션을 start-supervisor.cmd로 열었는지, Claude Code 창에 확인을 기다리는 질문이 없는지 봐 주세요."):
+                layout.label(text=line)
+        wm = context.window_manager
+        layout.prop(wm, "claude_hand_chat_input", text="")
+        row = layout.row()
+        row.prop(wm, "claude_hand_chat_context", text="선택 항목 함께")
+        row.operator(CLAUDEHAND_OT_send.bl_idname, text="보내기", icon="PLAY")
+
+
+def wrap(text):
+    lines = []
+    for paragraph in str(text).splitlines() or [""]:
+        lines += textwrap.wrap(paragraph, WRAP_WIDTH) or [""]
+    return lines
+
+
+CLASSES = (CLAUDEHAND_OT_send, CLAUDEHAND_OT_permission, CLAUDEHAND_PT_chat)
+
+
+def register():
+    for cls in CLASSES:
+        bpy.utils.register_class(cls)
+    bpy.types.WindowManager.claude_hand_chat_input = bpy.props.StringProperty(
+        name="메시지", description="Enter로 보냅니다", update=_on_input_update)
+    bpy.types.WindowManager.claude_hand_chat_context = bpy.props.BoolProperty(
+        name="선택 항목 함께 보내기", default=True)
+    _stop.clear()
+    if not bpy.app.timers.is_registered(tick):
+        bpy.app.timers.register(tick, first_interval=0.5, persistent=True)
+    if _poller[0] is None or not _poller[0].is_alive():
+        _poller[0] = threading.Thread(target=poll_loop, name="claude-hand-chat", daemon=True)
+        _poller[0].start()
+
+
+def unregister():
+    _stop.set()
+    if bpy.app.timers.is_registered(tick):
+        bpy.app.timers.unregister(tick)
+    del bpy.types.WindowManager.claude_hand_chat_input
+    del bpy.types.WindowManager.claude_hand_chat_context
+    for cls in reversed(CLASSES):
+        bpy.utils.unregister_class(cls)
+

@@ -121,6 +121,39 @@ blender-<파일> (서브에이전트) ─ 인라인 stdio MCP 서버 (mcp-for-bl
   - manifest 형식은 `claude-hand/blend@1`과 `claude-hand/model@1`이다.
 - **MCP for Unity의 `blender_bridge`와의 관계:** Blender가 하나뿐이면 그 도구로 Unity에서 바로 가져와도 된다. 단 기본으로 꺼진 `asset_gen` 그룹이고, Blender 주소를 Unity 설정창에 하나만 둘 수 있다. 그래서 여러 창 구조에서는 교환 폴더 방식을 쓴다.
 
+## 창마다 채팅 (claude-hand-chat 채널)
+
+목표: Unity나 Blender 창에서 친 메시지가 그 창 담당 하위 세션에게 가고, 답이 그 창으로 오게 한다. 창끼리 조율(다른 창에서 가져오기)도 그대로 되게 한다.
+
+### 구조
+
+```
+Unity EditorWindow (HttpClient) ─┐   127.0.0.1:8765~, X-Claude-Hand-Token
+Blender N 패널 애드온 (urllib)  ─┼──▶ chat_channel.py ──stdio MCP──▶ 감독 세션 (Claude Code, 채널 플래그)
+                                 │    · notifications/claude/channel  (meta: chat_id, app, window, agent)
+                                 │    · reply 도구 → 그 chat_id 창으로
+                                 └──◀ · permission_request → 모든 열린 창에 허용/거부 → permission verdict
+```
+
+### 결정
+
+- **채널은 감독 세션 하나에만 붙인다.** 하위 세션마다 따로 Claude를 띄우는 방식(`claude --agent`)은 창끼리 서로를 몰라서 프로젝트 간 작업이 안 된다. 감독이 받아서 그 창 담당에게 넘기면 1:1 대화와 창 사이 조율이 둘 다 된다.
+- **창 → 하위 세션 연결은 채널 서버가 한다.** `sync`가 만든 정의 파일(`~/.claude/agents/*.md`)에서 이름과 고정 대상(`--pin`, `--app`)을 읽어 메시지 메타에 `agent`로 붙인다.
+  - Unity는 프로젝트 이름으로 찾는다. 같은 이름이 둘이면 추측하지 않고 `none`으로 둔다.
+  - Blender는 `<파일>@<포트>`가 정확히 같아야 한다.
+  - `chat_id`는 담당 하위 세션 이름이라 창마다 하나다.
+- **대화 맥락:** 감독은 같은 `chat_id`에 같은 하위 세션을 `SendMessage`로 이어서 맡긴다. 문서상 이어 쓴 하위 세션은 전체 대화 기록을 유지한다. 규칙은 채널의 `instructions`와 감독 스킬 두 곳에 적었다.
+- **권한 요청 중계:** `claude/channel/permission`을 선언한다. Claude Code가 보낸 `permission_request`를 열린 모든 채팅창에 보여주고, 처음 들어온 답 하나만 `notifications/claude/channel/permission`으로 돌려준다. 그래서 Unity 창에 앉은 채로 허락할 수 있다.
+- **보안:** 채널 문서는 "인증 없는 채널은 프롬프트 주입 통로"라고 경고한다.
+  - HTTP는 127.0.0.1에만 연다.
+  - 시작할 때 만든 무작위 토큰을 `~/.claude-hand/chat/server.json`에 쓰고(POSIX는 0600), 모든 요청에 그 토큰을 요구한다. 내 계정으로 도는 프로그램만 메시지를 넣을 수 있다.
+  - 메시지는 8000자, 창 정보는 3000자, 요청 본문은 64KB로 제한한다.
+- **등록 범위:** 사용자 범위로 등록하면 모든 Claude 세션이 채널을 하나씩 띄워 서로 server.json을 덮어쓴다. 그래서 저장소 폴더의 `local` 범위로 등록하고(`chat-setup`), 감독은 그 폴더에서 연다(`start-supervisor.cmd`).
+- **창 쪽 구현**
+  - Unity: IMGUI EditorWindow다. 긴 폴링(최대 20초)으로 답을 받는다. 도메인 리로드 뒤에는 서버 기록으로 대화를 다시 채우고, 감독 세션이 바뀌면(pid) 기록을 비운다.
+  - Blender: 통신은 백그라운드 스레드에서 하고, bpy는 메인 스레드 타이머에서만 만진다. 입력칸에서 Enter를 치면 보낸다.
+- **검증:** 채널 서버는 실제 프로세스로 띄워 MCP 핸드셰이크, 메시지 전달, `reply`, 권한 중계를 끝까지 테스트했다. Blender 애드온은 실제 Blender 5.0.1에서 채널 서버와 주고받기, 권한 버튼, 화면 없는 활성화까지 테스트했다. Unity 창은 스텁 컴파일만 했다.
+
 ## 처음 세팅 (claude-hand-setup 스킬)
 
 처음 쓰는 사람이 Claude Code에 "세팅해줘"라고만 하면 되게 하는 것이 목표다. 스킬은 저장소의 `.claude/skills/`에 있어서, 저장소 폴더에서 Claude Code를 열면 바로 쓸 수 있다.
@@ -175,10 +208,12 @@ blender-<파일> (서브에이전트) ─ 인라인 stdio MCP 서버 (mcp-for-bl
 | 11 | `blender-open`의 `--python-expr`가 애드온 자동 시작보다 먼저 돈다(타이머는 이벤트 루프에서만 돈다) | N 패널에서 포트를 바꾸고 서버를 켠다 |
 | 12 | `UpdateInteractionModeSettings` 리플렉션 호출이 Unity 6.3에서 바로 적용된다 | Unity를 다시 시작하면 적용된다(도구가 `applied_live`로 알려준다) |
 | 13 | Unity가 열려 있을 때 `manifest.json`을 고치면 창이 앞에 올 때 패키지를 다시 받는다 | Unity를 다시 연다 |
+| 14 | `claude mcp add --scope local`로 등록한 서버를 `--dangerously-load-development-channels server:claude-hand-chat`이 채널로 불러온다. 문서 예시는 `.mcp.json`이다 | 저장소 루트에 `.mcp.json`으로 등록한다 |
+| 15 | 감독이 같은 `chat_id`에 같은 하위 세션을 계속 이어 쓴다(지침을 따르는지) | 지침을 고치거나, 채널 서버가 agent id를 기억해 메타로 넘긴다 |
+| 16 | Unity 에디터가 비활성일 때도 `async` 이어 받기가 늦지 않게 돈다 | 폴링을 `EditorApplication.update`로 옮긴다 |
 
 ## 다음 단계 (2단계 후보)
 
 - **세션 간 직접 대화:** Claude Code 에이전트 팀(실험 기능)을 쓰거나 Channels로 감독을 거치지 않고 메시지를 주고받는다. 지금은 감독이 중계한다.
-- **Unity 안 채팅 패널:** EditorWindow에서 감독 세션으로 말을 걸고, 지금 선택한 오브젝트와 씬 컨텍스트를 자동으로 붙인다.
 - **모달 대화상자 자동 감지:** 지금은 감독이 시간 초과를 보고 agent-desktop으로 확인한다. 하위 세션의 시간 초과를 감독에게 바로 알리는 장치를 넣는다.
 - **백그라운드 보완:** 실측 결과 Windows에서 막히면 Unity 쪽에서 메인 루프를 깨우는 장치를 넣는다.

@@ -19,6 +19,8 @@ First-time setup helpers (used by the claude-hand-setup skill, safe to run by ha
   unity-install  Add MCP for Unity and Claude Hand Tools to a project's Packages/manifest.json.
   unity-open     Open a project with the Unity version it was made with.
   blender-open   Start Blender with the MCP for Blender add-on listening on a chosen port.
+  chat-setup           Register the chat channel (Unity/Blender chat panels) with Claude Code.
+  blender-install-chat Install and enable the Blender chat panel add-on.
 
 Run with uv (already installed for MCP for Unity) or any Python 3.10+:
   uv run tools/claude_hand.py list
@@ -55,6 +57,11 @@ MCP_FOR_UNITY_GIT_URL = "https://github.com/CoplayDev/unity-mcp.git?path=/MCPFor
 CLAUDE_HAND_PACKAGE = "com.claudehand.tools"
 CLAUDE_HAND_PACKAGE_DIR = REPO_ROOT / "unity" / CLAUDE_HAND_PACKAGE
 BLENDER_ADDON_FILE = "blender_mcp.py"  # what `mcp-for-blender install-addon` writes
+CHAT_SERVER_NAME = "claude-hand-chat"
+CHAT_CHANNEL_SCRIPT = TOOL_PATH.parent / "chat_channel.py"
+CHAT_ADDON_SOURCE = REPO_ROOT / "blender" / "claude_hand_chat.py"
+CHAT_ADDON_MODULE = "claude_hand_chat"
+SUPERVISOR_COMMAND = f"claude --dangerously-load-development-channels server:{CHAT_SERVER_NAME}"
 
 
 # --------------------------------------------------------------------------- data
@@ -1030,6 +1037,13 @@ def doctor_checks(projects: list[Path], blender_ports: list[int], version=tool_v
             str(editor) if editor else "Unity Hub 기본 위치에서 못 찾음",
             "" if editor else "Unity Hub에서 해당 버전을 설치하거나 Hub로 직접 여세요")
 
+    chat = chat_server_registered()
+    add("채팅", "채팅 채널 등록 (claude-hand 폴더)", chat, "등록됨" if chat else ("claude CLI 없음" if chat is None else "없음"),
+        "" if chat else "uv run tools/claude_hand.py chat-setup")
+    chat_addons = find_chat_addon_installs()
+    add("채팅", "Blender 채팅 애드온", bool(chat_addons) if exes else None, ", ".join(map(str, chat_addons[:3])) or "설치 안 됨",
+        "" if chat_addons else "uv run tools/claude_hand.py blender-install-chat")
+
     agents_dir = Path.home() / ".claude" / "agents"
     generated = sorted(p.name for p in agents_dir.glob("*.md") if GENERATED_MARKER in p.read_text(encoding="utf-8", errors="replace")) \
         if agents_dir.is_dir() else []
@@ -1041,7 +1055,103 @@ def doctor_checks(projects: list[Path], blender_ports: list[int], version=tool_v
     return checks
 
 
+def chat_add_command(runner: str = "uv run -q --no-project") -> list[str]:
+    """`claude mcp add` for the chat channel, scoped to this repo folder (local scope), so only the
+    supervisor started here runs it; a user-wide entry would start one channel per Claude session."""
+    return ["claude", "mcp", "add", "--scope", "local", CHAT_SERVER_NAME, "--", *runner.split(), str(CHAT_CHANNEL_SCRIPT)]
+
+
+def chat_server_registered(run=subprocess.run, which=shutil.which) -> bool | None:
+    exe = which("claude")
+    if not exe:
+        return None
+    try:
+        proc = run([exe, "mcp", "get", CHAT_SERVER_NAME], cwd=str(REPO_ROOT), capture_output=True, text=True,
+                   errors="replace", timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return proc.returncode == 0
+
+
+def blender_chat_targets(base: Path | None = None) -> list[Path]:
+    """Add-on folders to install the chat add-on into: every Blender version that has MCP for Blender,
+    else the newest Blender version folder."""
+    with_mcp = [p.parent for p in find_blender_addon_installs(base)]
+    if with_mcp:
+        return list(dict.fromkeys(with_mcp))
+    base = base if base is not None else blender_config_base()
+    if not base or not base.is_dir():
+        return []
+    versions = sorted((d for d in base.iterdir() if re.match(r"^\d+\.\d+", d.name)),
+                      key=lambda d: [int(x) for x in re.findall(r"\d+", d.name)[:2]], reverse=True)
+    return [versions[0] / "scripts" / "addons"] if versions else []
+
+
+def find_chat_addon_installs(base: Path | None = None) -> list[Path]:
+    base = base if base is not None else blender_config_base()
+    if not base or not base.is_dir():
+        return []
+    return sorted(p for p in base.glob(f"*/scripts/addons/{CHAT_ADDON_MODULE}.py"))
+
+
+ENABLE_CHAT_ADDON = (
+    "import addon_utils, bpy\n"
+    f"mod = addon_utils.enable('{CHAT_ADDON_MODULE}', default_set=True)\n"
+    "if mod is not None:\n"
+    "    bpy.ops.wm.save_userpref()\n"
+    "print('CLAUDE_HAND_CHAT ' + ('enabled' if mod is not None else 'failed'))\n"
+)
+
+
 # --------------------------------------------------------------------------- CLI
+
+
+def cmd_chat_setup(args: argparse.Namespace) -> int:
+    cmd = chat_add_command(args.runner)
+    registered = chat_server_registered()
+    if registered:
+        print(f"{CHAT_SERVER_NAME} 채널이 이미 등록돼 있습니다 ({REPO_ROOT}).")
+    elif args.dry_run or registered is None:
+        print(("(dry run) " if args.dry_run else "claude CLI를 찾지 못했습니다. 직접 실행하세요: ") + " ".join(f'"{c}"' if " " in c else c for c in cmd))
+    else:
+        proc = subprocess.run([shutil.which("claude") or "claude", *cmd[1:]], cwd=str(REPO_ROOT))
+        if proc.returncode != 0:
+            print("등록하지 못했습니다. 위 오류를 확인하세요.")
+            return proc.returncode
+        print(f"{CHAT_SERVER_NAME} 채널을 이 폴더({REPO_ROOT})에 등록했습니다.")
+    print("감독 세션은 채널을 켜고 이 폴더에서 시작해야 합니다:")
+    print(f"  start-supervisor.cmd   (또는: cd \"{REPO_ROOT}\" && {SUPERVISOR_COMMAND})")
+    return 0
+
+
+def cmd_blender_install_chat(args: argparse.Namespace) -> int:
+    targets = [Path(args.addons_dir)] if args.addons_dir else blender_chat_targets()
+    if not targets:
+        print("Blender 사용자 폴더를 찾지 못했습니다. Blender를 한 번 실행한 뒤 다시 하거나 --addons-dir로 알려주세요.")
+        return 1
+    for target in targets:
+        print(f"{'(dry run) ' if args.dry_run else ''}복사: {CHAT_ADDON_SOURCE} -> {target / (CHAT_ADDON_MODULE + '.py')}")
+        if not args.dry_run:
+            target.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(CHAT_ADDON_SOURCE, target / (CHAT_ADDON_MODULE + ".py"))
+    exes = [Path(args.blender_exe)] if args.blender_exe else find_blender_executables()
+    if not exes:
+        print("Blender 실행 파일을 찾지 못해 켜지는 못했습니다. Preferences > Add-ons에서 'Claude Hand Chat'을 켜세요.")
+        return 0
+    cmd = [str(exes[0]), "--background", "--python-expr", ENABLE_CHAT_ADDON]
+    print(f"{'(dry run) ' if args.dry_run else ''}켜기: {exes[0]} --background (애드온 활성화 후 환경설정 저장)")
+    if args.dry_run:
+        return 0
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=180)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"Blender를 실행하지 못했습니다: {exc}")
+        return 1
+    if "CLAUDE_HAND_CHAT enabled" in (proc.stdout or ""):
+        print("켰습니다. 열려 있던 Blender는 다시 열어야 N 패널에 Claude Hand 탭이 보입니다.")
+        return 0
+    print("켜지 못했습니다. Preferences > Add-ons에서 'Claude Hand Chat'을 직접 켜세요.")
+    return 1
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -1251,6 +1361,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_bo.add_argument("--wait", type=int, default=60, help="seconds to wait for the add-on to answer")
     p_bo.add_argument("--dry-run", action="store_true")
     p_bo.set_defaults(func=cmd_blender_open)
+
+    p_cs = sub.add_parser("chat-setup", help="register the chat channel with Claude Code (this folder only)")
+    p_cs.add_argument("--runner", default="uv run -q --no-project", help="how Claude Code starts Python")
+    p_cs.add_argument("--dry-run", action="store_true")
+    p_cs.set_defaults(func=cmd_chat_setup)
+
+    p_bic = sub.add_parser("blender-install-chat", help="install and enable the Blender chat panel add-on")
+    p_bic.add_argument("--addons-dir", help="Blender scripts/addons folder to install into")
+    p_bic.add_argument("--blender-exe", help="path to blender.exe used to enable the add-on")
+    p_bic.add_argument("--dry-run", action="store_true")
+    p_bic.set_defaults(func=cmd_blender_install_chat)
 
     p_guard = sub.add_parser("guard", help="PreToolUse hook (used by generated subagents)")
     p_guard.add_argument("--pin", required=True)

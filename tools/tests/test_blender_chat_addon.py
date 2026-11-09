@@ -1,0 +1,115 @@
+"""Runs the Claude Hand Chat add-on inside real Blender against a real chat channel hub.
+
+Needs Blender's Python module (`pip install bpy`); skipped when it is not importable.
+"""
+
+import importlib.util
+import os
+import secrets
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import chat_channel as cc  # noqa: E402
+import claude_hand as ch  # noqa: E402
+
+try:
+    import bpy
+except ImportError:  # pragma: no cover - depends on the machine
+    bpy = None
+
+ADDON = Path(__file__).resolve().parents[2] / "blender" / "claude_hand_chat.py"
+
+
+def wait_for(condition, addon, seconds=8.0):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        addon.tick()  # what bpy.app.timers does in a GUI Blender
+        if condition():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@unittest.skipIf(bpy is None, "Blender's bpy module is not installed")
+class BlenderChatAddonTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        os.environ["CLAUDE_HAND_HOME"] = str(root / "home")
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        blend = root / "props.blend"
+        bpy.ops.wm.save_as_mainfile(filepath=str(blend))
+        ch.write_agent_files(ch.build_agent_files([], None, [ch.BlenderInstance(port=9876, filepath=str(blend))], None, "uv run"),
+                             root / "agents")
+        self.emitted = []
+        self.hub = cc.ChatHub(self.emitted.append, root / "agents")
+        self.hub.initialized = True
+        token = secrets.token_urlsafe(16)
+        self.httpd = cc.start_http(self.hub, token, port=18790)
+        cc.write_server_file(root / "home", self.httpd.server_address[1], token)
+        spec = importlib.util.spec_from_file_location("claude_hand_chat", ADDON)
+        self.addon = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.addon)
+        self.addon.register()
+
+    def tearDown(self):
+        self.addon.unregister()
+        self.httpd.shutdown()
+        os.environ.pop("CLAUDE_HAND_HOME", None)
+        self.tmp.cleanup()
+
+    def test_chat_round_trip_and_permission(self):
+        addon = self.addon
+        self.assertTrue(wait_for(lambda: addon._status[0] == "담당: blender-props", addon), addon._status[0])
+
+        bpy.context.window_manager.claude_hand_chat_input = "큐브 하나 추가해줘"  # Enter in the field sends it
+        self.assertTrue(wait_for(lambda: self.emitted, addon))
+        note = self.emitted[0]["params"]
+        self.assertEqual(note["meta"], {"chat_id": "blender-props", "app": "blender", "window": "props", "agent": "blender-props"})
+        self.assertIn("큐브 하나 추가해줘", note["content"])
+        self.assertIn("파일:", note["content"])
+        wait_for(lambda: bpy.context.window_manager.claude_hand_chat_input == "", addon, 2)
+
+        self.hub.reply("blender-props", "큐브를 추가했어요.")
+        self.assertTrue(wait_for(lambda: any(e.get("kind") == "reply" for e in addon._entries), addon))
+        self.assertEqual([e["kind"] for e in addon._entries], ["user", "reply"])
+
+        self.hub.permission_request({"request_id": "abcde", "tool_name": "Bash", "description": "run", "input_preview": "ls"})
+        self.assertTrue(wait_for(lambda: any(e.get("kind") == "permission" for e in addon._entries), addon))
+        bpy.ops.claude_hand.chat_permission(request_id="abcde", behavior="allow")
+        self.assertTrue(wait_for(lambda: self.emitted[-1]["method"] == "notifications/claude/channel/permission", addon))
+        self.assertEqual(self.emitted[-1]["params"], {"request_id": "abcde", "behavior": "allow"})
+        self.assertTrue(wait_for(lambda: any(e.get("behavior") == "allow" for e in addon._entries), addon))
+
+    def test_panel_draw_does_not_fail(self):
+        self.assertTrue(hasattr(bpy.types, "CLAUDEHAND_PT_chat"))
+        self.assertEqual(self.addon.wrap("가" * 50)[0], "가" * self.addon.WRAP_WIDTH)
+
+
+
+@unittest.skipIf(bpy is None, "Blender's bpy module is not installed")
+class HeadlessEnableTests(unittest.TestCase):
+    def test_enable_script_turns_the_addon_on_and_saves_preferences(self):
+        """What `blender-install-chat` runs, in a fresh Blender with its own user folders."""
+        import shutil
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            scripts, config = Path(tmp) / "scripts", Path(tmp) / "config"
+            (scripts / "addons").mkdir(parents=True)
+            config.mkdir()
+            shutil.copy2(ADDON, scripts / "addons" / ADDON.name)
+            env = {**os.environ, "BLENDER_USER_SCRIPTS": str(scripts), "BLENDER_USER_CONFIG": str(config),
+                   "CLAUDE_HAND_HOME": str(Path(tmp) / "home")}
+            code = "import bpy\nexec(" + repr(ch.ENABLE_CHAT_ADDON) + ")\nprint('PANEL', hasattr(bpy.types, 'CLAUDEHAND_PT_chat'))"
+            proc = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=120)
+            self.assertIn("CLAUDE_HAND_CHAT enabled", proc.stdout, proc.stderr)
+            self.assertIn("PANEL True", proc.stdout)
+            self.assertTrue((config / "userpref.blend").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()
