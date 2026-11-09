@@ -62,3 +62,34 @@ Interaction Mode를 **바꾸기 전과 후**에 각각 해 봅니다. Edit > Pre
 5. 직접 짠 MonoBehaviour 스크립트가 붙은 오브젝트로도 한 번 해 봅니다. B에서 컴파일이 끝난 뒤 배치되고, 컴포넌트가 Missing Script가 아니어야 해요.
 
 > 결과 알려주세요: 각 단계 성공 여부, 하위 세션이 보고한 warnings, Console 오류
+
+## 7. Blender 창 찾기와 하위 세션
+
+1. Blender 두 개를 열고 각각 .blend를 저장합니다. 예: `character.blend`, `props.blend`.
+2. 각 창에서 `N` → MCP for Blender 탭으로 가서 포트를 **9876**, **9877**로 정하고 서버를 켭니다.
+3. `uv run tools/claude_hand.py list`를 실행합니다. Blender 두 개가 파일 경로와 함께 보여야 해요.
+4. `uv run tools/claude_hand.py sync` 후 `/agents`를 입력합니다. `blender-character`, `blender-props`가 보여야 해요.
+5. "blender-props에게 지금 열린 파일 경로랑 오브젝트 목록 알려달라고 해"라고 합니다. props.blend가 나와야 해요.
+6. 두 Blender 창을 **최소화한 채로** 5번을 다시 합니다.
+
+> 결과 알려주세요: 3번 출력, 5·6번이 됐는지와 걸린 시간, 하위 세션이 Blender 도구가 없다고 했는지
+
+## 8. Blender → Blender
+
+1. props.blend에 머티리얼을 입힌 오브젝트(예: `Rock`)를 하나 둡니다.
+2. "props.blend의 Rock을 character.blend로 가져와"라고 합니다.
+3. 기대 결과:
+   - 교환 폴더에 `.blend`와 `.claudehand.json`이 생겨요.
+   - character.blend 씬에 Rock이 머티리얼과 함께 나타나요.
+   - 이미 같은 이름이 있으면 `Rock.001` 같은 이름으로 들어오고, 그 이름이 보고돼요.
+
+## 9. Blender → Unity
+
+1. "character.blend의 <캐릭터 오브젝트>를 Unity A 씬에 넣어줘"라고 합니다.
+2. 기대 결과:
+   - 교환 폴더에 `.fbx`가 생겨요.
+   - A의 `Assets/ClaudeHand/Imports/...`에 FBX가 들어오고, 씬에 배치돼요.
+   - 크기와 방향이 Blender와 같게 보여야 해요(앞이 -Z, 위가 Y).
+3. "같은 걸 B 프로젝트에도 넣어줘"라고 합니다. FBX를 다시 내보내지 않고 같은 manifest로 B에 가져와야 해요.
+
+> 결과 알려주세요: 크기·방향·재질이 어떻게 보였는지, 하위 세션의 warnings, Blender나 Unity Console 오류

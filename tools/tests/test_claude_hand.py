@@ -1,9 +1,13 @@
 """Tests for tools/claude_hand.py. Run: python -m unittest discover -s tools/tests -v"""
 
+import ast
 import io
 import json
+import re
+import socket
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -179,7 +183,7 @@ class GenerationTests(unittest.TestCase):
 
     def test_skill_source_exists(self):
         self.assertTrue(ch.SKILL_SOURCE.exists())
-        self.assertIn("name: claude-hand-unity", ch.SKILL_SOURCE.read_text(encoding="utf-8"))
+        self.assertIn("name: claude-hand", ch.SKILL_SOURCE.read_text(encoding="utf-8"))
 
 
 class GuardTests(unittest.TestCase):
@@ -238,6 +242,140 @@ class GuardTests(unittest.TestCase):
         args = ch.build_parser().parse_args(["guard", "--pin", self.PIN, "--server", self.SERVER])
         ch.run_guard(args, io.StringIO("{not json"), out)
         self.assertEqual(json.loads(out.getvalue())["hookSpecificOutput"]["permissionDecision"], "deny")
+
+
+
+class FakeBlenderAddon:
+    """Minimal stand-in for the MCP for Blender add-on socket: bare JSON in, bare JSON out."""
+
+    def __init__(self, filepath="C:/Art/character.blend"):
+        self.filepath = filepath
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen()
+        self.port = self.sock.getsockname()[1]
+        self.seen = []
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            with conn:
+                command = json.loads(conn.recv(65536).decode("utf-8"))
+                self.seen.append(command["type"])
+                result = {
+                    "ping": {"pong": True},
+                    "get_addon_info": {"blender_version": "5.1.0"},
+                    "execute_code": {"executed": True, "result": self.filepath + "\n"},
+                }[command["type"]]
+                body = json.dumps({"status": "success", "result": result}).encode("utf-8")
+                conn.sendall(body[:7])  # split the reply to exercise partial reads
+                conn.sendall(body[7:])
+
+    def close(self):
+        self.sock.close()
+
+
+class BlenderTests(unittest.TestCase):
+    def test_parse_ports(self):
+        self.assertEqual(ch.parse_ports("9876-9878,9900,9877"), [9876, 9877, 9878, 9900])
+        self.assertEqual(ch.parse_ports("80,70000"), [])
+
+    def test_instance_names(self):
+        self.assertEqual(ch.BlenderInstance(port=9876, filepath="C:\\Art\\Hero Rig.blend").name, "Hero Rig")
+        self.assertEqual(ch.BlenderInstance(port=9877).name, "untitled-9877")
+        self.assertEqual(ch.BlenderInstance(port=9877).id, "untitled-9877@9877")
+
+    def test_discovery_against_fake_addon(self):
+        addon = FakeBlenderAddon()
+        try:
+            closed = socket.socket()
+            closed.bind(("127.0.0.1", 0))
+            unused_port = closed.getsockname()[1]
+            closed.close()
+            found = ch.discover_blender([unused_port, addon.port])
+        finally:
+            addon.close()
+        self.assertEqual(len(found), 1)
+        self.assertEqual((found[0].port, found[0].filepath, found[0].blender_version), (addon.port, "C:/Art/character.blend", "5.1.0"))
+        self.assertEqual(addon.seen, ["ping", "get_addon_info", "execute_code"])
+
+    def test_discovery_skips_other_listeners(self):
+        def not_mcp_for_blender(port, command, timeout):
+            return {"jsonrpc": "2.0", "error": "unknown"}
+
+        self.assertEqual(ch.discover_blender([9876], request=not_mcp_for_blender), [])
+
+    def detect(self, servers):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "config.json"
+            f.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+            return ch.detect_blender_config([f])
+
+    def test_detect_github_addon_server(self):
+        cfg = self.detect({"unityMCP": {"command": "uvx", "args": ["mcp-for-unity"]},
+                           "blender": {"command": "uvx", "args": ["blender-mcp"], "env": {"BLENDER_HOST": "localhost"}}})
+        self.assertEqual((cfg.command, cfg.args, cfg.env, cfg.warning), ("uvx", ["blender-mcp"], {"BLENDER_HOST": "localhost"}, ""))
+
+    def test_other_blender_server_falls_back_with_warning(self):
+        cfg = self.detect({"blender-lab": {"command": "python", "args": ["C:/lab/blmcp/server.py"]}})
+        self.assertEqual((cfg.command, cfg.args), ("uvx", ch.DEFAULT_BLENDER_ARGS))
+        self.assertIn("blender-lab", cfg.warning)
+
+    def test_no_blender_entry_uses_default(self):
+        cfg = self.detect({"github": {"command": "npx", "args": ["x"]}})
+        self.assertEqual((cfg.command, cfg.args, cfg.warning), ("uvx", ch.DEFAULT_BLENDER_ARGS, ""))
+
+    def test_with_port_replaces_existing(self):
+        self.assertEqual(ch.with_port(["mcp-for-blender", "--port", "1111", "--port=2222", "--host", "h"], 9877),
+                         ["mcp-for-blender", "--host", "h", "--port", "9877"])
+
+    def test_agent_file(self):
+        inst = ch.BlenderInstance(port=9877, filepath="C:/Art/character.blend")
+        server = ch.ServerConfig(transport="stdio", command="uvx", args=["mcp-for-blender"], key="blender")
+        text = ch.render_blender_agent(inst, "blender-character", server, "uv run -q --no-project", allowlist=True)
+        front = text.split("---")[1]
+        self.assertIn("name: blender-character", front)
+        self.assertIn('tools: "mcp__blender_character__*, Read, Glob, Grep"', front)
+        self.assertIn('args: ["mcp-for-blender", "--port", "9877"]', front)
+        self.assertIn('BLENDER_PORT: "9877"', front)
+        self.assertIn("--server blender_character --transport stdio --app blender", front)
+        for line in front.splitlines():
+            if ': "' in line:
+                json.loads(line.split(": ", 1)[1])
+        self.assertNotIn("__", re.sub(r"mcp__\w+__|__\w+__\*", "", text.split(ch.GENERATED_MARKER)[1]).replace("__init__", ""))
+
+    def test_recipes_are_valid_python(self):
+        blocks = re.findall(r"```python\n(.*?)```", ch.BLENDER_PROMPT, re.S)
+        self.assertEqual(len(blocks), 3)
+        for code in blocks:
+            ast.parse(code)
+
+    def test_names_for_duplicate_files(self):
+        a = ch.BlenderInstance(port=9876, filepath="C:/a/scene.blend")
+        b = ch.BlenderInstance(port=9877, filepath="C:/b/scene.blend")
+        self.assertEqual(sorted(ch.blender_agent_names([a, b]).values()), ["blender-scene-9876", "blender-scene-9877"])
+
+    def test_sync_writes_and_prunes_both_apps(self):
+        unity = ch.Instance(name="MyGame", hash="aaaa1111")
+        blender = ch.BlenderInstance(port=9876, filepath="C:/Art/character.blend")
+        server = ch.ServerConfig(transport="stdio")
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            first = ch.sync_agents([unity], d, server, "uv run", blender=[blender])
+            self.assertEqual(sorted(p.name for p in first.written), ["blender-character.md", "unity-mygame.md"])
+            later = ch.sync_agents([unity], d, server, "uv run", blender=[], prune=True)
+            self.assertEqual([p.name for p in later.removed], ["blender-character.md"])
+
+    def test_guard_blender_mode(self):
+        own = {"tool_name": "mcp__blender_character__execute_code", "tool_input": {"code": "print(1)"}}
+        other = {"tool_name": "mcp__blender_props__execute_code", "tool_input": {}}
+        self.assertIsNone(ch.guard_decision(own, "character@9876", "blender_character", "stdio", "blender"))
+        reason = ch.guard_decision(other, "character@9876", "blender_character", "stdio", "blender")
+        self.assertIn("Blender", reason)
 
 
 if __name__ == "__main__":

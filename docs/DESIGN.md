@@ -91,6 +91,41 @@ MCP for Unity는 테스트를 실행할 때 Unity 창을 잠깐 앞으로 끌어
 - 스냅샷은 `Library/ClaudeHand/snapshots/`에 최근 20개를 보관한다. 도메인 리로드가 일어나도 남는다.
 - 노드에는 `path`와 `instance_id`도 같이 넣는다. MCP for Unity 기본 도구에 그대로 넘길 수 있다.
 
+## Blender
+
+### 어떤 Blender MCP를 쓰는가
+
+| | MCP for Blender (ahujasid, GitHub판) | Blender Lab 공식 서버 |
+|---|---|---|
+| 구조 | 애드온(소켓 서버) + `mcp-for-blender` MCP 서버, TCP | 애드온 + 별도 MCP 서버, TCP (2차 자료 기준) |
+| 포트 | **씬 속성**이라 .blend마다 저장된다. N 패널에서 바꾼다. 서버는 `--port` 또는 `BLENDER_PORT`로 정한다. README에 창 여러 개 예시가 있다 | 애드온 **환경설정**(Host/Port, 기본 localhost:9876, Auto Start) |
+| 여러 창 동시 연결 | 공식 문서로 지원한다. 소스에서 확인했다 | 확인하지 못했다. 환경설정이 공유라서 창마다 따로 바꿔야 할 가능성이 크다 |
+| Unity 연동 | MCP for Unity의 `blender_bridge`가 이 애드온 소켓에 직접 붙는다 | 없다 |
+| 요구 사항 | Blender 3.x 이상 | Blender 5.1 이상, 실험 기능 |
+
+이 시제품은 **GitHub판만 연결한다.**
+- `sync`가 설정에서 다른 Blender MCP를 발견하면 경고만 하고 기본값 `uvx mcp-for-blender`를 쓴다.
+- 포트를 확인할 때 공식 애드온처럼 `ping`을 모르는 상대는 건너뛴다.
+- 공식 서버 소스(projects.blender.org)는 이 개발 환경의 네트워크 정책에서 막혀 있어 읽지 못했다.
+
+### 구조
+
+```
+blender-<파일> (서브에이전트) ─ 인라인 stdio MCP 서버 (mcp-for-blender --port N, BLENDER_PORT=N)
+                                   └─ TCP 127.0.0.1:N ─ Blender 창 (MCP for Blender 애드온)
+```
+
+- **고정:** Unity와 달리 서버 하나가 Blender 창 하나에만 붙는다. 그래서 `--port`만으로 대상이 고정된다. 호출마다 대상을 바꾸는 인자가 없어서, 안전장치는 "자기 서버 도구만" 검사한다.
+- **발견:** `sync`가 포트 범위를 하나씩 확인한다.
+  - `{"type":"ping"}`에 `status: success`로 답한 곳만 MCP for Blender로 본다.
+  - 이어서 `get_addon_info`로 Blender 버전을, `execute_code`로 `bpy.data.filepath`를 읽는다(읽기만 한다).
+  - 이름은 .blend 파일 이름이고, 저장 안 된 파일은 `untitled-<포트>`가 된다.
+- **옮기기:** Blender 쪽에는 새 애드온을 만들지 않았다. `execute_code`로 실행할 Python 방법을 하위 세션 지침에 넣었다. 파이썬 문법은 테스트에서 검사한다.
+  - Blender → Blender: `bpy.data.libraries.write(...)`로 대상 오브젝트와 그 의존 데이터(메시, 머티리얼)를 `.blend`로 쓴다. `path_remap="ABSOLUTE"`로 외부 텍스처 경로가 유지되게 한다. 받는 쪽은 `bpy.data.libraries.load(link=False)`로 Append한다.
+  - Blender → Unity: FBX로 내보낸다(`-Z` 앞, `Y` 위, `FBX_SCALE_ALL`, 텍스처 포함). Unity가 별도 패키지 없이 가져오는 형식이라서다. Unity 쪽 `ch_import_model`이 `Assets/ClaudeHand/Imports/<id>/`로 복사해 동기로 가져오고 배치한다.
+  - manifest 형식은 `claude-hand/blend@1`과 `claude-hand/model@1`이다.
+- **MCP for Unity의 `blender_bridge`와의 관계:** Blender가 하나뿐이면 그 도구로 Unity에서 바로 가져와도 된다. 단 기본으로 꺼진 `asset_gen` 그룹이고, Blender 주소를 Unity 설정창에 하나만 둘 수 있다. 그래서 여러 창 구조에서는 교환 폴더 방식을 쓴다.
+
 ## 아직 검증하지 않은 가정 (PC에서 확인 필요)
 
 | # | 가정 | 틀렸을 때 |
@@ -102,6 +137,9 @@ MCP for Unity는 테스트를 실행할 때 Unity 창을 잠깐 앞으로 끌어
 | 5 | Windows Git Bash에서 `uv`가 PATH에 있다 | `sync --runner "py -3"` 같이 다른 실행기를 지정한다 |
 | 6 | 비활성·최소화 상태의 Unity가 No Throttling에서 명령을 제때 처리한다 | 2단계: Unity 쪽 깨우기 장치를 넣는다 |
 | 7 | `ImportPackage(interactive:false)`가 포커스 없이 끝난다 | 실측 후 대응한다 |
+| 8 | 최소화된 Blender에서도 애드온 타이머(`bpy.app.timers`)가 명령을 처리한다 | 실측 후 대응한다 |
+| 9 | `execute_code` 안에서 `bpy.ops.export_scene.fbx`가 컨텍스트 오류 없이 돈다. 애드온의 `export_scene`도 같은 방식이다 | 컨텍스트를 덮어쓰는 방식으로 바꾼다 |
+| 10 | 사용 중인 `blender-mcp`/`mcp-for-blender` 버전이 `--port` 또는 `BLENDER_PORT`를 받는다. 둘 다 넣는다 | 패키지를 업데이트한다 |
 
 ## 다음 단계 (2단계 후보)
 
