@@ -271,6 +271,7 @@ class BlenderChatAddonTests(unittest.TestCase):
         self.assertTrue(want({"kind": "permission", "ts": now}, now))  # work is waiting on the user
         self.assertFalse(want({"kind": "reply", "ts": now - 120}, now))  # history shown again after a restart
         self.assertFalse(want({"kind": "reply", "origin": "desktop", "ts": now}, now))  # asked in the Claude app
+        self.assertFalse(want({"kind": "reply", "working": True, "ts": now}, now))  # "작업 중이에요": not done yet
         self.assertFalse(want({"kind": "user", "ts": now}, now))
         self.assertFalse(want({"kind": "image", "ts": now}, now))  # comes with a reply that already called
         self.assertTrue(want({"kind": "notice", "alert": True, "ts": now}, now))  # a dialog stopped the other window

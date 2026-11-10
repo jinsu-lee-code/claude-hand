@@ -290,7 +290,8 @@ namespace ClaudeHand.Editor
             var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
             if (now - (item.Value<double?>("ts") ?? 0) > AlertFreshSeconds) return false;
             var kind = item.Value<string>("kind");
-            return kind == "permission" || (kind == "reply" && item.Value<string>("origin") != "desktop") ||
+            return kind == "permission" ||
+                   (kind == "reply" && item.Value<string>("origin") != "desktop" && !(item.Value<bool?>("working") ?? false)) ||
                    (kind == "notice" && (item.Value<bool?>("alert") ?? false));
         }
 

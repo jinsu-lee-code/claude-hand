@@ -269,6 +269,9 @@ class McpTests(unittest.TestCase):
                                                                 "request": "큐브"}})
         self.assertEqual(desktop, {"content": [{"type": "text", "text": "sent"}]})
         self.assertEqual(mcp.hub.logs["unity-mygame"][-1]["origin"], "desktop")
+        mcp.call_tool({"name": "reply", "arguments": {"chat_id": "unity-mygame", "text": "작업 중이에요", "working": True}})
+        self.assertTrue(mcp.hub.logs["unity-mygame"][-1]["working"])
+        self.assertIn("working", cc.REPLY_TOOL["inputSchema"]["properties"])
         context = mcp.call_tool({"name": "current_context", "arguments": {}})
         self.assertEqual(json.loads(context["content"][0]["text"])["windows"], [])
 
@@ -389,6 +392,19 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(self.hub.report_action("unity", "MyGame@aaaa1111", "manage_scene", "get_hierarchy"),
                          {"chat_id": "unity-mygame", "new_request": True, "label": ""})
 
+    def test_a_working_on_it_reply_is_not_the_answer(self):
+        self.hub.initialized = True
+        self.hub.post_user_message("unity", "MyGame", "큐브를 빨갛게", pin="MyGame@aaaa1111")
+        self.hub.reply("unity-mygame", "작업 중이에요", working=True)  # before any work
+        self.assertTrue(self.hub.report_action("unity", "MyGame@aaaa1111", "manage_material", "")["new_request"])
+        self.hub.reply("unity-mygame", "머티리얼 찾았어요, 바꿀게요", working=True)  # in the middle of it
+        self.assertIsNotNone(self.hub.poll("unity-mygame", 0, 0)["progress"])  # the work line stays
+        self.assertFalse(self.hub.report_action("unity", "MyGame@aaaa1111", "manage_material", "set")["new_request"])  # one undo point
+        self.assertEqual(self.hub._open_request("unity-mygame"), "큐브를 빨갛게")
+        self.hub.reply("unity-mygame", "빨갛게 했어요")
+        self.assertIsNone(self.hub.poll("unity-mygame", 0, 0)["progress"])
+        self.assertEqual(self.hub._open_request("unity-mygame"), "")
+
     def test_a_waiting_panel_wakes_on_progress(self):
         rev = self.hub.poll("unity-mygame", 0, 0)["progress_rev"]
         timer = threading.Timer(0.2, lambda: self.hub.report_action("unity", "MyGame@aaaa1111", "manage_scene", "save"))
@@ -467,6 +483,31 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual((image["window"], self.shots), ("Level", [("unity", "Level@bbbb2222")]))
         self.assertEqual(self.images("unity-level", 0), [])
 
+    def test_working_on_it_replies_keep_side_by_side_projects_apart(self):
+        write_agents(Path(self.tmp.name) / "agents", [ch.Instance(name="Level", hash="bbbb2222")])
+        self.hub.post_user_message("unity", "MyGame", "큐브를 빨갛게", pin="MyGame@aaaa1111")
+        self.hub.post_user_message("unity", "Level", "조명을 어둡게", pin="Level@bbbb2222")
+        self.hub.reply("unity-mygame", "작업 중이에요", working=True)
+        self.hub.reply("unity-level", "작업 중이에요", working=True)
+        self.hub.report_action("unity", "MyGame@aaaa1111", "manage_material", "red")
+        self.hub.report_action("unity", "Level@bbbb2222", "manage_gameobject", "light")
+        self.hub.reply("unity-mygame", "빨갛게 했어요")
+        self.hub.report_action("unity", "Level@bbbb2222", "manage_scene", "save")
+        self.hub.reply("unity-level", "어둡게 했어요")
+        time.sleep(0.3)
+        self.assertEqual(self.shots, [])
+        self.assertEqual(self.images("unity-mygame", 0) + self.images("unity-level", 0), [])
+
+    def test_a_working_on_it_reply_gets_no_picture_but_the_result_does(self):
+        self.hub.post_user_message("blender", "props", "의자를 Unity로 보내줘", pin="props@9877")
+        self.hub.report_action("unity", "MyGame@aaaa1111", "ch_import_model", "")
+        self.hub.reply("blender-props", "Unity에 놓는 중이에요", working=True)
+        time.sleep(0.3)
+        self.assertEqual(self.shots, [])
+        self.hub.reply("blender-props", "Unity에 놓았어요")
+        [image] = self.images("blender-props")
+        self.assertEqual(image["window"], "MyGame")
+
     def test_no_picture_without_a_capture_or_for_desktop_replies(self):
         self.hub.post_user_message("blender", "props", "Unity 씬 저장해줘", pin="props@9877")
         self.hub.report_action("unity", "MyGame@aaaa1111", "manage_scene", "save")
@@ -520,6 +561,7 @@ class DialogWatchTests(unittest.TestCase):
         self.hub.check_dialogs()
         self.assertEqual(self.asked, [])  # nobody is working: nothing to look at
         self.hub.post_user_message("blender", "props", "의자를 Unity로 보내줘", pin="props@9877")
+        self.hub.reply("blender-props", "보내는 중이에요", working=True)  # still waiting on the result
         self.hub.report_action("unity", "MyGame@aaaa1111", "ch_import_model", "")
         self.hub.check_dialogs()
         self.assertEqual(self.asked, [("unity", "MyGame@aaaa1111")])

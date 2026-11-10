@@ -79,7 +79,9 @@ INSTRUCTIONS = (
     "skill describes, and report back in the chat_id the request came from. If agent is \"none\", the window's subagent could "
     "not be made automatically: reply that MCP for Unity should show Connected (Window > MCP for Unity) or the "
     "MCP for Blender server should be on, then ask them to send the message again. For work that takes "
-    "more than a few seconds, send a short reply first saying what you are doing, then the result. "
+    "more than a few seconds, send a short reply first saying what you are doing, with working set to true, then the "
+    "result without it: only a reply without working counts as the answer (the panel's alert and pictures of other "
+    "windows come with it). "
     "Messages without a <channel> tag come from the terminal or the Claude app (Remote Control). When such a request "
     "is about a Unity or Blender window and says 'this', 'the selected one' or 'here' without naming it, call "
     "current_context to see what is selected where and which window was used last. After work requested that way "
@@ -103,6 +105,8 @@ REPLY_TOOL = {
             "origin": {"type": "string", "enum": ["panel", "desktop"],
                        "description": "desktop: the request came from the terminal or the Claude app, not from this panel"},
             "request": {"type": "string", "description": "With origin desktop: one line saying what was asked"},
+            "working": {"type": "boolean", "description": "true on a short message sent while the work still goes on "
+                                                          "('working on it'); leave it out on the result"},
         },
         "required": ["chat_id", "text"],
     },
@@ -300,14 +304,20 @@ class ChatHub:
         """A chat a panel has used, or a window's subagent (so work asked in the Claude app can be recorded there)."""
         return chat_id in self.logs or any(a.name == chat_id for a in load_agents(self.agents_dir))
 
-    def reply(self, chat_id: str, text: str, origin: str = "panel", request: str = "") -> bool:
+    def reply(self, chat_id: str, text: str, origin: str = "panel", request: str = "", working: bool = False) -> bool:
+        """working: a short message while the work goes on ("작업 중이에요"). It is not the answer: the request stays
+        open, the work line and its undo point go on, and pictures of other windows wait for the result."""
         if not self.known_chat(chat_id):
             return False
         item = {"kind": "reply", "text": text}
         if origin == "desktop":
             item.update(origin="desktop", request=request[:500])
+        if working:
+            item["working"] = True
         with self.cond:
             self._append(chat_id, item)
+            if working:
+                return True
             if self.progress.pop(chat_id, None) is not None:  # the answer is in: the bar goes away
                 self._bump_progress(chat_id)
             others = self._changed_elsewhere(chat_id) if origin != "desktop" else []
@@ -530,9 +540,10 @@ class ChatHub:
         return {"chat_id": agent.name, "new_request": first, "label": label}
 
     def _open_request(self, chat_id: str) -> str:
-        """The panel message not answered yet, in a few words ("" when the request came from elsewhere)."""
+        """The panel message not answered yet, in a few words ("" when the request came from elsewhere). A "working on
+        it" reply does not answer it."""
         for item in reversed(self.logs.get(chat_id, [])):
-            if item.get("kind") == "reply":
+            if item.get("kind") == "reply" and not item.get("working"):
                 return ""
             if item.get("kind") == "user":
                 return " ".join(str(item.get("text", "")).split())[:40]
@@ -607,7 +618,8 @@ class StdioMcp:
         origin = "desktop" if args.get("origin") == "desktop" else "panel"
         if not text.strip():
             return {"isError": True, "content": [{"type": "text", "text": "text is empty"}]}
-        if not self.hub.reply(chat_id, clip(text, MAX_TEXT), origin, clip(str(args.get("request", "")), MAX_CONTEXT)):
+        if not self.hub.reply(chat_id, clip(text, MAX_TEXT), origin, clip(str(args.get("request", "")), MAX_CONTEXT),
+                              working=args.get("working") in (True, "true")):
             return {"isError": True, "content": [{"type": "text", "text": f"Unknown chat_id {chat_id!r}. Use the chat_id from the "
                                                   "<channel> tag, or a window's chat_id from current_context."}]}
         if len(text) > MAX_TEXT:

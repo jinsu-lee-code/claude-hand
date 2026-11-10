@@ -11,7 +11,7 @@ Install: `uv run tools/claude_hand.py blender-install-chat` (or Preferences > Ad
 bl_info = {
     "name": "Claude Hand Chat",
     "author": "claude-hand",
-    "version": (0, 7, 0),
+    "version": (0, 7, 1),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar (N) > Claude Hand",
     "description": "Chat with this Blender window's claude-hand subagent",
@@ -451,11 +451,12 @@ def _bring_to_front(pid):
 def wants_attention(item, now):
     """A fresh reply to a request made here, a permission prompt, or a dialog that stopped the window doing the work:
     worth calling the user back for. Not history shown again after a restart, and not replies to work asked in the
-    Claude app (the user is there)."""
+    Claude app (the user is there), nor a "working on it" message sent before the result."""
     if now - float(item.get("ts") or 0) > ALERT_FRESH_SECONDS:
         return False
     kind = item.get("kind")
-    return kind == "permission" or (kind == "reply" and item.get("origin") != "desktop") or (kind == "notice" and bool(item.get("alert")))
+    return kind == "permission" or (kind == "reply" and item.get("origin") != "desktop" and not item.get("working")) or \
+        (kind == "notice" and bool(item.get("alert")))
 
 
 def flash_taskbar():
