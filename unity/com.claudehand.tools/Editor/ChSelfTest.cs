@@ -99,6 +99,14 @@ namespace ClaudeHand.Editor
                     Check("materials=embedded: back to the model's own material", Ok(back) &&
                           AssetDatabase.GetAssetPath(instance.GetComponentInChildren<Renderer>().sharedMaterial) == assetPath,
                         AssetDatabase.GetAssetPath(instance.GetComponentInChildren<Renderer>().sharedMaterial));
+                    Check("materials=embedded: the answer says which links went", Ok(back) && back["data"]["materials"].HasValues &&
+                          back["data"]["materials"].Value<string>("mode") == "embedded" &&
+                          back["data"]["materials"]["unlinked"].Values<string>().Contains(used.name), Describe(back));
+                    // Replaced three times within the same second by now: each file it replaced is still there.
+                    var keptFiles = new[] { second, third, back }.Select(r => Ok(r) ? r["data"].Value<string>("previous_file") : null).ToList();
+                    Check("replaced again right away: every replaced file is kept under its own name",
+                        keptFiles.All(f => !string.IsNullOrEmpty(f) && File.Exists(f)) && keptFiles.Distinct().Count() == keptFiles.Count,
+                        string.Join(", ", keptFiles));
                 }
                 else
                 {

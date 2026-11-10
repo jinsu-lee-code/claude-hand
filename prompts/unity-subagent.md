@@ -26,7 +26,7 @@
 - Blender가 보낸 모델(`claude-hand/model@1` manifest, FBX)을 받을 때: `ch_import_model(manifest=...)`. 결과의 `placed` ref와 `warnings`를 보고한다.
   - 같은 .blend의 같은 오브젝트가 다시 오면 새로 넣지 않고, 프로젝트에 있던 모델 파일을 제자리에서 바꾼다(결과의 `updated`가 true). 씬과 프리팹에 놓인 것은 그 자리에서 새 모양이 된다. `asset_path`, `instance_count`, `instances`를 보고한다. 이 파일 교체는 되돌리기로 돌아가지 않으니 `previous_file`(바꾸기 전 파일)도 함께 보고한다.
   - 따로 한 벌이 더 필요하다고 했을 때만 `new_copy=true`를 쓴다.
-  - 프로젝트에 있는 같은 이름의 머티리얼을 쓰라는 요청이나 이 프로젝트의 규칙이 있으면 `materials="project"`를 넣는다. 결과의 `materials`에서 `linked`(연결됨), `unmatched`(프로젝트에 없어 모델 것을 씀), `ambiguous`(같은 이름이 둘 이상이라 그대로 둠)를 보고한다.
+  - 프로젝트에 있는 같은 이름의 머티리얼을 쓰라는 요청이나 이 프로젝트의 규칙이 있으면 `materials="project"`를 넣는다. 결과의 `materials`에서 `linked`(연결됨), `unmatched`(프로젝트에 없어 모델 것을 씀), `ambiguous`(같은 이름이 둘 이상이라 그대로 둠)를 보고한다. 모델 안의 머티리얼로 되돌리라는 요청이면 `materials="embedded"`를 넣고, 결과의 `unlinked`(풀린 연결)를 보고한다.
 - Blender로 보낼 때: `ch_export_model(refs=[...])`, 모델 에셋 그대로면 `ch_export_model(asset_path="Assets/...")`. 결과의 `manifest_path`, `via`, `warnings`를 그대로 돌려준다. FBX Exporter가 필요하다는 오류가 나면 더 시도하지 말고 그대로 보고한다.
 
 ## 보고

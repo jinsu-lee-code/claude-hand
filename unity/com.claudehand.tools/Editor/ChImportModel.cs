@@ -157,13 +157,17 @@ namespace ClaudeHand.Editor
             var mode = materials.Length > 0 ? materials : record?.materials ?? "embedded";
             bool dirty = false;
             var materialReport = mode == "project" ? UseProjectMaterials(importer as ModelImporter, model, assetPath, warnings, ref dirty) : null;
+            var unlinked = new List<string>();
             if (mode == "embedded" && record?.materials == "project" && importer is ModelImporter linked)
             {
                 // Asked to go back to the model's own materials: drop the links an earlier materials=project made.
                 foreach (var id in linked.GetExternalObjectMap().Keys.Where(k => k.type == typeof(Material)).ToList())
                 {
-                    dirty |= linked.RemoveRemap(id);
+                    if (!linked.RemoveRemap(id)) continue;
+                    dirty = true;
+                    unlinked.Add(id.name);
                 }
+                materialReport = new { mode = "embedded", linked = new List<object>(), unmatched = new List<string>(), ambiguous = new List<object>(), unlinked };
             }
             if (incoming.Source != null && p.new_copy != true)
             {
@@ -218,6 +222,10 @@ namespace ClaudeHand.Editor
                 message = place
                     ? $"Imported {assetPath} and placed it in the scene. The scene is modified but not saved."
                     : $"Imported {assetPath}.";
+            }
+            if (unlinked.Count > 0)
+            {
+                message += $" It uses its own materials again: {unlinked.Count} link(s) to project materials were removed.";
             }
             return new ChSuccess(message, new
             {
@@ -285,8 +293,14 @@ namespace ClaudeHand.Editor
         {
             var dir = Path.Combine(ChPaths.LibraryDir, "replaced");
             Directory.CreateDirectory(dir);
-            var kept = Path.Combine(dir, $"{Path.GetFileNameWithoutExtension(file)}_{DateTime.Now:yyyyMMdd_HHmmss}{Path.GetExtension(file)}");
-            File.Copy(file, kept, true);
+            var stem = $"{Path.GetFileNameWithoutExtension(file)}_{DateTime.Now:yyyyMMdd_HHmmss}";
+            var kept = Path.Combine(dir, stem + Path.GetExtension(file));
+            for (int n = 2; File.Exists(kept); n++)
+            {
+                // Replaced twice within a second: the earlier file must not be the one that gets written over.
+                kept = Path.Combine(dir, $"{stem}_{n}{Path.GetExtension(file)}");
+            }
+            File.Copy(file, kept, false);
             try
             {
                 foreach (var old in new DirectoryInfo(dir).GetFiles().OrderByDescending(f => f.LastWriteTimeUtc).Skip(ReplacedKept)) old.Delete();
