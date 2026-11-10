@@ -144,8 +144,7 @@ def doctor_checks(projects: list[Path], blender_ports: list[int], version=instal
         "" if chat_addons else "uv run tools/claude_hand.py blender-install-chat")
 
     agents_dir = Path.home() / ".claude" / "agents"
-    generated = sorted(p.name for p in agents_dir.glob("*.md") if constants.GENERATED_MARKER in p.read_text(encoding="utf-8", errors="replace")) \
-        if agents_dir.is_dir() else []
+    generated = sorted(info.file.name for info in agents.installed_agents(agents_dir))
     add("claude-hand", "하위 세션 정의 파일", bool(generated) or None, ", ".join(generated) or "없음",
         "" if generated else "uv run tools/claude_hand.py sync")
     skill = Path.home() / ".claude" / "skills" / "claude-hand" / "SKILL.md"
@@ -170,11 +169,11 @@ def stale_checks(agents_dir: Path, skills_dir: Path) -> list[Check]:
     if installed.exists() and installed.read_text(encoding="utf-8") != agents.rendered_skill():
         checks.append(Check("갱신", "설치된 감독 스킬이 저장소 버전과 다름", False, str(installed), "uv run tools/claude_hand.py update"))
     outdated = []
-    for path in sorted(agents_dir.glob("*.md")) if agents_dir.is_dir() else []:
-        text = path.read_text(encoding="utf-8", errors="replace")
-        inst = agents.parse_generated_agent(text) if constants.GENERATED_MARKER in text else None
+    for info in agents.installed_agents(agents_dir):
+        inst, path = info.instance(), info.file
         if inst is None:
             continue
+        text = path.read_text(encoding="utf-8", errors="replace")
         files = agents.build_agent_files([] if isinstance(inst, discovery.BlenderInstance) else [inst], discovery.detect_server_config(),
                                   [inst] if isinstance(inst, discovery.BlenderInstance) else [], discovery.detect_blender_config(), "uv run -q --no-project")
         if path.name in files and files[path.name] != text:

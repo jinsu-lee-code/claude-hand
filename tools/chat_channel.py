@@ -46,15 +46,13 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from handlib.agents import refresh_agents, slug  # noqa: E402
+from handlib.agents import AgentInfo, installed_agents, refresh_agents, slug  # noqa: E402
 from handlib.capture import capture_window  # noqa: E402
-from handlib.constants import GENERATED_MARKER  # noqa: E402
 from handlib.link import claude_hand_home, supervisor_running  # noqa: E402
 from unity_bridge import describe_dialogs, find_project, waiting_dialogs  # noqa: E402
 
@@ -145,34 +143,7 @@ def default_agents_dir(env=os.environ) -> Path:
 # --------------------------------------------------------------------------- window -> subagent
 
 
-@dataclass
-class AgentEntry:
-    name: str
-    app: str
-    pin: str
-
-
-def load_agents(directory: Path) -> list[AgentEntry]:
-    """Read the subagents `claude_hand.py sync` generated (name, app, pinned instance)."""
-    entries = []
-    if not directory.is_dir():
-        return entries
-    for path in sorted(directory.glob("*.md")):
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        if GENERATED_MARKER not in text:
-            continue
-        name = re.search(r"^name:\s*(\S+)\s*$", text, re.M)
-        pin = re.search(r'--pin \\"(.+?)\\"', text)
-        app = re.search(r"--app (unity|blender)\b", text)
-        if name and pin:
-            entries.append(AgentEntry(name.group(1), app.group(1) if app else "unity", pin.group(1)))
-    return entries
-
-
-def resolve_window(agents: list[AgentEntry], app: str, window: str, pin: str = "") -> tuple[str, str | None]:
+def resolve_window(agents: list[AgentInfo], app: str, window: str, pin: str = "") -> tuple[str, str | None]:
     """(chat_id, agent name or None). One chat per window; chat_id is the owning subagent's name when known."""
     candidates = [a for a in agents if a.app == app]
     exact = [a for a in candidates if pin and a.pin == pin]
@@ -254,7 +225,7 @@ class ChatHub:
         return item
 
     def resolve(self, app: str, window: str, pin: str = "") -> tuple[str, str | None]:
-        chat_id, agent = resolve_window(load_agents(self.agents_dir), app, window, pin)
+        chat_id, agent = resolve_window(installed_agents(self.agents_dir), app, window, pin)
         if agent is None and self.auto_sync is not None:
             # A window opened after the supervisor started: make its subagent now instead of asking
             # the user to run `sync`. Claude Code picks up new files in ~/.claude/agents by itself.
@@ -268,7 +239,7 @@ class ChatHub:
                     self.auto_sync(self.agents_dir)
                 except (Exception, SystemExit) as exc:  # sync refuses to overwrite hand-written files
                     log("automatic subagent refresh failed:", exc)
-                chat_id, agent = resolve_window(load_agents(self.agents_dir), app, window, pin)
+                chat_id, agent = resolve_window(installed_agents(self.agents_dir), app, window, pin)
         return chat_id, agent
 
     def post_user_message(self, app: str, window: str, text: str, pin: str = "", context: str = "") -> dict:
@@ -301,7 +272,7 @@ class ChatHub:
 
     def known_chat(self, chat_id: str) -> bool:
         """A chat a panel has used, or a window's subagent (so work asked in the Claude app can be recorded there)."""
-        return chat_id in self.logs or any(a.name == chat_id for a in load_agents(self.agents_dir))
+        return chat_id in self.logs or any(a.name == chat_id for a in installed_agents(self.agents_dir))
 
     def reply(self, chat_id: str, text: str, origin: str = "panel", request: str = "", working: bool = False) -> bool:
         """working: a short message while the work goes on ("작업 중이에요"). It is not the answer: the request stays
@@ -338,7 +309,7 @@ class ChatHub:
 
     def _attach_previews(self, chat_id: str, others: list[str]) -> None:
         """Background thread: capture each window and add the picture to the chat (no Claude involved, no tokens)."""
-        agents = {a.name: a for a in load_agents(self.agents_dir)}
+        agents = {a.name: a for a in installed_agents(self.agents_dir)}
         for other in others:
             agent = agents.get(other)
             if agent is None:
@@ -368,7 +339,7 @@ class ChatHub:
             busy = [chat for chat, entry in self.progress.items() if now - entry["updated"] <= PROGRESS_TTL]
             for chat in [c for c in self.dialog_seen if c not in busy]:
                 del self.dialog_seen[chat]
-        agents = {a.name: a for a in load_agents(self.agents_dir)} if busy else {}
+        agents = {a.name: a for a in installed_agents(self.agents_dir)} if busy else {}
         for chat in busy:
             agent = agents.get(chat)
             dialogs = self.find_dialogs(agent.app, agent.pin) if agent else []
@@ -407,7 +378,7 @@ class ChatHub:
 
     def update_context(self, app: str, window: str, pin: str, context: dict) -> str:
         """A Unity or Blender window reports what is selected and open (no chat message needed)."""
-        chat_id, agent = resolve_window(load_agents(self.agents_dir), app, window, pin)
+        chat_id, agent = resolve_window(installed_agents(self.agents_dir), app, window, pin)
         clean = {}
         for key in ("scene", "file", "active", "mode"):
             if isinstance(context.get(key), str):
@@ -524,7 +495,7 @@ class ChatHub:
         """A window's subagent is about to run a Unity/Blender tool (its guard hook says so): show it in that
         window's panel. new_request is true for the first action of a request (the guard sets an undo point then),
         with label: the panel message it answers, if any. None for a pin no generated subagent has."""
-        agent = next((a for a in load_agents(self.agents_dir) if a.app == app and a.pin == pin), None)
+        agent = next((a for a in installed_agents(self.agents_dir) if a.app == app and a.pin == pin), None)
         if agent is None:
             return None
         with self.cond:
@@ -973,7 +944,7 @@ def self_check(env=os.environ) -> dict:
     except OSError as exc:
         checks["port_ok"] = False
         checks["port_error"] = str(exc)
-    checks["agents"] = [a.name for a in load_agents(default_agents_dir(env))]
+    checks["agents"] = [a.name for a in installed_agents(default_agents_dir(env))]
     checks["ok"] = checks["python_ok"] and checks["home_ok"] and checks["port_ok"]
     return checks
 

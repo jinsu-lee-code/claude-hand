@@ -120,7 +120,8 @@ def render_agent(inst: discovery.Instance, name: str, server: discovery.ServerCo
     lines += [f"  - {bridge_key}:", "      type: stdio", f"      command: {q(runner_parts[0])}",
               "      args: " + json.dumps(bridge_args, ensure_ascii=False)]
     lines += hook_block(hook_command(runner, inst.id, key, server.transport, "unity"))
-    lines += ["---", constants.GENERATED_MARKER, "", render_agent_prompt(inst, key, server.transport)]
+    lines += ["---", constants.GENERATED_MARKER, meta_line("unity", inst.id, inst.path, key), "",
+              render_agent_prompt(inst, key, server.transport)]
     return "\n".join(lines) + "\n"
 
 
@@ -214,7 +215,8 @@ def render_blender_agent(inst: discovery.BlenderInstance, name: str, server: dis
     env["BLENDER_PORT"] = str(inst.port)
     lines += [f"        {k}: {q(v)}" for k, v in sorted(env.items())]
     lines += hook_block(hook_command(runner, inst.id, key, "stdio", "blender"))
-    lines += ["---", constants.GENERATED_MARKER, "", render_blender_prompt(inst, key)]
+    lines += ["---", constants.GENERATED_MARKER, meta_line("blender", inst.id, inst.filepath, key), "",
+              render_blender_prompt(inst, key)]
     return "\n".join(lines) + "\n"
 
 
@@ -314,16 +316,87 @@ def refresh_agents(agents_dir: Path | None = None, runner: str = "uv run -q --no
                        blender_server=discovery.detect_blender_config() if blender else None, notes_root=constants.REPO_ROOT)
 
 
-def parse_generated_agent(text: str) -> discovery.BlenderInstance | discovery.Instance | None:
-    """Rebuild the instance a generated subagent file was made for (to re-render it after an update)."""
+META_PREFIX = "<!-- claude-hand: "
+
+
+@dataclass
+class AgentInfo:
+    """What a subagent file sync wrote is for: the window it is pinned to."""
+
+    name: str
+    app: str  # "unity" | "blender"
+    pin: str  # Name@hash for Unity, <file>@<port> for Blender
+    path: str = ""  # the Unity project folder or the .blend file, when known
+    server: str = ""  # the key of its MCP server: its tools are mcp__<server>__*
+    file: Path | None = None
+
+    def instance(self) -> discovery.Instance | discovery.BlenderInstance | None:
+        """The window as discovery describes it, to write the file again from the current templates."""
+        name, _, tail = self.pin.rpartition("@")
+        if self.app == "blender":
+            return discovery.BlenderInstance(port=int(tail), filepath=self.path) if tail.isdigit() else None
+        return discovery.Instance(name=name, hash=tail, path=self.path)
+
+
+def meta_line(app: str, pin: str, path: str, server: str) -> str:
+    """The line of a generated file that says, for programs, what the file is for. The chat channel, `update` and
+    doctor read this, not the pin inside the hook command or the path inside the prompt's wording, so those can be
+    reworded without anything else noticing. It is in the file itself, not in a list kept beside the files, so the
+    two cannot disagree."""
+    return META_PREFIX + json.dumps({"app": app, "pin": pin, "path": path, "server": server}, ensure_ascii=False) + " -->"
+
+
+def read_agent(text: str) -> AgentInfo | None:
+    """What a subagent file is for; None when sync did not write it."""
+    if constants.GENERATED_MARKER not in text:
+        return None
+    name = re.search(r"^name:\s*(\S+)\s*$", text, re.M)
+    if not name:
+        return None
+    line = next((line for line in text.splitlines() if line.startswith(META_PREFIX)), None)
+    if line is None:
+        return _read_agent_without_meta(name.group(1), text)
+    try:
+        data = json.loads(line[len(META_PREFIX):].rpartition(" -->")[0])
+        return AgentInfo(name.group(1), str(data["app"]), str(data["pin"]), str(data.get("path") or ""), str(data.get("server") or ""))
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def _read_agent_without_meta(name: str, text: str) -> AgentInfo | None:
+    """A file written before the meta line existed: the pin from its hook command, the path from its prompt's
+    wording at the time. `update` writes such files again; this only has to read them until then."""
     pin = re.search(r'--pin \\"(.+?)\\"', text)
-    app = re.search(r"--app (unity|blender)\b", text)
     if not pin:
         return None
-    name, _, tail = pin.group(1).rpartition("@")
-    if (app.group(1) if app else "unity") == "blender":
+    app = re.search(r"--app (unity|blender)\b", text)
+    if app and app.group(1) == "blender":
         path = re.search(r"파일 `([^`]*)`, MCP for Blender 포트", text)
         filepath = path.group(1) if path and path.group(1) != "저장 안 된 파일" else ""
-        return discovery.BlenderInstance(port=int(tail), filepath=filepath) if tail.isdigit() else None
+        return AgentInfo(name, "blender", pin.group(1), filepath, server_key(name))
     path = re.search(r"\(경로: `([^`]*)`\)", text)
-    return discovery.Instance(name=name, hash=tail, path=path.group(1) if path else "")
+    return AgentInfo(name, "unity", pin.group(1), path.group(1) if path else "", server_key(name))
+
+
+_READ: dict[str, tuple[tuple[int, int], AgentInfo | None]] = {}  # path -> ((mtime, size) when read, what it said)
+
+
+def installed_agents(agents_dir: Path) -> list[AgentInfo]:
+    """The subagents sync wrote into `agents_dir`. A file is read again only when it changed: the chat channel asks
+    on every panel message, context report and tool call of a subagent."""
+    found = []
+    for path in sorted(agents_dir.glob("*.md")) if agents_dir.is_dir() else []:
+        try:
+            stat = path.stat()
+            stamp = (stat.st_mtime_ns, stat.st_size)
+            seen = _READ.get(str(path))
+            if seen is None or seen[0] != stamp:
+                info = read_agent(path.read_text(encoding="utf-8", errors="replace"))
+                if info is not None:
+                    info.file = path
+                seen = _READ[str(path)] = (stamp, info)
+        except OSError:
+            continue
+        if seen[1] is not None:
+            found.append(seen[1])
+    return found

@@ -156,7 +156,7 @@ class BlenderChatAddonTests(unittest.TestCase):
 
     def test_progress_line_while_the_subagent_works(self):
         addon = self.addon
-        pin = next(a.pin for a in cc.load_agents(Path(self.tmp.name) / "agents") if a.app == "blender")
+        pin = next(a.pin for a in handlib.agents.installed_agents(Path(self.tmp.name) / "agents") if a.app == "blender")
         self.assertTrue(wait_for(lambda: addon._status[0].startswith("담당"), addon))
         chat_id = self.hub.report_action("blender", pin, "execute_code", "bpy.ops.mesh.primitive_uv_sphere_add()")["chat_id"]
         self.assertTrue(wait_for(lambda: addon._progress[0] is not None, addon))

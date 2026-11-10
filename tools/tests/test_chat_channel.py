@@ -43,19 +43,19 @@ class RoutingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             write_agents(Path(tmp))
             (Path(tmp) / "mine.md").write_text("---\nname: mine\n---\nhand written\n", encoding="utf-8")
-            agents = cc.load_agents(Path(tmp))
+            agents = handlib.agents.installed_agents(Path(tmp))
         self.assertEqual(sorted((a.name, a.app, a.pin) for a in agents),
                          [("blender-props", "blender", "props@9877"), ("unity-mygame", "unity", "MyGame@aaaa1111")])
 
     def test_resolve_window(self):
-        agents = [cc.AgentEntry("unity-mygame", "unity", "MyGame@aaaa1111"), cc.AgentEntry("blender-props", "blender", "props@9877")]
+        agents = [handlib.agents.AgentInfo("unity-mygame", "unity", "MyGame@aaaa1111"), handlib.agents.AgentInfo("blender-props", "blender", "props@9877")]
         self.assertEqual(cc.resolve_window(agents, "unity", "MyGame"), ("unity-mygame", "unity-mygame"))
         self.assertEqual(cc.resolve_window(agents, "blender", "props", "props@9877"), ("blender-props", "blender-props"))
         self.assertEqual(cc.resolve_window(agents, "blender", "props", "props@9999"), ("blender-props", None))
         self.assertEqual(cc.resolve_window(agents, "unity", "Other Game"), ("unity-other-game", None))
 
     def test_same_project_name_twice_is_not_guessed(self):
-        agents = [cc.AgentEntry("unity-mygame-aaaa", "unity", "MyGame@aaaa1111"), cc.AgentEntry("unity-mygame-cccc", "unity", "MyGame@cccc3333")]
+        agents = [handlib.agents.AgentInfo("unity-mygame-aaaa", "unity", "MyGame@aaaa1111"), handlib.agents.AgentInfo("unity-mygame-cccc", "unity", "MyGame@cccc3333")]
         self.assertEqual(cc.resolve_window(agents, "unity", "MyGame")[1], None)
         self.assertEqual(cc.resolve_window(agents, "unity", "MyGame", "MyGame@cccc3333")[1], "unity-mygame-cccc")
 

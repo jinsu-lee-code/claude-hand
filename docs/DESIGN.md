@@ -167,7 +167,12 @@ Blender N 패널 애드온 (urllib)  ─┼──▶ chat_channel.py ──stdio
 ### 결정
 
 - **채널은 감독 세션 하나에만 붙인다.** 하위 세션마다 따로 Claude를 띄우는 방식(`claude --agent`)은 창끼리 서로를 몰라서 프로젝트 간 작업이 안 된다. 감독이 받아서 그 창 담당에게 넘기면 1:1 대화와 창 사이 조율이 둘 다 된다.
-- **창 → 하위 세션 연결은 채널 서버가 한다.** `sync`가 만든 정의 파일(`~/.claude/agents/*.md`)에서 이름과 고정 대상(`--pin`, `--app`)을 읽어 메시지 메타에 `agent`로 붙인다.
+- **창 → 하위 세션 연결은 채널 서버가 한다.** `sync`가 만든 정의 파일(`~/.claude/agents/*.md`)에서 이름과 고정 대상을 읽어 메시지 메타에 `agent`로 붙인다.
+  - 정의 파일에는 프로그램이 읽는 줄이 하나 있다: `<!-- claude-hand: {"app": …, "pin": …, "path": …, "server": …} -->`. 채널 서버, `update`, `doctor`는 이 줄만 읽는다(`handlib.agents.read_agent`). 처음에는 훅 명령 속의 `--pin`과 프롬프트 문장 속의 경로를 정규식으로 꺼냈는데, 그러면 훅 명령이나 문장을 고칠 때 채팅 연결과 `update`가 오류 없이 어긋난다(REVIEW-2026-11-10의 5번).
+  - 따로 목록 파일(`agents.json`)을 두지 않고 정의 파일 안에 넣었다. 목록과 파일이 둘이면 서로 어긋날 수 있고(파일을 손으로 지운 경우), 파일 하나면 그럴 일이 없다.
+  - 그 줄이 없는 예전 파일은 예전 방식으로 읽는다. `update`가 다시 쓰면 그 길은 더 쓰이지 않는다.
+  - 채널 서버는 메시지, 현재 상황 보고, 하위 세션의 도구 호출마다 이 목록이 필요하다. 그래서 파일이 바뀌었을 때만(수정 시각과 크기) 다시 읽는다.
+  - Blender 창용 등록 파일은 만들지 않았다. 채팅 애드온이 없는 Blender 때문에 포트 훑기는 어차피 남고, 등록 파일이 생기면 닫힌 창이 남긴 파일을 가려내는 일이 하나 더 생긴다.
   - Unity는 프로젝트 이름으로 찾는다. 같은 이름이 둘이면 추측하지 않고 `none`으로 둔다.
   - Blender는 `<파일>@<포트>`가 정확히 같아야 한다.
   - `chat_id`는 담당 하위 세션 이름이라 창마다 하나다.
@@ -185,7 +190,7 @@ Blender N 패널 애드온 (urllib)  ─┼──▶ chat_channel.py ──stdio
   2. 부모 프로세스 확인: 위로 올라가며 **가장 가까운 Claude Code 프로세스**를 찾는다(실행 파일 이름에 claude가 있거나, claude-code를 실행하는 node·bun). 그 명령줄에 `--dangerously-load-development-channels`(또는 `--channels`)와 `server:claude-hand-chat`이 있으면 감독이다. Windows는 PowerShell CIM, 그 밖은 `ps`로 읽는다. 사용자가 `start-supervisor` 없이 직접 채널 플래그로 열어도 동작한다. 가까운 Claude Code만 보는 건, 중간에 낀 셸의 명령줄 글자에 속지 않기 위해서다(개발 중 실제로 이렇게 오탐이 났다).
 - **상태 기록:** 시작할 때마다 `~/.claude-hand/chat/status.json`에 상태(serving, passive, stopped)와 이유를 남긴다. `server.json`이 없을 때 채팅창은 이 파일을 읽고 "대기 중: 채널 플래그 없이 연 세션" 같은 정확한 원인을 보여준다. `claude_hand.py chat-status`는 여기에 설정 형식, 예전 local 등록, 승인 대기, 응답 없는 `server.json`까지 함께 진단한다.
 - **갱신:** `update`가 다음을 한 번에 한다.
-  - 기존 하위 세션 정의를 그 안의 `--pin`에서 다시 읽어 새 템플릿으로 다시 쓴다
+  - 기존 하위 세션 정의가 어느 창의 것인지 읽어 새 템플릿으로 다시 쓴다
   - 감독 스킬을 다시 설치하고, 첫 버전의 `claude-hand-unity` 폴더를 지운다
   - 예전 local 범위 채널 등록을 지운다. local이 project보다 우선하기 때문이다
   - `chat-setup`을 다시 실행해 점검까지 한다

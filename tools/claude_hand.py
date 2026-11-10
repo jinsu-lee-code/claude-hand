@@ -309,12 +309,9 @@ def cmd_update(args: argparse.Namespace) -> int:
     skills_dir = Path(args.skills_dir).expanduser()
 
     # 1. Subagents: re-render the ones that exist with the current templates, plus any newly open windows.
-    unity, blender = [], []
-    for path in sorted(agents_dir.glob("*.md")) if agents_dir.is_dir() else []:
-        text = path.read_text(encoding="utf-8", errors="replace")
-        if constants.GENERATED_MARKER in text:
-            inst = agents.parse_generated_agent(text)
-            (blender if isinstance(inst, discovery.BlenderInstance) else unity).append(inst) if inst else None
+    known = [info.instance() for info in agents.installed_agents(agents_dir)]
+    unity = [inst for inst in known if isinstance(inst, discovery.Instance)]
+    blender = [inst for inst in known if isinstance(inst, discovery.BlenderInstance)]
     server = discovery.detect_server_config()
     live_unity = discovery.gather_instances(server, [], include_dead=False)
     live_blender = discovery.discover_blender(discovery.parse_ports(args.blender_ports))

@@ -861,11 +861,56 @@ class UpdateAndStatusTests(unittest.TestCase):
         unity = handlib.discovery.Instance(name="My Game", hash="aaaa1111", path="C:/Projects/My Game")
         blender = handlib.discovery.BlenderInstance(port=9877, filepath="C:/Art/props (v2).blend")
         files = handlib.agents.build_agent_files([unity], handlib.discovery.ServerConfig(transport="stdio"), [blender], None, "uv run")
-        back = {name: handlib.agents.parse_generated_agent(text) for name, text in files.items()}
+        infos = {name: handlib.agents.read_agent(text) for name, text in files.items()}
+        back = {name: info.instance() for name, info in infos.items()}
         self.assertEqual((back["unity-my-game.md"].id, back["unity-my-game.md"].path), (unity.id, unity.path))
         self.assertEqual((back["blender-props-v2.md"].port, back["blender-props-v2.md"].filepath), (9877, blender.filepath))
+        self.assertEqual((infos["unity-my-game.md"].name, infos["unity-my-game.md"].app, infos["unity-my-game.md"].server),
+                         ("unity-my-game", "unity", "unity_my_game"))
+        self.assertEqual((infos["blender-props-v2.md"].app, infos["blender-props-v2.md"].pin), ("blender", "props (v2)@9877"))
         untitled = handlib.agents.build_agent_files([], None, [handlib.discovery.BlenderInstance(port=9878)], None, "uv run")
-        self.assertEqual(handlib.agents.parse_generated_agent(next(iter(untitled.values()))).filepath, "")
+        self.assertEqual(handlib.agents.read_agent(next(iter(untitled.values()))).instance().filepath, "")
+        self.assertIsNone(handlib.agents.read_agent("---\nname: mine\n---\nhand written\n"))  # not sync's: left alone
+
+    def test_what_a_file_is_for_does_not_depend_on_its_wording(self):
+        """The chat channel and `update` read one line made for them, not the hook command or the prompt's sentences."""
+        unity = handlib.discovery.Instance(name="My Game", hash="aaaa1111", path="C:/Projects/My Game")
+        text = handlib.agents.render_agent(unity, "unity-my-game", handlib.discovery.ServerConfig(transport="stdio"), "uv run", True, False)
+        front, body = text.split(handlib.constants.GENERATED_MARKER)
+        reworded = front.replace("--pin", "--window").replace("--app unity", "") + handlib.constants.GENERATED_MARKER + \
+            body.replace("(경로: `C:/Projects/My Game`)", "").replace("Unity 프로젝트 전담", "다른 제목")
+        info = handlib.agents.read_agent(reworded)
+        self.assertEqual((info.app, info.pin, info.path), ("unity", "My Game@aaaa1111", "C:/Projects/My Game"))
+
+    def test_files_from_before_the_meta_line_are_still_read(self):
+        """Until `update` writes them again."""
+        unity = handlib.discovery.Instance(name="My Game", hash="aaaa1111", path="C:/Projects/My Game")
+        blender = handlib.discovery.BlenderInstance(port=9877, filepath="C:/Art/props.blend")
+        files = handlib.agents.build_agent_files([unity], handlib.discovery.ServerConfig(transport="stdio"), [blender], None, "uv run")
+        old = {name: "\n".join(line for line in text.splitlines() if not line.startswith(handlib.agents.META_PREFIX))
+               for name, text in files.items()}
+        self.assertNotEqual(old, files)
+        info = handlib.agents.read_agent(old["unity-my-game.md"])
+        self.assertEqual((info.app, info.pin, info.path, info.server), ("unity", "My Game@aaaa1111", "C:/Projects/My Game", "unity_my_game"))
+        info = handlib.agents.read_agent(old["blender-props.md"])
+        self.assertEqual((info.app, info.pin, info.path), ("blender", "props@9877", "C:/Art/props.blend"))
+
+    def test_installed_agents_reads_a_file_again_only_when_it_changed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            inst = handlib.discovery.Instance(name="MyGame", hash="aaaa1111")
+            handlib.agents.sync_agents([inst], d, handlib.discovery.ServerConfig(transport="stdio"), "uv run")
+            (d / "mine.md").write_text("---\nname: mine\n---\nhand written\n", encoding="utf-8")
+            first = handlib.agents.installed_agents(d)
+            self.assertEqual([(a.name, a.pin, a.file.name) for a in first], [("unity-mygame", "MyGame@aaaa1111", "unity-mygame.md")])
+            with unittest.mock.patch.object(handlib.agents, "read_agent", lambda text: 1 / 0):  # nothing changed: nothing read
+                self.assertEqual(handlib.agents.installed_agents(d), first)
+            handlib.agents.sync_agents([inst, handlib.discovery.Instance(name="Props", hash="bbbb2222")], d,
+                                       handlib.discovery.ServerConfig(transport="stdio"), "uv run")
+            self.assertEqual([a.name for a in handlib.agents.installed_agents(d)], ["unity-mygame", "unity-props"])
+            (d / "unity-props.md").unlink()
+            self.assertEqual([a.name for a in handlib.agents.installed_agents(d)], ["unity-mygame"])
+        self.assertEqual(handlib.agents.installed_agents(Path(tmp) / "gone"), [])
 
     def test_stale_checks_and_update_refresh(self):
         with tempfile.TemporaryDirectory() as tmp:
