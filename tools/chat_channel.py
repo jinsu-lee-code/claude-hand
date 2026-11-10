@@ -204,7 +204,7 @@ class ChatHub:
         self.history_dir: Path | None = None  # where each chat's recent messages are kept across restarts
         self.progress: dict[str, dict] = {}  # chat_id -> what its subagent is doing now (shown as a bar in the panel)
         self.progress_rev: dict[str, int] = {}  # bumped on every change, so a waiting panel wakes up
-        self.acted: dict[str, float] = {}  # chat_id -> when its window's subagent last ran a Unity/Blender tool
+        self.acted: dict[str, float] = {}  # chat_id -> when its window's subagent last worked for a request made elsewhere
         self.previewed: dict[str, float] = {}  # chat_id -> when its replies last looked for other windows to show
         self.capture = None  # callable(app, pin, path) -> path or None: a picture of what a window shows now
         self.images_dir: Path | None = None  # where result previews are kept (None: no previews)
@@ -316,8 +316,10 @@ class ChatHub:
         return True
 
     def _changed_elsewhere(self, chat_id: str) -> list[str]:
-        """Other windows whose subagents worked since this chat's request (or its previous reply): the user asked
-        here and cannot see them, so the reply gets a picture of each. Called with the lock held."""
+        """Other windows whose subagents worked since this chat's request (or its previous reply) while their own
+        panels waited on nothing: the user asked here and cannot see them, so the reply gets a picture of each. A
+        window busy with its own panel's request is left out: two projects worked on side by side would otherwise
+        get each other's pictures. Called with the lock held."""
         if self.capture is None or self.images_dir is None:
             return []
         asked = max((i["ts"] for i in self.logs.get(chat_id, []) if i.get("kind") == "user"), default=0.0)
@@ -517,12 +519,14 @@ class ChatHub:
         if agent is None:
             return None
         with self.cond:
-            self.acted[agent.name] = time.time()
+            own = self._open_request(agent.name)
+            if not own:  # its own panel waits on nothing: the work was asked in another window, whose reply may show it
+                self.acted[agent.name] = time.time()
             entry = self._progress_entry(agent.name, time.time())
             first = not entry.get("marked")
             entry.update(tool=tool[:80], detail=detail[:120], actions=entry["actions"] + 1, updated=time.time(), marked=True)
             self._bump_progress(agent.name)
-            label = self._open_request(agent.name) if first else ""
+            label = own if first else ""
         return {"chat_id": agent.name, "new_request": first, "label": label}
 
     def _open_request(self, chat_id: str) -> str:

@@ -21,11 +21,11 @@ import claude_hand as ch  # noqa: E402
 TOOL = Path(__file__).resolve().parents[1] / "chat_channel.py"
 
 
-def write_agents(directory: Path) -> None:
+def write_agents(directory: Path, more_unity=()) -> None:
     """Agent files exactly as `claude_hand.py sync` writes them."""
-    unity = ch.Instance(name="MyGame", hash="aaaa1111")
+    unity = [ch.Instance(name="MyGame", hash="aaaa1111"), *more_unity]
     blender = ch.BlenderInstance(port=9877, filepath="C:/Art/props.blend")
-    files = ch.build_agent_files([unity], ch.ServerConfig(transport="stdio"), [blender], None, "uv run")
+    files = ch.build_agent_files(unity, ch.ServerConfig(transport="stdio"), [blender], None, "uv run")
     ch.write_agent_files(files, directory)
 
 
@@ -447,6 +447,25 @@ class PreviewTests(unittest.TestCase):
         self.hub.reply("blender-props", "더 필요한 게 있으면 말해 주세요")  # nothing new since the last picture
         time.sleep(0.3)
         self.assertEqual(len(self.shots), 1)
+
+    def test_two_projects_worked_on_side_by_side_get_no_pictures_of_each_other(self):
+        write_agents(Path(self.tmp.name) / "agents", [ch.Instance(name="Level", hash="bbbb2222")])
+        self.hub.post_user_message("unity", "MyGame", "큐브를 빨갛게", pin="MyGame@aaaa1111")
+        self.hub.post_user_message("unity", "Level", "조명을 어둡게", pin="Level@bbbb2222")
+        self.hub.report_action("unity", "MyGame@aaaa1111", "manage_material", "red")
+        self.hub.report_action("unity", "Level@bbbb2222", "manage_gameobject", "light")
+        self.hub.reply("unity-mygame", "빨갛게 했어요")
+        self.hub.report_action("unity", "Level@bbbb2222", "manage_scene", "save")  # still Level's own request
+        self.hub.reply("unity-level", "어둡게 했어요")
+        time.sleep(0.3)
+        self.assertEqual(self.shots, [])
+        self.assertEqual(self.images("unity-mygame", 0) + self.images("unity-level", 0), [])
+        self.hub.post_user_message("unity", "MyGame", "Level의 조명도 MyGame처럼", pin="MyGame@aaaa1111")
+        self.hub.report_action("unity", "Level@bbbb2222", "manage_gameobject", "light")  # asked from MyGame: shown there
+        self.hub.reply("unity-mygame", "맞췄어요")
+        [image] = self.images("unity-mygame")
+        self.assertEqual((image["window"], self.shots), ("Level", [("unity", "Level@bbbb2222")]))
+        self.assertEqual(self.images("unity-level", 0), [])
 
     def test_no_picture_without_a_capture_or_for_desktop_replies(self):
         self.hub.post_user_message("blender", "props", "Unity 씬 저장해줘", pin="props@9877")
