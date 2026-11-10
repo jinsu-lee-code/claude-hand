@@ -61,12 +61,16 @@ MCP for Unity 기본 도구(씬·오브젝트·스크립트)는 MCP for Unity를
 
 1. **서버 고정:** `--default-instance`. 인자 없이 부른 호출은 고정된 프로젝트로 간다.
 2. **도구 허용 목록:** `tools: mcp__<자기서버>__*, mcp__<자기서버>_ch__*, Read, Glob, Grep`. 부모의 `unityMCP` 도구는 아예 보이지 않는다. `_ch` 서버는 시작 인자(`--hash`)로 자기 프로젝트에만 붙으니 다른 프로젝트를 고를 방법이 없다.
-3. **PreToolUse 훅 (`claude_hand.py guard`):** 서버 고정이 막지 못하는 경우를 막는다.
+3. **PreToolUse 훅 (`tools/guard.py`):** 서버 고정이 막지 못하는 경우를 막는다.
    - 호출마다 넣을 수 있는 `unity_instance` 인자
    - `set_active_instance`
    - 다른 서버의 도구
    - `batch_execute` 안에 든 명령도 재귀로 검사한다.
-   - 훅에 오류가 나면 막는 쪽(fail closed)으로 동작한다.
+   - 훅에 오류가 나면 막는 쪽(fail closed)으로 동작한다. Claude Code는 훅이 종료 코드 0으로 거부를 출력하거나 종료 코드 2로 끝날 때만 호출을 막고, 그 밖의 종료 코드는 "훅 오류"로 보고 호출을 그대로 진행한다. 그래서 가드는 0이나 2로만 끝난다.
+     - 가드를 표준 라이브러리만 쓰는 작은 파일로 따로 둔다. 처음에는 `claude_hand.py`의 한 명령이어서, 그 큰 파일 어디에서든 문법 오류가 나면 종료 코드 1로 끝나 호출이 통과됐다(REVIEW-2026-11-10의 3번).
+     - 판단 뒤에 하는 일(작업 중 표시, 되돌리기 지점)에 필요한 것은 그때 불러온다. 거기서 나는 오류는 판단을 바꾸지 않는다.
+     - 훅이 시작도 못 하는 경우(훅 셸이 uv를 찾지 못함: 종료 코드 127)는 가드가 막을 수 없다. `sync`가 훅 명령에 uv의 전체 경로를 적고(빈칸이 든 경로는 Git Bash와 PowerShell 양쪽에 맞는 따옴표가 없어 이름만 적는다), `selftest`가 설치된 훅 명령을 Git Bash로 그대로 돌려 "남의 호출을 막는지" 본다.
+     - 훅 입력은 UTF-8 바이트로 직접 읽는다. Python이 파이프를 어떤 인코딩으로 읽는지는 PC 설정에 따라 달라서(시험한 PC는 UTF-8이었다) 기본값에 기대지 않는다.
 
 ### 결정 4: 프로젝트 간 이동은 세션 대화가 아니라 파일로 한다
 
@@ -309,7 +313,7 @@ Windows에서 며칠 써 보며 더한 것들이다. 공통 원칙은 **토큰�
 | 2 | `tools`에 `mcp__x__*` 와일드카드가 동작한다 | 위와 같다 |
 | 3 | ~~MCP for Unity의 stdio 서버가 C# 커스텀 도구를 개별 도구로 노출한다~~ **틀림** (Windows, MCP for Unity 10.3.0 stdio: 목록에 없고 sync·execute_custom_tool도 안 됨). 대신 Claude Hand Tools가 자기 통로를 연다: `ChBridge.cs`가 루프백 소켓을 열고 `~/.claude-hand/unity/<hash>.json`에 포트·토큰·도구 목록을 쓰며, 하위 세션마다 `tools/unity_bridge.py`가 `<서버키>_ch` MCP 서버로 붙는다. 남은 가정: 스크립트 리로드 뒤 같은 포트를 다시 잡는다(SessionState), Unity 6.3에서 백그라운드 스레드 소켓과 `EditorApplication.update` 처리가 비활성·최소화 상태에서도 돈다(No Throttling) | 포트가 바뀌면 `unity_bridge.py`가 등록 파일을 다시 읽어 재시도한다(최대 약 20초). 최소화 상태에서 안 돌면 가정 6과 같이 깨우기 장치를 넣는다 |
 | 4 | HTTP 방식에서 인라인 http 서버 연결이 부모와 별개의 MCP 세션이다 | stdio로 바꾼다 |
-| 5 | Windows Git Bash에서 `uv`가 PATH에 있다 | `sync --runner "py -3"` 같이 다른 실행기를 지정한다 |
+| 5 | **확인됨(Windows)** Windows Git Bash에서 `uv`가 PATH에 있다. 이제는 여기에 기대지 않는다: 훅 명령에 uv의 전체 경로를 적고 `selftest`가 설치된 훅을 Git Bash로 돌려 본다(결정 3) | `sync --runner "py -3"` 같이 다른 실행기를 지정한다 |
 | 6 | 비활성·최소화 상태의 Unity가 No Throttling에서 명령을 제때 처리한다 | 2단계: Unity 쪽 깨우기 장치를 넣는다 |
 | 7 | `ImportPackage(interactive:false)`가 포커스 없이 끝난다 | 실측 후 대응한다 |
 | 8 | 최소화된 Blender에서도 애드온 타이머(`bpy.app.timers`)가 명령을 처리한다 | 실측 후 대응한다 |

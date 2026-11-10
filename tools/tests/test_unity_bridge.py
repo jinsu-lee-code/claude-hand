@@ -171,16 +171,6 @@ class DialogTests(unittest.TestCase):
         finally:
             silent.close()
 
-    def test_guard_refuses_unity_calls_while_a_dialog_is_up(self):
-        event = {"tool_name": "mcp__unity_hand_test__manage_scene", "tool_input": {"action": "save"}}
-        reason = ch.dialog_block(event, "hand_test@49ac508c", "unity_hand_test", waiting=lambda: [self.SAVE])
-        self.assertIn("대화상자 때문에 멈춰 있어 이 호출을 막았습니다", reason)
-        self.assertIn("Don't Save", reason)
-        self.assertIsNone(ch.dialog_block(event, "hand_test@49ac508c", "unity_hand_test", waiting=lambda: []))
-        self.assertIsNone(ch.dialog_block({"tool_name": "Read"}, "hand_test@49ac508c", "unity_hand_test",
-                                          waiting=lambda: [self.SAVE]))  # not a Unity call
-        self.assertIsNone(ch.dialog_block(event, "hand_test@49ac508c", "unity_hand_test", waiting=lambda: 1 / 0))
-
 
 class BridgeServerTests(unittest.TestCase):
     def setUp(self):
@@ -228,7 +218,7 @@ class BridgeServerTests(unittest.TestCase):
         self.assertEqual([t["name"] for t in replies[1]["result"]["tools"]], ["ch_bridge_status"])
 
 
-class GeneratorAndGuardTests(unittest.TestCase):
+class GeneratorTests(unittest.TestCase):
     def test_agent_gets_the_bridge_server(self):
         inst = ch.Instance(name="hand_test", hash="49ac508c")
         text = ch.render_agent(inst, "unity-hand-test", ch.ServerConfig(transport="stdio"), "uv run -q --no-project", True, False)
@@ -239,14 +229,6 @@ class GeneratorAndGuardTests(unittest.TestCase):
         self.assertIn(ch.UNITY_BRIDGE_SCRIPT.as_posix(), front)
         self.assertNotIn("execute_custom_tool", text)
         self.assertIn("ch_bridge_status", text)
-
-    def test_guard_allows_the_bridge_and_still_blocks_others(self):
-        pin, server = "hand_test@49ac508c", "unity_hand_test"
-        decide = lambda tool, tool_input=None: ch.guard_decision({"tool_name": tool, "tool_input": tool_input or {}}, pin, server, "stdio")
-        self.assertIsNone(decide("mcp__unity_hand_test_ch__ch_scene_snapshot"))
-        self.assertIsNotNone(decide("mcp__unity_other_ch__ch_scene_snapshot"))
-        self.assertIsNotNone(decide("mcp__unity-mcp__Unity_ManageGameObject"))
-        self.assertIsNotNone(decide("mcp__unity_hand_test__manage_scene", {"unity_instance": "Other@ffffffff"}))
 
     def test_bridge_only_editors_are_discovered(self):
         mcp = [ch.Instance(name="A", hash="aaaa1111")]

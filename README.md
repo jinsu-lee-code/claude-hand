@@ -160,7 +160,9 @@ uv run tools/claude_hand.py update     # 하위 세션·감독 스킬·채팅 �
 |---|---|
 | `.claude/skills/claude-hand-setup/` | 처음 세팅 스킬입니다. 이 폴더에서 Claude Code를 열면 바로 쓸 수 있습니다. |
 | `skills/orchestrator/` | 평소에 감독 세션이 따르는 규칙(스킬)입니다. `sync`가 `~/.claude/skills/claude-hand/`에 설치합니다. |
-| `tools/claude_hand.py` | 하위 세션 생성(`list`, `sync`), 안전장치(`guard`), 세팅 도우미(`doctor`, `selftest`, `update`, `mode`, `unity-install`, `unity-open`, `blender-open`, `chat-setup`, `blender-install-chat`, `chat-status`, `shortcut`, `remote-control`)가 들어 있습니다. |
+| `tools/claude_hand.py` | 하위 세션 생성(`list`, `sync`), 세팅 도우미(`doctor`, `selftest`, `update`, `mode`, `unity-install`, `unity-open`, `blender-open`, `chat-setup`, `blender-install-chat`, `chat-status`, `shortcut`, `remote-control`)가 들어 있습니다. |
+| `tools/guard.py` | 하위 세션의 안전장치(PreToolUse 훅)입니다. 다른 대상으로 가는 호출을 막습니다. 표준 라이브러리만 쓰는 작은 파일로 따로 두어, 다른 파일의 실수가 안전장치를 멈추지 못하게 했습니다. |
+| `tools/handlib/` | 위 스크립트들이 함께 쓰는 부분입니다. |
 | `tools/chat_channel.py` | 채팅 채널 서버입니다. Claude Code가 실행하는 MCP 서버이고, Unity·Blender 채팅창과는 로컬 HTTP로 통신합니다. |
 | `unity/com.claudehand.tools/` | Unity 패키지입니다. `ch_*` 도구 8개와 채팅창(Window > Claude Hand > Chat)을 추가합니다. `ch_*` 도구는 이 패키지가 여는 자기 통로로 불립니다(MCP for Unity 버전에 상관없이 동작). |
 | `tools/unity_bridge.py` | 하위 세션이 그 통로로 `ch_*` 도구를 부를 때 쓰는 MCP 서버입니다. `--list`로 통로를 연 Unity를 볼 수 있습니다. |
@@ -260,8 +262,9 @@ Blender에는 MCP for Blender 말고 따로 설치할 것이 없습니다. 그 �
 - 하위 세션은 자기 전용 MCP 서버만 씁니다. 정의 파일의 `tools` 허용 목록에 그 서버만 들어 있습니다.
   - Unity 서버는 `--default-instance <Name@hash>`로 고정됩니다.
   - Blender 서버는 `--port <포트>`로 고정됩니다. Blender는 서버 하나가 창 하나에만 붙기 때문에, 이것만으로도 다른 창에 닿지 않습니다.
-- `guard` 훅은 Unity 호출을 하나하나 검사합니다. 다른 프로젝트를 가리키는 `unity_instance`와 대상 변경(`set_active_instance`)을 막습니다. `batch_execute` 안에 들어 있는 명령도 검사합니다.
-- 훅 자체에 문제가 생기면 호출을 막는 쪽으로 동작합니다.
+- 안전장치 훅(`tools/guard.py`)은 Unity 호출을 하나하나 검사합니다. 다른 프로젝트를 가리키는 `unity_instance`와 대상 변경(`set_active_instance`)을 막습니다. `batch_execute` 안에 들어 있는 명령도 검사합니다.
+- 훅 안에서 무엇이 잘못되든 호출을 막습니다(잘못된 인자, 읽을 수 없는 입력, 판단 중 오류).
+- 훅이 시작조차 못 하면 Claude Code는 호출을 막지 않습니다. 그래서 `sync`가 훅 명령에 uv의 전체 경로를 적고, `selftest`가 설치된 훅을 Claude Code와 같은 방법으로 실제로 돌려 봅니다.
 - 세팅 스킬은 허락받은 단계만 진행합니다. 화면 조작 중 마우스와 키보드를 실제로 움직여야 할 때는 따로 다시 묻습니다.
 
 ## 알려진 한계
