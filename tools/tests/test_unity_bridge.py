@@ -12,6 +12,7 @@ import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+os.environ["CLAUDE_HAND_LOG"] = "off"  # the tests leave the real event log alone
 import claude_hand as ch  # noqa: E402
 import handlib.agents  # noqa: E402
 import handlib.chatsetup  # noqa: E402

@@ -24,6 +24,8 @@ First-time setup helpers (used by the claude-hand-setup skill, safe to run by ha
                        (.claude/settings.local.json) and pre-start it once so uv fetches Python.
   blender-install-chat Install and enable the Blender chat panel add-on.
   chat-status          Explain why a chat panel does or does not reach the supervisor.
+  trace                Show what happened to a chat panel request, step by step: the message, each tool
+                       call and refusal, the ch_* calls and how long they took, the reply.
   update               After `git pull`: refresh everything an earlier version set up.
 
 Everyday start (so nobody has to open a terminal):
@@ -59,7 +61,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import guard  # noqa: E402
-from handlib import agents, chatsetup, checks, constants, discovery, install, launch, link, settings  # noqa: E402
+from handlib import agents, chatsetup, checks, constants, discovery, eventlog, install, launch, link, settings  # noqa: E402
 
 
 def cmd_chat_setup(args: argparse.Namespace) -> int:
@@ -168,6 +170,7 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     cleaned, freed = launch.clean_exchange(launch.exchange_keep_days(config))
     if cleaned:
         print(f"교환 폴더에서 {launch.exchange_keep_days(config)}일 넘은 파일 {cleaned}개({freed / 1e6:.1f}MB)를 지웠습니다.")
+    eventlog.clean(home)  # the event log (trace): two weeks are kept
     session_args, session, resumed = launch.supervisor_session(config)
     if config.get("supervisor_session") != session:
         config["supervisor_session"] = session
@@ -210,6 +213,43 @@ def cmd_clean_exchange(args: argparse.Namespace) -> int:
     count, size = launch.clean_exchange(days, dry_run=args.dry_run)
     print(f"{'(dry run) ' if args.dry_run else ''}{folder}: {days}일 넘은 파일 {count}개({size / 1e6:.1f}MB)"
           + ("를 지울 수 있습니다." if args.dry_run else "를 지웠습니다."))
+    return 0
+
+
+def cmd_trace(args: argparse.Namespace) -> int:
+    """What happened to a request, from the event log the chat channel, the guard and the Unity bridge write."""
+    events = eventlog.read(days=args.days)
+    listed = eventlog.requests(events)
+    if args.request:
+        chosen = next((r for r in listed if r["request"] == args.request), None)
+    elif args.chat:
+        chosen = next((r for r in reversed(listed) if r["chat_id"] == args.chat), None)
+    else:
+        if args.json:
+            print(json.dumps(listed, ensure_ascii=False, indent=2))
+            return 0
+        if not listed:
+            print(f"{eventlog.log_dir()}: 최근 {args.days}일 동안 채팅창 요청 기록이 없습니다. Claude Hand가 켜져 있을 때 채팅창에서 보낸 요청이 여기에 남습니다.")
+            return 0
+        for r in listed[-args.last:]:
+            answer = f"답 {r['answered'] - r['ts']:.0f}초 뒤" if r["answered"] else "답 없음"
+            refused = f" · 막힘 {r['refused']}" if r["refused"] else ""
+            print(f"{time.strftime('%m-%d %H:%M:%S', time.localtime(r['ts']))}  {r['request']:<16} {r['chat_id']:<24} "
+                  f"동작 {r['actions']}{refused} · {answer}  \"{r['text'][:60]}\"")
+        print("\n한 요청을 자세히: uv run tools/claude_hand.py trace <채팅 이름>   또는   trace --request <번호>")
+        return 0
+    if chosen is None:
+        print(f"최근 {args.days}일 기록에 그런 요청이 없습니다. `trace`만 치면 요청 목록이 나옵니다.")
+        return 1
+    lines = eventlog.trace(events, chosen["request"])
+    if args.json:
+        print(json.dumps(lines, ensure_ascii=False, indent=2))
+        return 0
+    print(f"요청 {chosen['request']}  ({chosen['chat_id']}, {time.strftime('%Y-%m-%d', time.localtime(chosen['ts']))})")
+    for event in lines:
+        print("  " + eventlog.describe(event, since=chosen["ts"]))
+    if chosen["answered"] is None:
+        print("  (아직 답이 없습니다)")
     return 0
 
 
@@ -663,6 +703,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_ce.add_argument("--keep-days", type=int, help=f"how long every start keeps them from now on (default {launch.EXCHANGE_KEEP_DAYS}; 0: never clean)")
     p_ce.add_argument("--dry-run", action="store_true")
     p_ce.set_defaults(func=cmd_clean_exchange)
+
+    p_tr = sub.add_parser("trace", help="show what happened to a chat panel request, step by step (from the event log)")
+    p_tr.add_argument("chat", nargs="?", help="a chat (subagent) name such as unity-hand-test: its last request. Leave out to list the requests")
+    p_tr.add_argument("--request", help="a request id from the list")
+    p_tr.add_argument("--days", type=int, default=2, help="how many days of the log to read (default %(default)s)")
+    p_tr.add_argument("--last", type=int, default=20, help="how many requests the list shows (default %(default)s)")
+    p_tr.add_argument("--json", action="store_true", help="machine-readable output")
+    p_tr.set_defaults(func=cmd_trace)
 
     p_mode = sub.add_parser("mode", help="(earlier versions) there is one mode now; clears an old setting")
     p_mode.add_argument("mode", nargs="?")

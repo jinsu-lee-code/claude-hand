@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -11,6 +12,7 @@ from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
+os.environ["CLAUDE_HAND_LOG"] = "off"  # the tests leave the real event log alone
 import guard  # noqa: E402
 
 

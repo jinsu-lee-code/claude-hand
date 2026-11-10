@@ -10,7 +10,7 @@
 It refuses any call that would reach a project or Blender other than the subagent's own, any Unity call while a
 dialog stops that editor, and any call while another subagent is still at work in the same window. For a call it
 lets through it also tells the chat channel what the subagent is about to do (the panel's work line) and, on the
-first action of a request, sets an undo point in that window.
+first action of a request, sets an undo point in that window. A call it refuses goes into the event log.
 
   guard.py --pin ... --server ... --app ... --stop       the same subagents' Stop hook: tells the chat channel the
                                                          subagent finished its turn. Never refuses anything.
@@ -157,6 +157,17 @@ def report_progress(event: dict, pin: str, server: str, app: str, home: Path | N
     return None
 
 
+def note_refusal(event: dict, pin: str, app: str, reason: str, write=None) -> None:
+    """A call this guard refused by itself goes into the event log (`claude_hand.py trace`): the chat channel never
+    hears of it. Calls the channel refuses (another subagent at work) it logs itself. Best effort."""
+    try:
+        from handlib import eventlog
+        (write or eventlog.write)("refused", pin=pin, app=app, tool=str(event.get("tool_name", ""))[:120],
+                                  agent_id=str(event.get("agent_id") or ""), reason=eventlog.short(reason, 300))
+    except Exception:
+        pass
+
+
 def report_stop(event: dict, pin: str, app: str, home: Path | None = None, post=None) -> None:
     """The subagent finished its turn: its window is free for another subagent, and the chat channel can tell when
     the supervisor owes the panel an answer. Best effort."""
@@ -218,7 +229,9 @@ def run_guard(args: argparse.Namespace, stdin=None, stdout=None) -> int:
         event, reason = {}, f"claude-hand guard 오류로 호출을 막았습니다: {exc}"
     if not reason and args.app == "unity":
         reason = dialog_block(event, args.pin, args.server)
-    if not reason:
+    if reason:
+        note_refusal(event, args.pin, args.app, reason)
+    else:
         reason = report_progress(event, args.pin, args.server, args.app)
     if reason:
         json.dump({

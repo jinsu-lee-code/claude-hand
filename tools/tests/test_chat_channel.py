@@ -15,6 +15,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+os.environ["CLAUDE_HAND_LOG"] = "off"  # the tests leave the real event log alone
 import chat_channel as cc  # noqa: E402
 import handlib.agents  # noqa: E402
 import handlib.discovery  # noqa: E402

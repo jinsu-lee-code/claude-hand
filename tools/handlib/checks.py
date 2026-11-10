@@ -275,7 +275,7 @@ def hook_checks(agents_dir: Path, run=subprocess.run, shell=None) -> list[Check]
             continue
         try:
             proc = run([*shell, json.loads(found.group(1))], input=json.dumps(HOOK_PROBE), capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", timeout=60)
+                       encoding="utf-8", errors="replace", timeout=60, env={**os.environ, "CLAUDE_HAND_LOG": "off"})  # a probe is no event
             decision = (json.loads(proc.stdout).get("hookSpecificOutput") or {}).get("permissionDecision") if proc.stdout.strip() else ""
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             checks.append(Check("안전장치", item, False, f"훅 명령을 돌리지 못함: {exc}", fix))

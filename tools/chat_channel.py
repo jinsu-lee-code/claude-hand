@@ -51,6 +51,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from handlib import eventlog  # noqa: E402
 from handlib.agents import AgentInfo, installed_agents, prompt_template, refresh_agents, slug  # noqa: E402
 from handlib.capture import capture_window  # noqa: E402
 from handlib.constants import VERSION  # noqa: E402
@@ -172,6 +173,25 @@ class ChatHub:
         self.workers: dict[str, dict] = {}  # chat_id -> the subagent at work in that window: {"agent_id", "last", "stopped"}
         self.reminded: dict[str, int] = {}  # chat_id -> seq of the request the supervisor was reminded of (once each)
         self.started = time.time()  # requests older than this server (shown again from history) are not its to chase
+        self.events = None  # callable(event, **fields): the event log (handlib/eventlog.py); None: nothing is logged
+
+    def _log(self, event: str, **fields) -> None:
+        """One line in the event log, for `claude_hand.py trace`. Never in the way of the chat."""
+        if self.events is not None:
+            try:
+                self.events(event, **fields)
+            except Exception as exc:
+                log("could not write the event log:", exc)
+
+    def _request_for(self, chat_id: str) -> str:
+        """The id of the request a window's work belongs to: the one its own panel waits on, else the newest one
+        another panel waits on (the work was asked there). "" when no panel waits: it was asked in the terminal or
+        the Claude app, or before this server started. Called with the lock held."""
+        item = self._request_item(chat_id)
+        if item is None:
+            waiting = [i for i in (self._request_item(chat) for chat in self.logs if chat != chat_id) if i]
+            item = max(waiting, key=lambda i: i["seq"], default=None)
+        return str((item or {}).get("request", ""))
 
     def use_history(self, directory: Path) -> None:
         """Keep each chat's recent messages in `directory` and show the saved ones again, so a panel still has its
@@ -239,7 +259,8 @@ class ChatHub:
             if agent and worker and worker["agent_id"]:
                 meta["agent_id"] = worker["agent_id"]  # to resume with SendMessage, whatever the supervisor still remembers
             self.windows[chat_id] = {"app": app, "window": window, "agent": agent, "last_seen": time.time()}
-            self._append(chat_id, {"kind": "user", "text": text})
+            request = f"{time.strftime('%m%d-%H%M%S')}-{self.seq + 1}"  # what the event log knows this request by
+            self._append(chat_id, {"kind": "user", "text": text, "request": request})
             for pending in self.permissions.values():  # a window that joins late still sees open prompts
                 if not pending.get("resolved") and chat_id not in pending["chats"]:
                     pending["chats"].add(chat_id)
@@ -249,6 +270,8 @@ class ChatHub:
             ready = self.initialized
             if not ready:
                 self.backlog.append(notification)
+        self._log("message", request=request, chat_id=chat_id, app=app, window=window, agent=agent or "none",
+                  text=eventlog.short(text), delivered=ready)
         if ready:
             self.emit(notification)
         return {"chat_id": chat_id, "agent": agent, "delivered": ready}
@@ -276,7 +299,10 @@ class ChatHub:
         if working:
             item["working"] = True
         with self.cond:
+            asked = self._request_item(chat_id) if origin != "desktop" else None
             self._append(chat_id, item)
+            self._log("reply", request=(asked or {}).get("request", ""), chat_id=chat_id, text=eventlog.short(text),
+                      working=working or None, origin="desktop" if origin == "desktop" else None)
             if working:
                 return True
             if self.progress.pop(chat_id, None) is not None:  # the answer is in: the bar goes away
@@ -345,6 +371,7 @@ class ChatHub:
                 window = (self.contexts.get(chat) or self.windows.get(chat) or {}).get("window") or agent.pin.rpartition("@")[0]
                 app = "Unity" if agent.app == "unity" else "Blender"
                 text = f"{window}({app})가 대화상자 때문에 멈춰 있어요. {app}에서 직접 골라 주세요: {describe_dialogs(dialogs)}"
+                self._log("dialog", request=self._request_for(chat), chat_id=chat, pin=agent.pin, text=eventlog.short(describe_dialogs(dialogs)))
                 for target in [c for c in self.logs if c != chat and self._open_request(c)]:
                     self._append(target, {"kind": "notice", "text": text, "alert": True})
 
@@ -379,6 +406,8 @@ class ChatHub:
                     "meta": {"chat_id": chat_id, "app": str(window.get("app", "")), "window": str(window.get("window", "")),
                              "agent": window.get("agent") or "none", "reminder": "unanswered"}}})
                 self._append(chat_id, {"kind": "notice", "text": "답이 늦어져 Claude Hand에 다시 알렸어요."})
+                self._log("reminder", request=request.get("request", ""), chat_id=chat_id,
+                          text="하위 세션이 멈춘 뒤 답이 없음" if worked else "하위 세션이 일한 흔적이 없음")
         for notification in reminders:
             self.emit(notification)
         return [n["params"]["meta"]["chat_id"] for n in reminders]
@@ -476,6 +505,7 @@ class ChatHub:
             for chat_id in self.logs:
                 pending["chats"].add(chat_id)
                 self._append(chat_id, self._permission_item(pending))
+        self._log("permission", tool=pending["tool_name"], text=eventlog.short(pending["description"]))
 
     def permission_verdict(self, request_id: str, behavior: str) -> bool:
         if behavior not in ("allow", "deny"):
@@ -487,6 +517,7 @@ class ChatHub:
             pending["resolved"] = True
             for chat_id in pending["chats"]:
                 self._append(chat_id, {"kind": "permission_resolved", "request_id": request_id, "behavior": behavior})
+        self._log("verdict", tool=pending["tool_name"], behavior=behavior)
         self.emit({"jsonrpc": "2.0", "method": "notifications/claude/channel/permission",
                    "params": {"request_id": request_id, "behavior": behavior}})
         return True
@@ -533,6 +564,8 @@ class ChatHub:
             worker = self.workers.get(agent.name)
             if agent_id and worker and worker["agent_id"] not in ("", agent_id) and not worker["stopped"] \
                     and now - worker["last"] <= LOCK_SECONDS:
+                self._log("refused", request=self._request_for(agent.name), chat_id=agent.name, pin=pin, tool=tool[:80], agent_id=agent_id,
+                          reason="다른 하위 세션(" + worker["agent_id"] + ")이 이 창에서 작업 중")
                 return {"chat_id": agent.name, "busy": True, "other": worker["agent_id"]}
             if agent_id or worker is None:
                 self.workers[agent.name] = {"agent_id": agent_id, "last": now, "stopped": 0.0}
@@ -546,6 +579,8 @@ class ChatHub:
             entry.update(tool=tool[:80], detail=detail[:120], actions=entry["actions"] + 1, updated=now, marked=True)
             self._bump_progress(agent.name)
             label = own if first else ""
+            self._log("action", request=self._request_for(agent.name), chat_id=agent.name, pin=pin, tool=tool[:80], detail=detail[:120],
+                      agent_id=agent_id, first=first or None)
         return {"chat_id": agent.name, "new_request": first, "label": label}
 
     def agent_stopped(self, app: str, pin: str, agent_id: str = "") -> dict | None:
@@ -558,6 +593,7 @@ class ChatHub:
             worker = self.workers.get(agent.name)
             if worker and worker["agent_id"] in ("", agent_id) and not worker["stopped"]:
                 worker["stopped"] = time.time()
+                self._log("stopped", request=self._request_for(agent.name), chat_id=agent.name, pin=pin, agent_id=agent_id)
         return {"chat_id": agent.name}
 
     def _request_item(self, chat_id: str) -> dict | None:
@@ -1033,6 +1069,7 @@ def main(argv: list[str] | None = None) -> int:
         mcp.serve()
         return 0
     mcp.hub.auto_sync = lambda agents_dir: refresh_agents(agents_dir=agents_dir)
+    mcp.hub.events = eventlog.write
     mcp.hub.use_history(home / "chat" / "history")
     mcp.hub.capture = lambda app, pin, path: capture_window(app, pin, path, PREVIEW_SIZE)
     mcp.hub.images_dir = home / "chat" / "images"

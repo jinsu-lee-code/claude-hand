@@ -6,6 +6,7 @@ Each module uses only the ones above it in this list, and other modules' names t
 
   constants   names and places every part agrees on
   link        the low-level ways to things already running (home folder, chat server file, MCP for Blender's socket)
+  eventlog    one line per thing that happened to a request, and reading them back (trace)
   settings    the small JSON files claude-hand keeps or edits
   discovery   finding the open Unity editors and Blender windows
   capture     a picture of what a window shows now

@@ -29,6 +29,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from handlib import eventlog  # noqa: E402
 from handlib.constants import VERSION  # noqa: E402
 from handlib.link import claude_hand_home  # noqa: E402
 
@@ -262,6 +263,7 @@ class BridgeServer:
     def __init__(self, stdin, stdout, hash_: str = "", name: str = "", path: str = "", directory: Path | None = None):
         self.stdin, self.stdout = stdin, stdout
         self.hash, self.name, self.path, self.directory = hash_, name, path, directory
+        self.log_event = None  # callable(event, **fields) in place of the event log (tests)
 
     def locate(self) -> dict | None:
         return find_project(self.hash, self.name, self.path, self.directory)
@@ -294,12 +296,26 @@ class BridgeServer:
                          "unity_version": entry.get("unity_version"), "tools": [m["name"] for m in entry.get("tools", [])]})
         entry = self.locate()
         meta = next((m for m in (entry or {}).get("tools", []) if m.get("name") == name), None)
+        started = time.time()
         if meta is None:
+            self.note(name, started, "NOT_FOUND")
             return text({"code": "NOT_FOUND", "message": f"Unknown tool {name!r} for this project.", "retry": "after_fix"}, True)
         try:
-            return text(run_tool(self.locate, meta, arguments or {}))
+            result = run_tool(self.locate, meta, arguments or {})
         except BridgeError as exc:
+            self.note(name, started, exc.code)
             return text({"code": exc.code, "message": exc.message, "retry": exc.retry}, True)
+        failed = isinstance(result, dict) and (result.get("success") is False or result.get("_mcp_status") == "error")
+        self.note(name, started, str(result.get("code") or result.get("error") or "FAILED") if failed else "")
+        return text(result)
+
+    def note(self, tool: str, started: float, code: str) -> None:
+        """How a ch_* call ended and how long it took, for the event log (`claude_hand.py trace`). Best effort."""
+        try:
+            (self.log_event or eventlog.write)("call", pin=f"{self.name}@{self.hash}" if self.name and self.hash else self.name or self.hash,
+                                               tool=tool, ok=not code, code=code[:80], ms=round((time.time() - started) * 1000))
+        except Exception:
+            pass
 
     def handle(self, message: dict) -> None:
         method, msg_id, params = message.get("method"), message.get("id"), message.get("params") or {}
