@@ -382,11 +382,15 @@ class BlenderTests(unittest.TestCase):
                 json.loads(line.split(": ", 1)[1])
         self.assertNotIn("__", re.sub(r"mcp__\w+__|__\w+__\*", "", text.split(handlib.constants.GENERATED_MARKER)[1]).replace("__init__", ""))
 
-    def test_recipes_are_valid_python(self):
-        blocks = re.findall(r"```python\n(.*?)```", handlib.agents.prompt_template("blender-subagent"), re.S)
-        self.assertEqual(len(blocks), 3)
-        for code in blocks:
-            ast.parse(code)
+    def test_transfers_are_addon_functions_the_prompt_only_names(self):
+        """They were code blocks in the prompt, typed out again by the subagent for every transfer."""
+        prompt = handlib.agents.prompt_template("blender-subagent")
+        addon = ast.parse(handlib.constants.CHAT_ADDON_SOURCE.read_text(encoding="utf-8"))
+        defined = {node.name for node in addon.body if isinstance(node, ast.FunctionDef)}
+        called = set(re.findall(r"claude_hand_chat\.(\w+)\(", prompt))
+        self.assertEqual(called, {"undo_last_request", "export_blend", "import_blend", "export_fbx"})
+        self.assertLessEqual(called, defined)
+        self.assertNotIn("```python", prompt)
 
     def test_names_for_duplicate_files(self):
         a = handlib.discovery.BlenderInstance(port=9876, filepath="C:/a/scene.blend")

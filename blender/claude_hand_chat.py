@@ -1,5 +1,9 @@
 """Claude Hand Chat: talk to this Blender window's claude-hand subagent from the 3D Viewport sidebar.
 
+It is also what that subagent calls, through MCP for Blender's execute_code, for the things claude-hand does in
+Blender: undo points (mark_undo_point, undo_last_request) and moving objects to another Blender or to Unity
+(export_blend, import_blend, export_fbx).
+
 Messages go to the claude-hand-chat channel (tools/chat_channel.py in the claude-hand repo), which
 the supervisor Claude Code session runs; the supervisor hands them to blender-<file> and answers here.
 Networking runs on a background thread; everything that touches bpy runs on the main thread
@@ -11,7 +15,7 @@ Install: `uv run tools/claude_hand.py blender-install-chat` (or Preferences > Ad
 bl_info = {
     "name": "Claude Hand Chat",
     "author": "claude-hand",
-    "version": (0, 7, 1),
+    "version": (0, 8, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar (N) > Claude Hand",
     "description": "Chat with this Blender window's claude-hand subagent",
@@ -19,10 +23,12 @@ bl_info = {
 }
 
 import base64
+import datetime
 import functools
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import textwrap
@@ -591,6 +597,115 @@ def _undo_from_button():
 def _forget_undo_points(*_args):
     """Opening a file starts a new undo history."""
     _marks.clear()
+
+
+# --------------------------------------------------------------------------- transfers (what the subagent calls)
+#
+# Moving objects to another Blender or to Unity, through the exchange folder. The subagent runs these with MCP for
+# Blender's execute_code, e.g. `import claude_hand_chat; print(claude_hand_chat.export_fbx(["Hero"], "hero"))`.
+# They were code blocks in the subagent's prompt once, typed out again for every transfer; here they are tested as
+# they run. Paths in the results use forward slashes, so they print the same as they are passed on.
+
+
+def exchange_dir():
+    """Where Unity and Blender windows leave files for each other: CLAUDE_HAND_EXCHANGE_DIR, or ~/.claude-hand/exchange
+    (the same rule as Claude Hand Tools in Unity)."""
+    path = os.environ.get("CLAUDE_HAND_EXCHANGE_DIR") or os.path.join(os.path.expanduser("~"), ".claude-hand", "exchange")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _transfer_id(name):
+    name = re.sub(r"[^A-Za-z0-9_-]+", "_", str(name)).strip("_") or "transfer"
+    return name[:48] + "_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def _with_children(roots):
+    """The named objects and everything parented under them, each once, in order."""
+    if isinstance(roots, str):
+        roots = [roots]
+    found = []
+    for name in roots:
+        root = bpy.data.objects.get(name)
+        if root is None:
+            raise ValueError(f"이 파일에 '{name}' 오브젝트가 없습니다. get_scene_info로 정확한 이름을 확인하세요.")
+        for obj in (root, *root.children_recursive):
+            if obj not in found:
+                found.append(obj)
+    if not found:
+        raise ValueError("보낼 오브젝트 이름을 하나 이상 주세요.")
+    return list(roots), found
+
+
+def _write_manifest(transfer_id, data):
+    path = os.path.join(exchange_dir(), transfer_id + ".claudehand.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({**data, "transfer_id": transfer_id, "source": bpy.data.filepath, "blender_version": bpy.app.version_string},
+                  f, ensure_ascii=False, indent=2)
+    return path.replace("\\", "/")
+
+
+def export_blend(roots, name="transfer"):
+    """Write the named objects, their children and the data they use (meshes, materials) to a .blend in the exchange
+    folder for another Blender. Returns {"manifest": path to hand on, "objects": names written}. Changes nothing here."""
+    roots, objects = _with_children(roots)
+    transfer_id = _transfer_id(name)
+    bpy.data.libraries.write(os.path.join(exchange_dir(), transfer_id + ".blend"), set(objects), path_remap="ABSOLUTE", fake_user=True)
+    manifest = _write_manifest(transfer_id, {"format": "claude-hand/blend@1", "blend_file": transfer_id + ".blend", "roots": roots,
+                                             "objects": sorted(o.name for o in objects)})
+    return {"manifest": manifest, "objects": sorted(o.name for o in objects)}
+
+
+def import_blend(manifest):
+    """Append the objects another Blender wrote with export_blend into the current scene. Returns {"added": the names
+    they have here, "renamed": {name there: name here} where Blender had to add .001 because the name was taken}."""
+    manifest = str(manifest).strip().strip('"')
+    with open(manifest, encoding="utf-8") as f:
+        data = json.load(f)
+    if data.get("format") != "claude-hand/blend@1":
+        raise ValueError(f"이 manifest는 '{data.get('format')}' 형식이라 Blender로 받을 수 없습니다. export_blend가 만든 것만 됩니다.")
+    blend = os.path.join(os.path.dirname(manifest), data["blend_file"])
+    with bpy.data.libraries.load(blend, link=False) as (src, dst):
+        wanted = [n for n in src.objects if n in data["objects"]]
+        dst.objects = list(wanted)
+    added, renamed = [], {}
+    for there, obj in zip(wanted, dst.objects):
+        if obj is None:
+            continue
+        bpy.context.scene.collection.objects.link(obj)
+        added.append(obj.name)
+        if obj.name != there:
+            renamed[there] = obj.name
+    return {"added": added, "renamed": renamed}
+
+
+def export_fbx(roots, name="model"):
+    """Export the named objects and their children as an FBX in the exchange folder, set up for Unity (Y up, -Z
+    forward, textures embedded). Returns {"manifest": path for Unity's ch_import_model, "objects": names exported}.
+    The selection is put back as it was."""
+    roots, objects = _with_children(roots)
+    transfer_id = _transfer_id(name)
+    layer = bpy.context.view_layer
+    missing = [o.name for o in objects if o.name not in layer.objects]
+    if missing:
+        raise ValueError("지금 뷰 레이어에 없는 오브젝트는 내보낼 수 없습니다: " + ", ".join(missing))
+    selected, active = {o.name for o in layer.objects if o.select_get()}, layer.objects.active
+    for obj in layer.objects:
+        obj.select_set(False)
+    for obj in objects:
+        obj.select_set(True)
+    layer.objects.active = objects[0]
+    try:
+        bpy.ops.export_scene.fbx(filepath=os.path.join(exchange_dir(), transfer_id + ".fbx"), use_selection=True,
+                                 apply_scale_options="FBX_SCALE_ALL", axis_forward="-Z", axis_up="Y", path_mode="COPY",
+                                 embed_textures=True)
+    finally:
+        for obj in layer.objects:
+            obj.select_set(obj.name in selected)
+        layer.objects.active = active
+    manifest = _write_manifest(transfer_id, {"format": "claude-hand/model@1", "model_file": transfer_id + ".fbx", "roots": roots,
+                                             "objects": sorted(o.name for o in objects)})
+    return {"manifest": manifest, "objects": sorted(o.name for o in objects)}
 
 
 def apply_event(event, payload):

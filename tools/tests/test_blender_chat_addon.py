@@ -297,7 +297,9 @@ class BlenderChatAddonTests(unittest.TestCase):
 
     def test_long_conversation_keeps_the_input_in_reach(self):
         addon = self.addon
-        addon._entries[:] = [{"kind": "reply", "seq": i, "text": "긴 답 " * 200} for i in range(30)]
+        # Past the poller's first "reset" (a new server): it would empty the entries put here by hand if it came later.
+        self.assertTrue(wait_for(lambda: addon._status[0] == "담당: blender-props", addon), addon._status[0])
+        addon._entries[:] =[{"kind": "reply", "seq": i, "text": "긴 답 " * 200} for i in range(30)]
         shown, folded = addon.visible_entries((200.0, 11.0))
         self.assertEqual(shown[-1][0]["seq"], 29)  # the newest is always there
         self.assertEqual(folded, 30 - len(shown))
@@ -309,6 +311,82 @@ class BlenderChatAddonTests(unittest.TestCase):
         self.assertEqual(len(addon._entries), addon.KEPT_ENTRIES)
         self.assertEqual(addon._entries[-1]["seq"], 100 + addon.KEPT_ENTRIES - 1)
 
+
+
+@unittest.skipIf(bpy is None, "Blender's bpy module is not installed")
+class TransferTests(unittest.TestCase):
+    """What the Blender subagent calls to move objects to another Blender or to Unity."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.exchange = Path(self.tmp.name) / "exchange"
+        os.environ["CLAUDE_HAND_EXCHANGE_DIR"] = str(self.exchange)
+        spec = importlib.util.spec_from_file_location("claude_hand_chat", ADDON)
+        self.addon = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.addon)
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        mesh = bpy.data.meshes.new("RockMesh")
+        mesh.from_pydata([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [], [(0, 1, 2)])
+        mesh.materials.append(bpy.data.materials.new("RockMat"))
+        rock = bpy.data.objects.new("Rock", mesh)
+        pebble = bpy.data.objects.new("Pebble", mesh)
+        pebble.parent = rock
+        bystander = bpy.data.objects.new("Bystander", mesh)
+        for obj in (rock, pebble, bystander):
+            bpy.context.scene.collection.objects.link(obj)
+        bystander.select_set(True)
+
+    def tearDown(self):
+        os.environ.pop("CLAUDE_HAND_EXCHANGE_DIR", None)
+        self.tmp.cleanup()
+
+    def test_blend_round_trip(self):
+        sent = self.addon.export_blend(["Rock"], "rock")
+        self.assertEqual(sent["objects"], ["Pebble", "Rock"])  # children go along
+        self.assertNotIn("\\", sent["manifest"])  # prints the same as it is passed on
+        manifest = json.loads(Path(sent["manifest"]).read_text(encoding="utf-8"))
+        self.assertEqual((manifest["format"], manifest["roots"], manifest["objects"]), ("claude-hand/blend@1", ["Rock"], ["Pebble", "Rock"]))
+        self.assertTrue((self.exchange / manifest["blend_file"]).exists())
+        self.assertEqual({o.name for o in bpy.context.scene.objects}, {"Rock", "Pebble", "Bystander"})  # nothing changed here
+
+        bpy.ops.wm.read_factory_settings(use_empty=True)  # "another Blender": an empty scene
+        got = self.addon.import_blend(sent["manifest"])
+        self.assertEqual((sorted(got["added"]), got["renamed"]), (["Pebble", "Rock"], {}))
+        self.assertEqual({o.name for o in bpy.context.scene.objects}, {"Pebble", "Rock"})
+        self.assertEqual(bpy.data.objects["Pebble"].parent.name, "Rock")
+        self.assertEqual(bpy.data.objects["Rock"].data.materials[0].name, "RockMat")
+
+    def test_receiving_says_which_names_were_taken(self):
+        sent = self.addon.export_blend("Rock", "rock")  # one name works too
+        got = self.addon.import_blend(f'"{sent["manifest"]}"')  # a path pasted with its quotes
+        self.assertEqual(got["renamed"], {"Pebble": "Pebble.001", "Rock": "Rock.001"})
+        self.assertEqual(sorted(got["added"]), ["Pebble.001", "Rock.001"])
+
+    def test_fbx_for_unity_puts_the_selection_back(self):
+        sent = self.addon.export_fbx(["Rock"], "rock set!")
+        manifest = json.loads(Path(sent["manifest"]).read_text(encoding="utf-8"))
+        self.assertEqual((manifest["format"], manifest["roots"]), ("claude-hand/model@1", ["Rock"]))
+        self.assertRegex(manifest["model_file"], r"^rock_set_\d{8}_\d{6}\.fbx$")  # a name safe for files and asset paths
+        fbx = self.exchange / manifest["model_file"]
+        self.assertTrue(fbx.exists() and fbx.stat().st_size > 0)
+        self.assertEqual({o.name for o in bpy.context.view_layer.objects if o.select_get()}, {"Bystander"})
+
+    def test_a_wrong_name_or_manifest_says_so_and_writes_nothing(self):
+        with self.assertRaises(ValueError) as wrong:
+            self.addon.export_fbx(["Rok"], "rock")
+        self.assertIn("'Rok'", str(wrong.exception))
+        self.assertFalse(self.exchange.exists() and any(self.exchange.iterdir()))
+        sent = self.addon.export_fbx(["Rock"], "rock")
+        with self.assertRaises(ValueError):
+            self.addon.import_blend(sent["manifest"])  # a model for Unity, not a .blend for Blender
+
+    def test_port_expression_without_addon_is_harmless(self):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            exec(compile(handlib.install.blender_port_expr(9877), "<port>", "exec"), {"__name__": "__port__"})
+        self.assertIn("not enabled", out.getvalue())
 
 
 @unittest.skipIf(bpy is None, "Blender's bpy module is not installed")

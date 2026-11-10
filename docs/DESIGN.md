@@ -144,7 +144,11 @@ blender-<파일> (서브에이전트) ─ 인라인 stdio MCP 서버 (mcp-for-bl
   - `{"type":"ping"}`에 `status: success`로 답한 곳만 MCP for Blender로 본다.
   - 이어서 `get_addon_info`로 Blender 버전을, `execute_code`로 `bpy.data.filepath`를 읽는다(읽기만 한다).
   - 이름은 .blend 파일 이름이고, 저장 안 된 파일은 `untitled-<포트>`가 된다.
-- **옮기기:** Blender 쪽에는 새 애드온을 만들지 않았다. `execute_code`로 실행할 Python 방법을 하위 세션 지침에 넣었다. 파이썬 문법은 테스트에서 검사한다.
+- **옮기기:** Claude Hand Chat 애드온의 함수다(`export_blend`, `import_blend`, `export_fbx`). 하위 세션은 `execute_code`로 `import claude_hand_chat; print(claude_hand_chat.export_fbx([...], "이름"))` 한 줄을 실행한다.
+  - 처음에는 하위 세션 지침 속의 코드 블록 세 개였다. 하위 세션이 옮길 때마다 스무 줄 남짓을 옮겨 적어야 했고, 테스트가 지키는 것은 지침에 적힌 원문이지 실제로 실행되는 코드가 아니었다(REVIEW-2026-11-10의 6번). 지금은 함수를 Blender 안에서 직접 테스트하고, 지침은 92줄에서 29줄이 됐다.
+  - 그래서 Blender에서 옮기려면 채팅 애드온이 있어야 한다. 없으면 `ModuleNotFoundError`가 나고, 하위 세션은 설치가 필요하다고 보고한다.
+  - 애드온 이름(`claude_hand_chat`)은 채팅보다 넓은 일을 하게 됐지만 바꾸지 않았다. 바꾸면 설치된 애드온을 지우고 다시 켜는 일이 모든 PC에 생긴다.
+  - 결과 미리보기용 캡처 코드는 애드온으로 옮기지 않았다(`handlib/capture.py`). Unity 채팅창에 Blender의 모습을 붙이는 일은 그 Blender에 채팅 애드온이 없어도 돼야 한다.
   - Blender → Blender: `bpy.data.libraries.write(...)`로 대상 오브젝트와 그 의존 데이터(메시, 머티리얼)를 `.blend`로 쓴다. `path_remap="ABSOLUTE"`로 외부 텍스처 경로가 유지되게 한다. 받는 쪽은 `bpy.data.libraries.load(link=False)`로 Append한다.
   - Blender → Unity: FBX로 내보낸다(`-Z` 앞, `Y` 위, `FBX_SCALE_ALL`, 텍스처 포함). Unity가 별도 패키지 없이 가져오는 형식이라서다. Unity 쪽 `ch_import_model`이 `Assets/ClaudeHand/Imports/<id>/`로 복사해 동기로 가져오고 배치한다.
   - manifest 형식은 `claude-hand/blend@1`과 `claude-hand/model@1`이다.

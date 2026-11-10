@@ -194,10 +194,11 @@ uv run tools/claude_hand.py update     # 하위 세션·감독 스킬·채팅 �
 
 ### Blender 쪽
 
-Blender에는 MCP for Blender 말고 따로 설치할 것이 없습니다. 그 애드온의 Python 실행 도구(`execute_code`)를 그대로 씁니다. 하위 세션 지침에 세 가지 방법이 들어 있습니다.
-- 다른 Blender로 보내기: `.blend`로 내보냅니다
-- 다른 Blender에서 받기: Append로 가져옵니다
-- Unity로 보내기: FBX로 내보냅니다
+Blender 쪽 일은 MCP for Blender의 Python 실행 도구(`execute_code`)로 합니다. 옮기기와 되돌리기는 Claude Hand Chat 애드온(`blender-install-chat`으로 설치)의 함수이고, 하위 세션은 그것을 한 줄로 부릅니다.
+- `export_blend`: 다른 Blender로 보낼 `.blend`를 씁니다
+- `import_blend`: 다른 Blender가 보낸 것을 Append로 가져옵니다
+- `export_fbx`: Unity로 보낼 FBX를 씁니다
+- `mark_undo_point`, `undo_last_request`: 요청 단위 되돌리기
 
 ### agent-desktop은 어디에 쓰나
 
@@ -288,4 +289,4 @@ Blender에는 MCP for Blender 말고 따로 설치할 것이 없습니다. 그 �
 ```bash
 python -m unittest discover -s tools/tests -v     # 생성기·안전장치·세팅 도우미 테스트
 ```
-`tools/tests/test_blender_recipes.py`는 Blender 하위 세션의 Python 방법(.blend 보내기·받기, FBX 내보내기)을 실제 Blender에서 실행합니다. Blender의 Python 모듈(`pip install bpy`, Python 버전이 정해져 있음)이 있는 환경에서만 돌고, 없으면 건너뜁니다.
+`tools/tests/test_blender_chat_addon.py`는 Blender 애드온(채팅, 되돌리기, .blend 보내기·받기, FBX 내보내기)을 실제 Blender 안에서 실행합니다. 위 명령으로는 건너뛰고(Python에 `bpy`가 없으므로), `uv run tools/claude_hand.py selftest`가 설치된 Blender를 화면 없이 띄워 돌립니다.

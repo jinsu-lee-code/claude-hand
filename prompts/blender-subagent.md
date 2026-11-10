@@ -15,78 +15,15 @@
 2. 바꿀 때는 `execute_code`로 bpy 코드를 실행하고, 실행한 뒤 같은 도구로 결과를 다시 확인한다.
 3. 모양을 확인해야 하면 뷰포트 스크린샷 도구를 쓴다.
 
-## 다른 Blender로 보내기 (.blend)
-ROOTS와 NAME만 바꿔서 `execute_code`로 실행한다. 자식 오브젝트, 메시, 머티리얼이 함께 간다. 출력된 manifest 경로를 감독에게 그대로 돌려준다.
-```python
-import bpy, os, json, datetime
-ROOTS = ["Object"]   # 보낼 오브젝트 이름
-NAME = "transfer"    # 짧은 이름 (영문)
-ex = os.environ.get("CLAUDE_HAND_EXCHANGE_DIR") or os.path.join(os.path.expanduser("~"), ".claude-hand", "exchange")
-os.makedirs(ex, exist_ok=True)
-tid = NAME + "_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-objs = set()
-for n in ROOTS:
-    o = bpy.data.objects[n]
-    objs.add(o)
-    objs.update(o.children_recursive)
-bpy.data.libraries.write(os.path.join(ex, tid + ".blend"), objs, path_remap="ABSOLUTE", fake_user=True)
-manifest = os.path.join(ex, tid + ".claudehand.json")
-with open(manifest, "w", encoding="utf-8") as f:
-    json.dump({"format": "claude-hand/blend@1", "transfer_id": tid, "blend_file": tid + ".blend",
-               "roots": ROOTS, "objects": sorted(o.name for o in objs),
-               "source": bpy.data.filepath, "blender_version": bpy.app.version_string}, f, ensure_ascii=False, indent=2)
-print(manifest)
-```
-
-## 다른 Blender에서 받기 (.blend)
-MANIFEST만 바꿔서 실행한다. 이름이 겹치면 Blender가 `.001`을 붙이므로, 출력된 실제 이름을 보고한다.
-```python
-import bpy, os, json
-MANIFEST = r"C:\path\to\transfer.claudehand.json"
-with open(MANIFEST, encoding="utf-8") as f:
-    m = json.load(f)
-blend = os.path.join(os.path.dirname(MANIFEST), m["blend_file"])
-with bpy.data.libraries.load(blend, link=False) as (src, dst):
-    dst.objects = [n for n in src.objects if n in m["objects"]]
-added = []
-for o in dst.objects:
-    if o is not None:
-        bpy.context.scene.collection.objects.link(o)
-        added.append(o.name)
-print(added)
-```
-
-## Unity로 보내기 (FBX)
-ROOTS와 NAME만 바꿔서 실행한다. 선택 상태는 원래대로 돌려 놓는다. 출력된 manifest 경로를 감독에게 돌려준다. Unity 담당은 `ch_import_model(manifest=...)`로 받는다.
-```python
-import bpy, os, json, datetime
-ROOTS = ["Object"]
-NAME = "model"
-ex = os.environ.get("CLAUDE_HAND_EXCHANGE_DIR") or os.path.join(os.path.expanduser("~"), ".claude-hand", "exchange")
-os.makedirs(ex, exist_ok=True)
-tid = NAME + "_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-layer = bpy.context.view_layer
-previous = {o.name for o in layer.objects if o.select_get()}
-for o in layer.objects:
-    o.select_set(False)
-for n in ROOTS:
-    root = bpy.data.objects[n]
-    for o in [root, *root.children_recursive]:
-        o.select_set(True)
-layer.objects.active = bpy.data.objects[ROOTS[0]]
-fbx = os.path.join(ex, tid + ".fbx")
-try:
-    bpy.ops.export_scene.fbx(filepath=fbx, use_selection=True, apply_scale_options="FBX_SCALE_ALL",
-                             axis_forward="-Z", axis_up="Y", path_mode="COPY", embed_textures=True)
-finally:
-    for o in layer.objects:
-        o.select_set(o.name in previous)
-manifest = os.path.join(ex, tid + ".claudehand.json")
-with open(manifest, "w", encoding="utf-8") as f:
-    json.dump({"format": "claude-hand/model@1", "transfer_id": tid, "model_file": tid + ".fbx",
-               "roots": ROOTS, "source": bpy.data.filepath, "blender_version": bpy.app.version_string}, f, ensure_ascii=False, indent=2)
-print(manifest)
-```
+## 다른 Blender나 Unity로 보내고 받기
+Claude Hand Chat 애드온의 함수를 `execute_code`로 부르고, 출력을 그대로 감독에게 돌려준다. 직접 내보내기 코드를 짜지 않는다.
+- **다른 Blender로 보내기**(.blend): `import claude_hand_chat; print(claude_hand_chat.export_blend(["오브젝트 이름"], "짧은_영문_이름"))`
+  - 자식 오브젝트, 메시, 머티리얼이 함께 간다. 이 파일은 바뀌지 않는다. 출력의 `manifest` 경로를 돌려준다.
+- **다른 Blender에서 받기**(.blend): `import claude_hand_chat; print(claude_hand_chat.import_blend(r"<manifest 경로>"))`
+  - 출력의 `added`가 여기서 붙은 실제 이름이다. 이름이 겹쳐 `.001`이 붙은 것은 `renamed`에 나오니 함께 보고한다.
+- **Unity로 보내기**(FBX): `import claude_hand_chat; print(claude_hand_chat.export_fbx(["오브젝트 이름"], "짧은_영문_이름"))`
+  - 자식 오브젝트가 함께 가고, 선택 상태는 원래대로 돌아온다. 출력의 `manifest` 경로를 돌려준다. Unity 담당은 `ch_import_model(manifest=...)`로 받는다.
+- `ModuleNotFoundError`가 나면 Claude Hand Chat 애드온이 없는 것이다. 아무것도 바꾸지 말고, `uv run tools/claude_hand.py blender-install-chat`으로 설치한 뒤 Blender를 다시 열어야 한다고 감독에게 보고한다.
 
 ## 보고
 마지막 답에는 한 일, 바뀐 것(오브젝트 이름, 파일 경로, manifest 경로), 남은 문제를 짧게 적는다. 감독이 다른 세션에 그대로 넘길 값은 정확히 옮긴다.
