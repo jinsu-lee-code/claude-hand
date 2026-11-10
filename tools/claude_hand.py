@@ -24,6 +24,8 @@ First-time setup helpers (used by the claude-hand-setup skill, safe to run by ha
                        (.claude/settings.local.json) and pre-start it once so uv fetches Python.
   blender-install-chat Install and enable the Blender chat panel add-on.
   chat-status          Explain why a chat panel does or does not reach the supervisor.
+  status               Show every open window and what goes on in it: at work and on whose request, waiting
+                       for an answer, stopped by a dialog, idle (the chat panels show the same of the others).
   trace                Show what happened to a chat panel request, step by step: the message, each tool
                        call and refusal, the ch_* calls and how long they took, the reply.
   update               After `git pull`: refresh everything an earlier version set up.
@@ -61,7 +63,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import guard  # noqa: E402
-from handlib import agents, chatsetup, checks, constants, discovery, eventlog, install, launch, link, settings  # noqa: E402
+from handlib import agents, chatsetup, checks, constants, discovery, eventlog, install, launch, link, overview, settings  # noqa: E402
 
 
 def cmd_chat_setup(args: argparse.Namespace) -> int:
@@ -369,6 +371,25 @@ def cmd_shortcut(args: argparse.Namespace) -> int:
         path.write_text(text, encoding="utf-8")
         path.chmod(0o755)
         print(f"created {path}")
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    """Every open window and what goes on in it, as the chat channel knows it (the panels show the same of the other
+    windows): at work and on what, waiting for an answer, stopped by a dialog, idle."""
+    answer = link.channel_get("/v1/overview")
+    if not answer or not answer.get("ok"):
+        print("Claude Hand가 꺼져 있습니다. 켜져 있는 동안 열린 창들이 무엇을 하고 있는지 보여 줍니다.")
+        return 1
+    windows = answer.get("windows") or []
+    if args.json:
+        print(json.dumps(windows, ensure_ascii=False, indent=2))
+        return 0
+    if not windows:
+        print("채팅창이 열려 있거나 일하고 있는 창이 없습니다.")
+        return 0
+    for line in overview.lines(windows, detail=True):
+        print(line)
     return 0
 
 
@@ -749,6 +770,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_uc.add_argument("tool")
     p_uc.add_argument("param", nargs="*", help="key=value (values are JSON when they parse, else text)")
     p_uc.set_defaults(func=cmd_unity_call)
+
+    p_status = sub.add_parser("status", help="show every open window and what goes on in it (working, waiting for an answer, "
+                                             "stopped by a dialog, idle)")
+    p_status.add_argument("--json", action="store_true", help="machine-readable output")
+    p_status.set_defaults(func=cmd_status)
 
     p_cst = sub.add_parser("chat-status", help="explain why a chat panel does or does not reach the supervisor")
     p_cst.set_defaults(func=cmd_chat_status)

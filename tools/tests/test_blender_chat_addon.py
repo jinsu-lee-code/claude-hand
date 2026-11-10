@@ -285,6 +285,21 @@ class BlenderChatAddonTests(unittest.TestCase):
         self.assertIsNotNone(addon.image_preview(entry["path"]))
         self.assertIsNone(addon.image_preview(str(Path(self.tmp.name) / "gone.png")))
 
+    def test_the_panel_lists_what_the_other_windows_are_busy_with(self):
+        addon = self.addon
+        self.assertTrue(wait_for(lambda: addon._status[0].startswith("담당"), addon))
+        self.assertEqual(addon._others, [])
+        self.hub.post_user_message("unity", "MyGame", "큐브 만들어줘")  # another window's panel waits for an answer
+        self.assertTrue(wait_for(lambda: addon._others, addon))
+        self.assertEqual(addon._others, ["MyGame (Unity) · 답 기다림 · “큐브 만들어줘”"])
+        self.assertEqual(addon.others_rows(addon._others, None), [(addon._others[0], "DOT")])
+        self.hub.reply("unity-mygame", "만들었어요")  # answered: this panel shows the change without being asked
+        self.assertTrue(wait_for(lambda: addon._others != ["MyGame (Unity) · 답 기다림 · “큐브 만들어줘”"], addon))
+        rows = addon.others_rows(["아주 긴 이름의 창 (Unity) · 작업 중 · " + "긴 요청 " * 60], None)
+        self.assertEqual(len(rows), addon.OTHER_LINES)  # a window never takes more of the panel than that
+        self.assertEqual((rows[0][1], rows[1][1]), ("DOT", "BLANK1"))
+        self.assertTrue(rows[-1][0].endswith("…"))
+
     def test_only_fresh_answers_to_this_window_call_the_user_back(self):
         want, now = self.addon.wants_attention, 1000.0
         self.assertTrue(want({"kind": "reply", "ts": now - 2}, now))

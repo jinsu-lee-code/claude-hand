@@ -40,6 +40,9 @@ namespace ClaudeHand.Editor
         private long _progressRev = -1;     // the server's revision of it, so polling wakes on changes
         private double _progressReceivedAt;
         private double _lastBusyRepaint;
+        private List<string> _others = new List<string>();  // what the other open windows are busy with, a line each (from the channel)
+        private long _othersRev = -1;       // the server's revision of that, so polling wakes when another window's state changes
+        [SerializeField] private bool _showOthers = true;
         private int _unread;                // replies and permission prompts that came while this window had no focus
         [SerializeField] private string _undoNote;  // goes along with the next message after "되돌리기"
         private bool _followNewest = true;  // scrolled to the bottom: new messages keep it there; reading older ones: stay put
@@ -199,6 +202,8 @@ namespace ClaudeHand.Editor
                     _entries.Clear();
                     _shownEntries = ShownStep;
                     SetProgress(null, -1);
+                    _others.Clear();
+                    _othersRev = -1;
                     _after = 0;
                     _chatId = null;
                 }
@@ -220,7 +225,7 @@ namespace ClaudeHand.Editor
                     if (_pendingText != null) SendPending();
 
                     var updates = await Call(server, HttpMethod.Get,
-                        $"/v1/updates?chat_id={Uri.EscapeDataString(_chatId)}&after={_after}&prev={_progressRev}&wait=20", null, token);
+                        $"/v1/updates?chat_id={Uri.EscapeDataString(_chatId)}&after={_after}&prev={_progressRev}&orev={_othersRev}&wait=20", null, token);
                     if (updates.Value<bool?>("ok") == false)
                     {
                         _serverPid = 0; // token changed or server restarted: read server.json again
@@ -246,6 +251,13 @@ namespace ClaudeHand.Editor
         {
             var rev = updates.Value<long?>("progress_rev");
             if (rev.HasValue && rev.Value != _progressRev) SetProgress(updates["progress"] as JObject, rev.Value);
+            var othersRev = updates.Value<long?>("others_rev");
+            if (othersRev.HasValue && othersRev.Value != _othersRev)
+            {
+                _othersRev = othersRev.Value;
+                _others = (updates["others"] as JArray)?.Select(line => line.ToString()).ToList() ?? new List<string>();
+                Repaint();
+            }
             var items = updates["items"] as JArray;
             if (items == null) return;
             int alerts = items.OfType<JObject>().Count(WantsAttention);
@@ -579,6 +591,7 @@ namespace ClaudeHand.Editor
             {
                 _followNewest = _scroll.y + GUILayoutUtility.GetLastRect().height >= _contentHeight - 30f;
             }
+            DrawOthers();
             DrawProgress();
             DrawUndo();
 
@@ -643,6 +656,19 @@ namespace ClaudeHand.Editor
             if (EditorApplication.timeSinceStartup - _lastBusyRepaint < 0.5) return;
             _lastBusyRepaint = EditorApplication.timeSinceStartup;
             Repaint();
+        }
+
+        /// <summary>
+        /// What the other open windows are busy with, a line each, as the channel tells it: at work (and on whose
+        /// request), waiting for an answer, stopped by a dialog; the idle ones together. Words only, no colours.
+        /// Shown when another window's state changes; that window's own panel has the seconds and the steps.
+        /// </summary>
+        private void DrawOthers()
+        {
+            if (_others.Count == 0) return;
+            _showOthers = EditorGUILayout.Foldout(_showOthers, $"다른 창 ({_others.Count})", true);
+            if (!_showOthers) return;
+            foreach (var line in _others) EditorGUILayout.LabelField(line, EditorStyles.wordWrappedMiniLabel);
         }
 
         /// <summary>

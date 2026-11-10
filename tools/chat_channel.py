@@ -51,7 +51,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from handlib import eventlog  # noqa: E402
+from handlib import eventlog, overview  # noqa: E402
 from handlib.agents import AgentInfo, installed_agents, prompt_template, refresh_agents, slug  # noqa: E402
 from handlib.capture import capture_window  # noqa: E402
 from handlib.constants import VERSION  # noqa: E402
@@ -105,12 +105,15 @@ ANSWER_GRACE = 60.0    # once the subagents stopped: how long the supervisor may
 STALL_SECONDS = 300.0  # when no subagent work was seen at all: how long a panel request may wait before the reminder
 STOP_SECONDS = 180.0   # a panel's 중지 holds until its request is answered, but never longer than this
 EARLY_SECONDS = 120.0  # an answer sent before any work was seen: how long that work may still take to start (see _asking)
+SEEN_SECONDS = 90.0    # a panel asks for news every MAX_WAIT_SECONDS at the latest: one silent for this long has been closed
 
 CONTEXT_TOOL = {
     "name": "current_context",
     "description": "What the user has open in Unity and Blender right now, most recently used window first: per window its "
-                   "chat_id, subagent, active scene or file, selected objects and assets, whether it has focus, and when "
-                   "it was last used. Use it to tell which window 'this', 'the selected one' or 'here' means.",
+                   "chat_id, subagent, active scene or file, selected objects and assets, whether it has focus, when it "
+                   "was last used, and what goes on there now (state: working, waiting for an answer, stopped by a dialog, "
+                   "idle). Use it to tell which window 'this', 'the selected one' or 'here' means, and to say what each "
+                   "window is busy with.",
     "inputSchema": {"type": "object", "properties": {}},
 }
 
@@ -181,6 +184,10 @@ class ChatHub:
         # {"asker": the chat that asked ("": the terminal or the Claude app), "item": that request, "ts": of the last sign of life}
         self.assigned: dict[str, dict] = {}
         self.previewed: dict[str, int] = {}  # chat_id -> the item count when its replies last looked for other windows to show
+        self.seen: dict[str, float] = {}  # chat_id -> when its panel last asked for news: the window is open
+        self.names: dict[str, dict] = {}  # chat_id -> {"app", "window"}, for the overview of all windows
+        self._overview_sig: tuple | None = None  # the windows' states when the overview last changed
+        self.overview_count = 0  # bumped on every change of that, so a waiting panel wakes up and shows the other windows anew
         self.capture = None  # callable(app, pin, path) -> path or None: a picture of what a window shows now
         self.images_dir: Path | None = None  # where result previews are kept (None: no previews)
         self.find_dialogs = None  # callable(app, pin) -> the dialogs that stop that window now ([] for none)
@@ -350,7 +357,67 @@ class ChatHub:
                 except (Exception, SystemExit) as exc:  # sync refuses to overwrite hand-written files
                     log("automatic subagent refresh failed:", exc)
                 chat_id, agent = resolve_window(installed_agents(self.agents_dir), app, window, pin)
+        with self.cond:
+            self.names[chat_id] = {"app": app, "window": window}
         return chat_id, agent
+
+    # ------------------------------------------------------------------ all windows at a glance
+
+    def _state(self, chat_id: str, now: float) -> dict:
+        """What goes on in one window, from what the channel already knows (nothing is asked of anybody): working
+        (a subagent is at it; `asker` names the chat whose request it is, when not its own), waiting (its panel has a
+        request and no subagent is at work: the supervisor's turn), dialog (a dialog stops the window), idle. Called
+        with the lock held."""
+        name = self.names.get(chat_id) or self.windows.get(chat_id) or self.contexts.get(chat_id) or {}
+        app, _, rest = chat_id.partition("-")
+        state = {"chat_id": chat_id, "app": name.get("app") or app, "window": name.get("window") or rest, "state": "idle"}
+        entry = self.progress.get(chat_id)
+        worker = self.workers.get(chat_id)
+        working = entry is not None and now - entry["updated"] <= PROGRESS_TTL and not (worker and worker["stopped"])
+        own = self._request_item(chat_id)
+        if working:
+            asker, item = self._work_for(chat_id, now)
+            state.update(state="stopping" if entry.get("stopping") else "working", seconds=round(now - entry["started"]),
+                         action=f"{entry.get('tool', '')} {entry.get('detail', '')}".strip(), actions=entry.get("actions", 0))
+            if item is not None:
+                state.update(request=" ".join(str(item.get("text", "")).split())[:60], request_seq=item["seq"])
+            if asker and asker != chat_id:
+                state["asker"] = asker
+            dialogs = self.dialog_seen.get(chat_id)
+            if dialogs:
+                state.update(state="dialog", dialog=describe_dialogs(json.loads(dialogs)))
+        elif own is not None and own["ts"] >= self.started:
+            state.update(state="waiting", seconds=round(now - own["ts"]), request=" ".join(str(own.get("text", "")).split())[:60],
+                         request_seq=own["seq"])
+        return state
+
+    def overview(self, now: float | None = None) -> list[dict]:
+        """Every window that is open or at work, busy ones first: a window whose panel asked for news lately, whose
+        subagent is at work, or whose panel waits for an answer. A project that is closed is not in it."""
+        now = now or time.time()
+        with self.cond:
+            return self._overview(now)
+
+    def _overview(self, now: float) -> list[dict]:
+        chats = {chat for chat, when in self.seen.items() if now - when <= SEEN_SECONDS}
+        chats |= {chat for chat, entry in self.progress.items() if now - entry["updated"] <= PROGRESS_TTL}
+        waiting = {chat: self._request_item(chat) for chat in self.logs}
+        chats |= {chat for chat, item in waiting.items() if item is not None and item["ts"] >= self.started}
+        states = [self._state(chat, now) for chat in chats if chat]
+        return sorted(states, key=lambda s: (s["state"] == "idle", s["window"].lower(), s["chat_id"]))
+
+    def _overview_rev(self, now: float) -> int:
+        """A number that changes when a window's state does (not with every tool call or second: those the panel of
+        that window shows itself). Called with the lock held."""
+        sig = tuple((s["chat_id"], s["state"], s.get("request_seq"), s.get("asker")) for s in self._overview(now))
+        if sig != self._overview_sig:
+            self._overview_sig = sig
+            self.overview_count += 1
+        return self.overview_count
+
+    def _others(self, chat_id: str, now: float) -> list[str]:
+        """The other windows as lines for a panel to show under its own (handlib/overview.py). Called with the lock held."""
+        return overview.lines(self._overview(now), skip=chat_id)
 
     def post_user_message(self, app: str, window: str, text: str, pin: str = "", context: str = "") -> dict:
         chat_id, agent = self.resolve(app, window, pin)
@@ -482,6 +549,7 @@ class ChatHub:
                 if key == self.dialog_seen.get(chat, ""):
                     continue
                 self.dialog_seen[chat] = key
+                self.cond.notify_all()  # the other panels show this window: stopped by a dialog, or going again
                 if not dialogs:
                     continue
                 window = (self.contexts.get(chat) or self.windows.get(chat) or {}).get("window") or agent.pin.rpartition("@")[0]
@@ -579,14 +647,21 @@ class ChatHub:
         now = now or time.time()
         with self.cond:
             windows = [dict(w) for w in self.contexts.values()]
+            states = {s["chat_id"]: s for s in self._overview(now)}
         windows.sort(key=lambda w: (bool(w.get("focused")), w.get("last_used", 0)), reverse=True)
         for w in windows:
             for key in ("last_used", "reported"):
                 if key in w:
                     w[key + "_seconds_ago"] = round(now - w.pop(key))
+            state = states.get(w.get("chat_id"))
+            if state is not None:  # what goes on there now, as the panels and `claude_hand.py status` show it
+                w["state"] = state["state"]
+                w.update({key: state[key] for key in ("request", "asker", "action", "dialog", "seconds") if key in state})
         return {"windows": windows,
                 "note": "Most recently used first. A window that is not listed has not reported since this session "
-                        "started (its Claude Hand Tools / chat add-on may be missing)."}
+                        "started (its Claude Hand Tools / chat add-on may be missing). state: working (its subagent is "
+                        "at it; asker: the chat whose request it is, when not its own), waiting (its panel has a request "
+                        "and nothing is at work: your turn), dialog (a dialog stops that window), idle."}
 
     @staticmethod
     def _permission_item(pending: dict) -> dict:
@@ -642,19 +717,27 @@ class ChatHub:
     def updates(self, chat_id: str, after: int, wait: float) -> list[dict]:
         return self.poll(chat_id, after, wait)["items"]
 
-    def poll(self, chat_id: str, after: int, wait: float, progress_rev: int | None = None) -> dict:
-        """New items after `after`, and the progress bar; returns early when either changes (the bar only for
-        a panel that says which revision it has)."""
+    def poll(self, chat_id: str, after: int, wait: float, progress_rev: int | None = None, others_rev: int | None = None) -> dict:
+        """New items after `after`, the progress bar, and what the other windows are busy with; returns early when
+        any of them changes (the bar and the other windows only for a panel that says which revision it has)."""
         deadline = time.time() + max(0.0, min(wait, MAX_WAIT_SECONDS))
         with self.cond:
             if chat_id and chat_id not in self.logs:
                 self.logs[chat_id] = []  # an open panel that has not sent anything yet still gets permission prompts
+            if chat_id and time.time() - self.seen.get(chat_id, 0.0) > SEEN_SECONDS:
+                self.cond.notify_all()  # a window that just opened: the other panels list it
             while True:
+                now = time.time()
+                if chat_id:
+                    self.seen[chat_id] = now  # a panel is asking: its window is open
                 items = [i for i in self.logs.get(chat_id, []) if i["seq"] > after]
                 rev = self.progress_rev.get(chat_id, 0)
-                remaining = deadline - time.time()
-                if items or (progress_rev is not None and rev != progress_rev) or remaining <= 0:
-                    return {"items": items, "progress": self._current_progress(chat_id), "progress_rev": rev}
+                others = self._overview_rev(now)
+                remaining = deadline - now
+                if items or (progress_rev is not None and rev != progress_rev) or (others_rev is not None and others != others_rev) \
+                        or remaining <= 0:
+                    return {"items": items, "progress": self._current_progress(chat_id), "progress_rev": rev,
+                            "others": self._others(chat_id, now), "others_rev": others}
                 self.cond.wait(remaining)
 
     def _progress_entry(self, chat_id: str, now: float) -> dict:
@@ -693,6 +776,7 @@ class ChatHub:
                 self.workers[agent.name] = {"agent_id": agent_id, "last": now, "stopped": 0.0}
             else:  # a guard from before agent ids were reported: the same window, whoever it is
                 worker.update(last=now, stopped=0.0)
+            self.names.setdefault(agent.name, {"app": agent.app, "window": agent.pin.rpartition("@")[0]})
             asker, asked = self._work_for(agent.name, now)
             if agent.name in self.assigned:
                 self.assigned[agent.name]["ts"] = now
@@ -724,6 +808,7 @@ class ChatHub:
                     del self.stops[agent.name]
             if worker is None or worker["agent_id"] in ("", agent_id):
                 self.assigned.pop(agent.name, None)  # what it was handed is done; the next hand-out says anew whose it is
+            self.cond.notify_all()  # the other panels show this window: it is no longer at work
         return {"chat_id": agent.name}
 
     def request_stop(self, app: str, window: str, pin: str = "") -> dict:
@@ -941,11 +1026,14 @@ class PanelHandler(BaseHTTPRequestHandler):
             try:
                 after, wait = int(q.get("after", "0")), float(q.get("wait", "0"))
                 prev = int(q["prev"]) if "prev" in q else None  # the progress revision the panel already shows
+                others = int(q["orev"]) if "orev" in q else None  # and the revision of the other windows' states it shows
             except ValueError:
-                self._json(400, {"ok": False, "error": "after, wait and prev must be numbers"})
+                self._json(400, {"ok": False, "error": "after, wait, prev and orev must be numbers"})
                 return
-            result = self.hub.poll(q.get("chat_id", ""), after, wait, prev)
+            result = self.hub.poll(q.get("chat_id", ""), after, wait, prev, others)
             self._json(200, {"ok": True, **result, "next": max([after] + [i["seq"] for i in result["items"]])})
+        elif url.path == "/v1/overview":  # `claude_hand.py status`: every open window and what goes on in it
+            self._json(200, {"ok": True, "windows": self.hub.overview()})
         else:
             self._json(404, {"ok": False, "error": "not found"})
 

@@ -685,6 +685,120 @@ class DialogWatchTests(unittest.TestCase):
         self.assertEqual(self.notices("blender-props"), [])
 
 
+class OverviewTests(unittest.TestCase):
+    """Every open window and what goes on in it: the panels' "다른 창" lines and `claude_hand.py status`."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        write_agents(Path(self.tmp.name), [handlib.discovery.Instance(name="Level", hash="bbbb2222")])
+        self.hub = cc.ChatHub(lambda message: None, Path(self.tmp.name))
+        self.hub.initialized = True
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def states(self):
+        return {s["chat_id"]: s["state"] for s in self.hub.overview()}
+
+    def open_panel(self, app, window, pin=""):
+        chat_id, _ = self.hub.resolve(app, window, pin)
+        return self.hub.poll(chat_id, 0, 0)
+
+    def test_a_window_is_listed_while_its_panel_is_open_or_its_subagent_works(self):
+        self.assertEqual(self.hub.overview(), [])
+        self.open_panel("unity", "MyGame")
+        self.assertEqual(self.states(), {"unity-mygame": "idle"})
+        self.hub.report_action("unity", "Level@bbbb2222", "manage_scene", "save", "aaa")  # asked in the Claude app: no panel there
+        self.assertEqual(self.states(), {"unity-level": "working", "unity-mygame": "idle"})
+        self.hub.reply("unity-level", "저장했어요", origin="desktop", request="씬 저장")
+        self.assertEqual(self.states(), {"unity-mygame": "idle"})
+        self.hub.seen["unity-mygame"] -= cc.SEEN_SECONDS + 1  # the chat window was closed
+        self.assertEqual(self.hub.overview(), [])
+
+    def test_states_and_whose_request_a_window_works_for(self):
+        self.open_panel("unity", "MyGame")
+        self.hub.post_user_message("unity", "MyGame", "큐브 만들어줘")
+        [mine] = self.hub.overview()
+        self.assertEqual((mine["state"], mine["request"], mine["window"], mine["app"]), ("waiting", "큐브 만들어줘", "MyGame", "unity"))
+        self.hub.report_action("unity", "MyGame@aaaa1111", "manage_gameobject", "create Cube", "aaa")
+        [mine] = self.hub.overview()
+        self.assertEqual((mine["state"], mine["action"], mine["request"], mine.get("asker")),
+                         ("working", "manage_gameobject create Cube", "큐브 만들어줘", None))
+        self.hub.post_user_message("blender", "props", "의자를 Level로 보내줘", pin="props@9877")
+        self.hub.assign("unity-level", self.hub.logs["blender-props"][-1]["request"])
+        self.hub.report_action("unity", "Level@bbbb2222", "ch_import_model", "", "bbb")
+        by_chat = {s["chat_id"]: s for s in self.hub.overview()}
+        self.assertEqual((by_chat["unity-level"]["state"], by_chat["unity-level"]["asker"], by_chat["unity-level"]["request"]),
+                         ("working", "blender-props", "의자를 Level로 보내줘"))
+        self.assertEqual(by_chat["blender-props"]["state"], "waiting")  # nothing works in the Blender window itself
+        self.hub.dialog_seen["unity-level"] = json.dumps([DialogWatchTests.SAVE])
+        level = next(s for s in self.hub.overview() if s["chat_id"] == "unity-level")
+        self.assertEqual(level["state"], "dialog")
+        self.assertIn("Save", level["dialog"])
+        self.hub.agent_stopped("unity", "MyGame@aaaa1111", "aaa")
+        self.assertEqual(self.states()["unity-mygame"], "waiting")  # its subagent is done: the supervisor's turn
+        self.hub.reply("unity-mygame", "만들었어요")
+        self.assertEqual(self.states()["unity-mygame"], "idle")
+
+    def test_a_panel_gets_the_other_windows_as_lines(self):
+        self.open_panel("unity", "MyGame")
+        self.open_panel("unity", "Level")
+        self.assertEqual(self.hub.poll("unity-mygame", 0, 0)["others"], ["한가함: Level (Unity)"])
+        self.hub.post_user_message("blender", "props", "의자를 Level로 보내줘", pin="props@9877")
+        self.hub.assign("unity-level", self.hub.logs["blender-props"][-1]["request"])
+        self.hub.report_action("unity", "Level@bbbb2222", "ch_import_model", "", "bbb")
+        self.assertEqual(self.hub.poll("unity-mygame", 0, 0)["others"],
+                         ["Level (Unity) · 작업 중 · props의 요청 · “의자를 Level로 보내줘”", "props (Blender) · 답 기다림 · “의자를 Level로 보내줘”"])
+        self.assertEqual(self.hub.poll("unity-level", 0, 0)["others"],  # a window is not its own "other"
+                         ["props (Blender) · 답 기다림 · “의자를 Level로 보내줘”", "한가함: MyGame (Unity)"])
+        self.hub.dialog_seen["unity-level"] = json.dumps([DialogWatchTests.SAVE])
+        self.assertRegex(self.hub.poll("unity-mygame", 0, 0)["others"][0], r"^Level \(Unity\) · 대화상자로 멈춤 · props의 요청 · .*Save")
+
+    def test_a_waiting_panel_wakes_when_another_windows_state_changes_not_with_its_every_step(self):
+        first = self.open_panel("unity", "MyGame")
+        self.hub.report_action("unity", "Level@bbbb2222", "manage_scene", "save", "aaa")
+        shown = self.hub.poll("unity-mygame", 0, 0, first["progress_rev"], first["others_rev"])
+        self.assertNotEqual(shown["others_rev"], first["others_rev"])
+        self.assertEqual(shown["others"], ["Level (Unity) · 작업 중"])
+        self.hub.report_action("unity", "Level@bbbb2222", "manage_gameobject", "create", "aaa")  # one more step: the same state
+        started = time.time()
+        again = self.hub.poll("unity-mygame", 0, 0.3, shown["progress_rev"], shown["others_rev"])
+        self.assertGreaterEqual(time.time() - started, 0.25)  # waited its time out
+        self.assertEqual(again["others_rev"], shown["others_rev"])
+        result = {}
+        waiter = threading.Thread(target=lambda: result.update(self.hub.poll("unity-mygame", 0, 10, shown["progress_rev"], shown["others_rev"])))
+        waiter.start()
+        time.sleep(0.2)
+        self.hub.agent_stopped("unity", "Level@bbbb2222", "aaa")  # Level is no longer at work
+        waiter.join(5)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(result["others"], ["한가함: Level (Unity)"])
+
+    def test_the_supervisor_sees_the_states_in_current_context(self):
+        self.hub.update_context("unity", "MyGame", "MyGame@aaaa1111", {"scene": "Main", "selection": ["Player"], "focused": True})
+        self.hub.post_user_message("unity", "MyGame", "이거 빨갛게")
+        [window] = self.hub.current_context()["windows"]
+        self.assertEqual((window["state"], window["request"]), ("waiting", "이거 빨갛게"))
+        self.assertIn("state:", self.hub.current_context()["note"])
+
+    def test_overview_over_http(self):
+        httpd = cc.start_http(self.hub, "t", port=18798)
+        try:
+            def get(path):
+                req = urllib.request.Request(f"http://127.0.0.1:{httpd.server_address[1]}{path}", headers={"X-Claude-Hand-Token": "t"})
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    return json.loads(response.read())
+            self.hub.post_user_message("unity", "MyGame", "큐브 만들어줘")
+            [window] = get("/v1/overview")["windows"]
+            self.assertEqual((window["chat_id"], window["state"]), ("unity-mygame", "waiting"))
+            updates = get("/v1/updates?chat_id=unity-level&after=0&wait=0&orev=-1")
+            self.assertEqual(updates["others"], ["MyGame (Unity) · 답 기다림 · “큐브 만들어줘”"])
+            self.assertIsInstance(updates["others_rev"], int)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
 class HistoryTests(unittest.TestCase):
     def test_panels_get_their_conversation_back_after_a_restart(self):
         with tempfile.TemporaryDirectory() as tmp:

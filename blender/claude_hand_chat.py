@@ -74,6 +74,7 @@ _server_missing = [False]  # main thread only
 _start_requested = [0.0]   # main thread only
 _pending = [None]          # main thread only: (text, context) typed while Claude Hand was off
 _progress = [None]         # main thread only: (what the subagent is doing, when it arrived) while it works
+_others = []               # main thread only: what the other open windows are busy with, a line each (from the channel)
 _context_sent = {"time": 0.0, "signature": None, "server_pid": None, "busy": False}  # main thread only
 _inbox = queue.Queue()   # (event, payload) from worker threads
 _identity = {"window": None, "pin": None}  # written on the main thread, read by the poller
@@ -143,7 +144,7 @@ def call(server, method, path, body=None, timeout=10):
 
 def poll_loop():
     """Background thread: long-polls the channel for this window's replies and permission prompts."""
-    chat_id, agent, after, server_pid, progress_rev = None, None, 0, None, -1
+    chat_id, agent, after, server_pid, progress_rev, others_rev = None, None, 0, None, -1, -1
     while not _stop.is_set():
         server = read_server()
         with _identity_lock:
@@ -154,7 +155,7 @@ def poll_loop():
             _stop.wait(1)
             continue
         if server.get("pid") != server_pid:  # a new supervisor session starts with an empty history
-            server_pid, chat_id, agent, after, progress_rev = server.get("pid"), None, None, 0, -1
+            server_pid, chat_id, agent, after, progress_rev, others_rev = server.get("pid"), None, None, 0, -1, -1
             _inbox.put(("reset", None))
         try:
             if chat_id is None or agent is None:
@@ -167,7 +168,8 @@ def poll_loop():
                 chat_id, agent = resolved.get("chat_id"), resolved.get("agent")
                 _inbox.put(("status", f"담당: {agent}" if agent else
                             "이 Blender 창의 하위 세션이 없습니다. uv run tools/claude_hand.py sync 를 실행하세요."))
-            query = urllib.parse.urlencode({"chat_id": chat_id, "after": after, "prev": progress_rev, "wait": POLL_WAIT_SECONDS})
+            query = urllib.parse.urlencode({"chat_id": chat_id, "after": after, "prev": progress_rev, "orev": others_rev,
+                                            "wait": POLL_WAIT_SECONDS})
             _inbox.put(("missing", False))
             updates = call(server, "GET", f"/v1/updates?{query}", timeout=POLL_WAIT_SECONDS + 15)
             if updates.get("ok") is False:
@@ -179,6 +181,9 @@ def poll_loop():
             if "progress_rev" in updates and updates["progress_rev"] != progress_rev:
                 progress_rev = updates["progress_rev"]
                 _inbox.put(("progress", updates.get("progress")))
+            if "others_rev" in updates and updates["others_rev"] != others_rev:  # another window's state changed
+                others_rev = updates["others_rev"]
+                _inbox.put(("others", updates.get("others") or []))
             after = updates.get("next", after)
         except (OSError, ValueError) as exc:
             _inbox.put(("missing", True))
@@ -765,8 +770,11 @@ def apply_event(event, payload):
     elif event == "reset":
         _entries.clear()
         _progress[0] = None
+        _others.clear()
     elif event == "progress":
         _progress[0] = (payload, time.time()) if payload else None
+    elif event == "others":
+        _others[:] = [str(line) for line in payload]
     elif event == "native_text":
         if not send_text(payload, bpy.context.window_manager.claude_hand_chat_context):  # the box is empty again by now
             _notice("보내지 못했습니다. 앞 메시지가 Claude Hand가 켜지기를 기다리는 중이니 잠시 뒤 다시 보내 주세요.")
@@ -1009,6 +1017,7 @@ class CLAUDEHAND_PT_chat(bpy.types.Panel):
         if _last_user[0] and time.time() - _last_user[0] > NO_REPLY_HINT_SECONDS:
             for line in wrap("1분 넘게 답이 없습니다. 감독 세션을 start-supervisor.cmd로 열었는지, Claude Code 창에 확인을 기다리는 질문이 없는지 봐 주세요.", width):
                 layout.label(text=line)
+        draw_others(layout, width)
         draw_progress(layout, width)
         if _marks and _progress[0] is None:
             layout.operator(CLAUDEHAND_OT_undo.bl_idname, text=f"되돌리기: {describe_mark(_marks[-1])}", icon="LOOP_BACK")
@@ -1020,6 +1029,32 @@ class CLAUDEHAND_PT_chat(bpy.types.Panel):
         row = layout.row()
         row.prop(wm, "claude_hand_chat_context", text="선택 항목 함께")
         row.operator(CLAUDEHAND_OT_send.bl_idname, text="보내기", icon="PLAY")
+
+
+OTHER_LINES = 2  # rows one other window may take in the panel
+
+
+def others_rows(lines, width):
+    """The other windows as panel rows, (text, icon) each: every window's line starts with a dot and wraps to a
+    second row at most. Words only: what a window is doing is in the text, not in a colour."""
+    rows = []
+    for line in lines:
+        wrapped = wrap(line, width)
+        if len(wrapped) > OTHER_LINES:
+            wrapped = wrapped[:OTHER_LINES - 1] + [wrapped[OTHER_LINES - 1].rstrip() + "…"]
+        rows += [(text, "DOT" if i == 0 else "BLANK1") for i, text in enumerate(wrapped)]
+    return rows
+
+
+def draw_others(layout, width):
+    """What the other open windows are busy with (at work and on whose request, waiting for an answer, stopped by a
+    dialog; the idle ones together), as the channel tells it. Shown anew when a window's state changes."""
+    if not _others:
+        return
+    col = layout.column(align=True)
+    col.label(text=f"다른 창 ({len(_others)})", icon="WINDOW")
+    for text, icon in others_rows(_others, width):
+        col.label(text=text, icon=icon)
 
 
 def progress_view(progress, received_at, now):

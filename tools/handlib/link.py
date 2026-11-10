@@ -53,6 +53,18 @@ def supervisor_running(home: Path | None = None, fetch=None) -> bool:
     return bool(state.get("ok"))
 
 
+def channel_get(path: str, home: Path | None = None, fetch=None) -> dict | None:
+    """What the running supervisor's chat channel answers to a GET; None when there is none or it does not answer."""
+    server, _ = read_chat_files((home or claude_hand_home()) / "chat")
+    if not server:
+        return None
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{server['port']}{path}", headers={"X-Claude-Hand-Token": server.get("token", "")})
+        return (fetch or (lambda r: json.loads(urllib.request.urlopen(r, timeout=3).read().decode("utf-8"))))(req)
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def blender_request(port: int, command: dict, timeout: float = 2.0, connect_timeout: float = 0.5):
     """MCP for Blender's add-on speaks bare JSON over TCP: one object in, one object out.
     The connect timeout is short on purpose: Windows takes about two seconds to refuse a closed

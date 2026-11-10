@@ -25,6 +25,7 @@ import handlib.discovery  # noqa: E402
 import handlib.install  # noqa: E402
 import handlib.launch  # noqa: E402
 import handlib.link  # noqa: E402
+import handlib.overview  # noqa: E402
 import handlib.settings  # noqa: E402
 
 
@@ -1226,6 +1227,66 @@ class EverydayStartTests(unittest.TestCase):
             ch.main(["shortcut", "--remove"])
             self.assertEqual(list((Path(tmp) / "Desktop").iterdir()), [])
 
+
+
+class StatusTests(unittest.TestCase):
+    """`claude_hand.py status`: every open window and what goes on in it, as the chat channel tells it."""
+
+    WINDOWS = [
+        {"chat_id": "unity-level", "app": "unity", "window": "Level", "state": "working", "seconds": 75, "actions": 3,
+         "action": "ch_import_model", "request": "의자를 Level로 보내줘", "request_seq": 4, "asker": "blender-props"},
+        {"chat_id": "blender-props", "app": "blender", "window": "props", "state": "waiting", "seconds": 80,
+         "request": "의자를 Level로 보내줘", "request_seq": 4},
+        {"chat_id": "unity-menu", "app": "unity", "window": "Menu", "state": "dialog", "seconds": 5, "dialog": "Save / Cancel"},
+        {"chat_id": "unity-mygame", "app": "unity", "window": "MyGame", "state": "idle"},
+        {"chat_id": "blender-rock", "app": "blender", "window": "rock", "state": "idle"},
+    ]
+
+    def run_status(self, answer, *args):
+        out = io.StringIO()
+        with unittest.mock.patch.object(handlib.link, "channel_get", lambda path, home=None, fetch=None: answer), \
+             unittest.mock.patch("sys.stdout", out):
+            code = ch.main(["status", *args])
+        return code, out.getvalue()
+
+    def test_lines_say_the_state_in_words(self):
+        code, text = self.run_status({"ok": True, "windows": self.WINDOWS})
+        self.assertEqual(code, 0)
+        self.assertEqual(text.splitlines(), [
+            "Level (Unity) · 작업 중 · 1분 15초 · props의 요청 · ch_import_model · “의자를 Level로 보내줘”",
+            "props (Blender) · 답 기다림 · 1분 20초 · “의자를 Level로 보내줘”",
+            "Menu (Unity) · 대화상자로 멈춤 · 5초 · Save / Cancel",
+            "한가함: MyGame (Unity), rock (Blender)",
+        ])
+        # A panel shows the other windows without the seconds and the step: they would stand still there.
+        self.assertEqual(handlib.overview.lines(self.WINDOWS, skip="unity-mygame")[0],
+                         "Level (Unity) · 작업 중 · props의 요청 · “의자를 Level로 보내줘”")
+        self.assertEqual(handlib.overview.lines(self.WINDOWS, skip="unity-mygame")[-1], "한가함: rock (Blender)")
+
+    def test_json_nothing_open_and_claude_hand_off(self):
+        code, text = self.run_status({"ok": True, "windows": self.WINDOWS}, "--json")
+        self.assertEqual((code, json.loads(text)), (0, self.WINDOWS))
+        code, text = self.run_status({"ok": True, "windows": []})
+        self.assertEqual(code, 0)
+        self.assertIn("없습니다", text)
+        code, text = self.run_status(None)
+        self.assertEqual(code, 1)
+        self.assertIn("Claude Hand가 꺼져 있습니다", text)
+
+    def test_channel_get_reads_the_running_channel_or_gives_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            self.assertIsNone(handlib.link.channel_get("/v1/overview", home))  # no Claude Hand
+            (home / "chat").mkdir()
+            (home / "chat" / "server.json").write_text(json.dumps({"port": 8765, "token": "t"}), encoding="utf-8")
+            asked = []
+            answer = handlib.link.channel_get("/v1/overview", home, fetch=lambda req: asked.append(req) or {"ok": True, "windows": []})
+            self.assertEqual(answer, {"ok": True, "windows": []})
+            self.assertEqual((asked[0].full_url, asked[0].get_header("X-claude-hand-token")), ("http://127.0.0.1:8765/v1/overview", "t"))
+
+            def down(req):
+                raise OSError("refused")
+            self.assertIsNone(handlib.link.channel_get("/v1/overview", home, fetch=down))
 
 
 class RemoteControlTests(unittest.TestCase):
