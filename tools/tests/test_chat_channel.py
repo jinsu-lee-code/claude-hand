@@ -477,6 +477,57 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual([i["kind"] for i in restarted.logs["unity-mygame"]], ["user", "reply", "image"])
 
 
+class DialogWatchTests(unittest.TestCase):
+    """A dialog stops the window doing the work: the chat whose request waits on it is told (and blinks)."""
+
+    SAVE = {"title": "Scene(s) Have Been Modified", "text": "Do you want to save the changes?",
+            "buttons": ["Save", "Don't Save", "Cancel"], "progress": False}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        write_agents(Path(self.tmp.name) / "agents")
+        self.hub = cc.ChatHub(lambda message: None, Path(self.tmp.name) / "agents")
+        self.hub.initialized = True
+        self.shown, self.asked = [], []
+        self.hub.find_dialogs = lambda app, pin: self.asked.append((app, pin)) or list(self.shown)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def notices(self, chat_id):
+        return [i for i in self.hub.logs.get(chat_id, []) if i["kind"] == "notice"]
+
+    def test_the_waiting_chat_is_told_once_per_dialog(self):
+        self.hub.check_dialogs()
+        self.assertEqual(self.asked, [])  # nobody is working: nothing to look at
+        self.hub.post_user_message("blender", "props", "의자를 Unity로 보내줘", pin="props@9877")
+        self.hub.report_action("unity", "MyGame@aaaa1111", "ch_import_model", "")
+        self.hub.check_dialogs()
+        self.assertEqual(self.asked, [("unity", "MyGame@aaaa1111")])
+        self.assertEqual(self.notices("blender-props"), [])
+        self.shown[:] = [self.SAVE]
+        self.hub.check_dialogs()
+        self.hub.check_dialogs()
+        [notice] = self.notices("blender-props")
+        self.assertTrue(notice["alert"])
+        self.assertIn("MyGame(Unity)가 대화상자 때문에 멈춰 있어요. Unity에서 직접 골라 주세요", notice["text"])
+        self.assertIn("[버튼: Save / Don't Save / Cancel]", notice["text"])
+        self.assertEqual(self.notices("unity-mygame"), [])  # the stopped window shows the dialog itself
+        self.shown[:] = []
+        self.hub.check_dialogs()
+        self.shown[:] = [self.SAVE]
+        self.hub.check_dialogs()
+        self.assertEqual(len(self.notices("blender-props")), 2)  # it came back: told again
+
+    def test_an_answered_request_is_not_told(self):
+        self.hub.post_user_message("blender", "props", "의자를 Unity로 보내줘", pin="props@9877")
+        self.hub.report_action("unity", "MyGame@aaaa1111", "ch_import_model", "")
+        self.hub.reply("blender-props", "다 했어요")
+        self.shown[:] = [self.SAVE]
+        self.hub.check_dialogs()
+        self.assertEqual(self.notices("blender-props"), [])
+
+
 class HistoryTests(unittest.TestCase):
     def test_panels_get_their_conversation_back_after_a_restart(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -53,6 +53,7 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from claude_hand import GENERATED_MARKER, capture_window, refresh_agents, slug, supervisor_running  # noqa: E402
+from unity_bridge import describe_dialogs, find_project, waiting_dialogs  # noqa: E402
 
 SERVER_NAME = "claude-hand-chat"
 SERVER_VERSION = "0.1.0"
@@ -207,6 +208,8 @@ class ChatHub:
         self.previewed: dict[str, float] = {}  # chat_id -> when its replies last looked for other windows to show
         self.capture = None  # callable(app, pin, path) -> path or None: a picture of what a window shows now
         self.images_dir: Path | None = None  # where result previews are kept (None: no previews)
+        self.find_dialogs = None  # callable(app, pin) -> the dialogs that stop that window now ([] for none)
+        self.dialog_seen: dict[str, str] = {}  # chat_id -> the dialogs already told about, so each is told once
 
     def use_history(self, directory: Path) -> None:
         """Keep each chat's recent messages in `directory` and show the saved ones again, so a panel still has its
@@ -343,6 +346,41 @@ class ChatHub:
                 self._append(chat_id, {"kind": "image", "path": Path(captured).as_posix(), "app": agent.app, "window": window,
                                        "caption": f"{window} ({'Unity' if agent.app == 'unity' else 'Blender'}) 지금 모습"})
         self._prune_images()
+
+    def check_dialogs(self) -> None:
+        """While a window's subagent works, look for a dialog that stopped that window ("Save the scene?") and tell the
+        chats whose request waits on it: their user may be looking at another window. One pass (watch_dialogs repeats)."""
+        if self.find_dialogs is None:
+            return
+        now = time.time()
+        with self.cond:
+            busy = [chat for chat, entry in self.progress.items() if now - entry["updated"] <= PROGRESS_TTL]
+            for chat in [c for c in self.dialog_seen if c not in busy]:
+                del self.dialog_seen[chat]
+        agents = {a.name: a for a in load_agents(self.agents_dir)} if busy else {}
+        for chat in busy:
+            agent = agents.get(chat)
+            dialogs = self.find_dialogs(agent.app, agent.pin) if agent else []
+            key = json.dumps(dialogs, ensure_ascii=False, sort_keys=True) if dialogs else ""
+            with self.cond:
+                if key == self.dialog_seen.get(chat, ""):
+                    continue
+                self.dialog_seen[chat] = key
+                if not dialogs:
+                    continue
+                window = (self.contexts.get(chat) or self.windows.get(chat) or {}).get("window") or agent.pin.rpartition("@")[0]
+                app = "Unity" if agent.app == "unity" else "Blender"
+                text = f"{window}({app})가 대화상자 때문에 멈춰 있어요. {app}에서 직접 골라 주세요: {describe_dialogs(dialogs)}"
+                for target in [c for c in self.logs if c != chat and self._open_request(c)]:
+                    self._append(target, {"kind": "notice", "text": text, "alert": True})
+
+    def watch_dialogs(self, interval: float = 2.0) -> None:
+        while True:
+            try:
+                self.check_dialogs()
+            except Exception as exc:  # never let the watcher die
+                log("dialog check failed:", exc)
+            time.sleep(interval)
 
     def _prune_images(self) -> None:
         try:
@@ -954,6 +992,8 @@ def main(argv: list[str] | None = None) -> int:
     mcp.hub.use_history(home / "chat" / "history")
     mcp.hub.capture = lambda app, pin, path: capture_window(app, pin, path, PREVIEW_SIZE)
     mcp.hub.images_dir = home / "chat" / "images"
+    mcp.hub.find_dialogs = lambda app, pin: waiting_dialogs(find_project(hash_=pin.rpartition("@")[2])) if app == "unity" else []
+    threading.Thread(target=mcp.hub.watch_dialogs, name="dialog-watch", daemon=True).start()
     if sys.platform == "win32" and minimize_after_start(home):
         # Not at start: Claude Code may still be showing its development-channel confirmation in that window.
         # The first tool call or permission request means the session is past it.

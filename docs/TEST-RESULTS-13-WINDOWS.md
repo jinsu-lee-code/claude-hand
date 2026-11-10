@@ -134,6 +134,20 @@
 - 같이 고친 것: Blender 안 테스트 중 "blender-install-chat이 돌리는 스크립트" 테스트가 Blender 안에서 돌면 `sys.executable`(Blender의 Python, bpy 없음)을 써서 늘 실패하던 것 → Blender 안에서는 blender.exe로 돌림. 이제 Blender 안 테스트 17개 모두 통과.
 - 실제 실행(감독 켜진 상태): 모두 통과, 36초 — Python 190개(건너뜀 24), Blender 17개, hand_test `ch_*` 8개 응답·씬 뷰 찍음, test_blender 애드온 0.6.0, 채널 서버 OK, 설치 파일 최신.
 
+## 21단계: 대화상자 자동 감지 (2026-11-10)
+
+다음에 할 것 목록의 세 번째(DESIGN의 2단계 후보 "하위 세션의 시간 초과를 감독에게 바로 알리는 장치").
+
+- 알아본 것: Unity의 `EditorUtility.DisplayDialog`는 Windows 기본 대화상자(`#32770`)로 뜨고 주인은 Unity 주 창, 떠 있는 동안 주 창은 비활성. 제목은 창 글자, 본문은 `Edit` 컨트롤(다른 프로세스라 `GetWindowText`로는 빈 값, `WM_GETTEXT`로 읽힘), 선택지는 `Button`. 그동안 Claude Hand 통로는 응답하지 않음(시간 초과).
+- `unity_bridge.app_dialogs(pid)`: 그 프로세스의 보이는 `#32770` 창마다 제목·글·버튼, 진행 막대(`msctls_progress32`)가 있으면 progress로 표시해 "고를 것 없음"으로 뺌. 자기 user32 핸들을 써서 다른 코드의 ctypes 설정과 섞이지 않음. pid는 Claude Hand Tools 등록 파일에서.
+- 세 곳에서 씀(Claude 거치지 않음):
+  1. guard: 하위 세션의 Unity 호출 직전에 대화상자가 있으면 내용과 함께 막음 → 하위 세션이 바로 감독에게 보고(지침에 "버튼은 누르지 않는다").
+  2. `unity_bridge.request`: 기다리는 동안 1.5초마다 보고, 대화상자가 뜨면 `DIALOG`(retry `check_first`: 닫히면 그때 실행될 수 있음)로 바로 끝냄.
+  3. 채널 서버: 하위 세션이 일하는 동안 2초마다 보고, 새 대화상자면 답을 기다리는 **다른** 창의 채팅에 알림(`notice`, alert → 작업 표시줄 깜빡임, Unity는 경고 상자, Blender는 경고 아이콘). 같은 대화상자는 한 번만.
+- 감독 스킬: 대화상자 절을 "저절로 알아챔 → 내용을 그대로 보여 주고 무엇을 누를지 묻기, 사용자가 누르면 상태 확인 뒤 이어 맡기기"로 바꾸고 agent-desktop은 대신 눌러 달라고 할 때와 Blender용으로 남김.
+- 확인(열린 Unity에 확인용 대화상자를 띄우고 취소로 닫음): 읽기 — 제목·본문·버튼 [확인 / 취소] 그대로. 통로 — 30초 시간 초과 대신 1.5초 만에 `DIALOG`. guard — 내용과 함께 막고, 닫힌 뒤에는 통과. 채널 감시 — 실제 하위 세션 정의로 만든 시험용 허브에서 Blender 채팅에 "hand_test(Unity)가 대화상자 때문에 멈춰 있어요. Unity에서 직접 골라 주세요: … [버튼: 확인 / 취소]". Python 196개, Blender 안 17개 OK, Unity 컴파일 오류 없음, Blender 애드온 0.7.0. 다시 켠 감독으로 사용자 확인: 잘 됨, 안내는 5초 안팎에 뜸(채널 감시 2초 간격 + 하위 세션 호출이 막히기까지).
+- 한계: Windows만, Unity만(Blender는 자기 창 안에 그리는 팝업이라 밖에서 안 읽힘). 대화상자가 아닌 Unity 자체 모달 창(EditorWindow.ShowModal)은 `#32770`이 아니라 아직 못 잡음.
+
 ## 남은 것·참고
 
 - **`Bash(uv run *)` 미리 허용**: 새 `settings.local.json`이 이 폴더 세션의 `uv run …`을 허락 없이 실행하게 함. 12단계 E에서 본 `list` 같은 확인창은 이제 안 뜸. `uv run`은 아무 스크립트나 돌릴 수 있어 범위가 넓음.
@@ -148,5 +162,5 @@
 
 - ~~**끝났다는 알림**~~: 20단계로 만듦(작업 표시줄 깜빡임, Unity 탭 안 읽은 수).
 - ~~**자동 점검 명령 `selftest`**~~: 만듦(위 "selftest 명령"). 감독 세션의 환경 변수는 밖에서 읽을 방법이 마땅치 않아 넣지 않음.
-- **대화상자 자동 감지**: Unity가 "씬 저장할까요?" 같은 창에서 멈추면 감독이 바로 알아채기(DESIGN 2단계 후보).
+- ~~**대화상자 자동 감지**~~: 21단계로 만듦(Unity, Windows).
 - 정리: DESIGN.md를 오늘 바뀐 내용에 맞추기(최소화 방식, 대화 이어 쓰기, 채팅 기록, 세션 변수 정리, 되돌리기, 메모, 한글 입력창, 미리보기), `Bash(uv run *)`를 `uv run tools/claude_hand.py *`로 좁히기, MCP for Unity Python 3.14 버그 보고.

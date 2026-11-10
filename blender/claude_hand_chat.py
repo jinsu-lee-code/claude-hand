@@ -11,7 +11,7 @@ Install: `uv run tools/claude_hand.py blender-install-chat` (or Preferences > Ad
 bl_info = {
     "name": "Claude Hand Chat",
     "author": "claude-hand",
-    "version": (0, 6, 0),
+    "version": (0, 7, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar (N) > Claude Hand",
     "description": "Chat with this Blender window's claude-hand subagent",
@@ -449,12 +449,13 @@ def _bring_to_front(pid):
 
 
 def wants_attention(item, now):
-    """A fresh reply to a request made here, or a permission prompt: worth calling the user back for. Not history shown
-    again after a restart, and not replies to work asked in the Claude app (the user is there)."""
+    """A fresh reply to a request made here, a permission prompt, or a dialog that stopped the window doing the work:
+    worth calling the user back for. Not history shown again after a restart, and not replies to work asked in the
+    Claude app (the user is there)."""
     if now - float(item.get("ts") or 0) > ALERT_FRESH_SECONDS:
         return False
     kind = item.get("kind")
-    return kind == "permission" or (kind == "reply" and item.get("origin") != "desktop")
+    return kind == "permission" or (kind == "reply" and item.get("origin") != "desktop") or (kind == "notice" and bool(item.get("alert")))
 
 
 def flash_taskbar():
@@ -968,9 +969,10 @@ def entry_rows(entry, width):
     kind = entry.get("kind")
     if kind not in SHOWN_KINDS:
         return [], 0
-    if kind == "notice":  # from this panel itself, e.g. after 되돌리기
+    if kind == "notice":  # from this panel (되돌리기) or the channel (a dialog stopped the window doing the work)
         lines = wrap(entry_text(entry), width)[:ENTRY_LINES]
-        return [(line, "LOOP_BACK" if i == 0 else "NONE") for i, line in enumerate(lines)], 0
+        first = "ERROR" if entry.get("alert") else "LOOP_BACK"
+        return [(line, first if i == 0 else "NONE") for i, line in enumerate(lines)], 0
     if kind == "image":  # the picture itself is drawn after these rows (draw_image)
         return [(entry.get("caption") or "결과 미리보기", "IMAGE_DATA")], 0
     rows = []

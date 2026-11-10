@@ -30,6 +30,7 @@ from pathlib import Path
 
 SERVER_VERSION = "0.1.0"
 REGISTRY_FORMAT = "claude-hand/unity-bridge@1"
+DIALOG_POLL_SECONDS = 1.5  # while a call waits, how often to look for a dialog that stopped the editor
 
 
 def log(*parts) -> None:
@@ -80,17 +81,108 @@ class BridgeError(Exception):
         self.code, self.message, self.retry = code, message, retry
 
 
-def request(entry: dict, tool: str, params: dict | None = None, timeout: float = 130.0, connect_timeout: float = 1.0) -> dict:
-    """One call over the editor's socket: line JSON in, line JSON out. Returns the tool's result."""
+# ----------------------------------------------------------------------------- dialogs (Windows)
+#
+# A modal dialog ("Save the scene?", "API update required") stops the editor's main thread, so every call waits
+# until it times out. Windows shows such a dialog as a standard dialog window (#32770) owned by the editor, with its
+# text in Static/Edit controls and its choices as Buttons, so it can be read from outside without the editor's help.
+
+
+def app_dialogs(pid: int) -> list[dict]:
+    """The dialogs a process shows now: [{"title", "text", "buttons", "progress"}]; progress is true for a progress
+    bar window (busy, nothing to choose). [] on other systems or when there is none."""
+    if sys.platform != "win32" or not pid:
+        return []
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.WinDLL("user32")  # its own handle: argtypes set here must not change ctypes.windll.user32 for others
+    enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows.argtypes = [enum_proc, wintypes.LPARAM]
+    user32.EnumChildWindows.argtypes = [wintypes.HWND, enum_proc, wintypes.LPARAM]
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.SendMessageTimeoutW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM, wintypes.UINT,
+                                           wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
+
+    def class_of(hwnd):
+        buf = ctypes.create_unicode_buffer(256)
+        user32.GetClassNameW(hwnd, buf, 256)
+        return buf.value
+
+    def text_of(hwnd):  # WM_GETTEXT reads other processes' Edit controls too, where GetWindowText does not
+        buf, done = ctypes.create_unicode_buffer(2048), ctypes.c_size_t()
+        user32.SendMessageTimeoutW(hwnd, 0x000D, 2048, ctypes.cast(buf, ctypes.c_void_p).value, 0x0002, 500, ctypes.byref(done))
+        return " ".join(buf.value.split())
+
+    tops = []
+
+    def each_top(hwnd, _):
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and user32.IsWindowVisible(hwnd) and class_of(hwnd) == "#32770":
+            tops.append(hwnd)
+        return True
+    user32.EnumWindows(enum_proc(each_top), 0)
+    dialogs = []
+    for hwnd in tops:
+        kids = []
+        user32.EnumChildWindows(hwnd, enum_proc(lambda h, _: kids.append(h) or True), 0)
+        shown = [(class_of(k), text_of(k)) for k in kids if user32.IsWindowVisible(k)]
+        dialogs.append({"title": text_of(hwnd), "text": " ".join(t for c, t in shown if c in ("Static", "Edit") and t)[:500],
+                        "buttons": [t for c, t in shown if c == "Button" and t],
+                        "progress": any(c == "msctls_progress32" for c, _ in shown)})
+    return dialogs
+
+
+def waiting_dialogs(entry: dict | None, read=None) -> list[dict]:
+    """The dialogs a registered editor waits on for the user (progress bars left out)."""
+    if not entry:
+        return []
+    try:
+        return [d for d in (read or app_dialogs)(int(entry.get("pid") or 0)) if not d.get("progress")]
+    except Exception:  # reading windows is a nicety: never let it break a call
+        return []
+
+
+def describe_dialogs(dialogs: list[dict]) -> str:
+    """"'Save Scene' 창: Do you want to save? [버튼: Save / Don't Save / Cancel]" for each dialog."""
+    parts = []
+    for d in dialogs:
+        part = f"'{d.get('title') or '제목 없음'}' 창" + (f": {d['text']}" if d.get("text") else "")
+        if d.get("buttons"):
+            part += " [버튼: " + " / ".join(d["buttons"]) + "]"
+        parts.append(part)
+    return "; ".join(parts)
+
+
+def dialog_error(entry: dict, dialogs: list[dict]) -> BridgeError:
+    return BridgeError("DIALOG", f"Unity {entry.get('name')}가 대화상자 때문에 멈춰 있습니다: {describe_dialogs(dialogs)}. "
+                                 "누를 버튼은 사용자가 정합니다. 그대로 감독에게 보고하세요. 대화상자가 닫히면 이 호출이 "
+                                 "그때 실행될 수 있으니 다시 하기 전에 상태부터 확인하세요.", "check_first")
+
+
+def request(entry: dict, tool: str, params: dict | None = None, timeout: float = 130.0, connect_timeout: float = 1.0,
+            dialogs=None) -> dict:
+    """One call over the editor's socket: line JSON in, line JSON out. Returns the tool's result. While it waits it
+    looks for a dialog that stopped the editor and gives up at once with DIALOG instead of running into the timeout."""
     payload = json.dumps({"token": entry.get("token", ""), "tool": tool, "params": params or {},
                           "timeout": int(max(5, timeout - 10))}) + "\n"
     try:
         with socket.create_connection(("127.0.0.1", int(entry["port"])), connect_timeout) as sock:
-            sock.settimeout(timeout)
             sock.sendall(payload.encode("utf-8"))
-            buffer = b""
+            deadline, buffer = time.time() + timeout, b""
             while not buffer.endswith(b"\n"):
-                chunk = sock.recv(65536)
+                sock.settimeout(max(0.05, min(DIALOG_POLL_SECONDS, deadline - time.time())))
+                try:
+                    chunk = sock.recv(65536)
+                except socket.timeout:
+                    if time.time() >= deadline:
+                        raise
+                    waiting = waiting_dialogs(entry, dialogs)
+                    if waiting:
+                        raise dialog_error(entry, waiting) from None
+                    continue
                 if not chunk:
                     break
                 buffer += chunk

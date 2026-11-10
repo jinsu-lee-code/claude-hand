@@ -273,6 +273,9 @@ class BlenderChatAddonTests(unittest.TestCase):
         self.assertFalse(want({"kind": "reply", "origin": "desktop", "ts": now}, now))  # asked in the Claude app
         self.assertFalse(want({"kind": "user", "ts": now}, now))
         self.assertFalse(want({"kind": "image", "ts": now}, now))  # comes with a reply that already called
+        self.assertTrue(want({"kind": "notice", "alert": True, "ts": now}, now))  # a dialog stopped the other window
+        self.assertFalse(want({"kind": "notice", "ts": now}, now))  # this panel's own 되돌리기 note
+        self.assertEqual(self.addon.entry_rows({"kind": "notice", "alert": True, "text": "멈춤"}, None)[0][0][1], "ERROR")
 
     def test_lines_fit_the_sidebar(self):
         """Korean is about twice as wide as Latin text; a fixed character count overflowed into "..."."""

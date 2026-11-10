@@ -126,6 +126,62 @@ class BridgeClientTests(unittest.TestCase):
         self.assertEqual(missing.exception.code, "NOT_RUNNING")
 
 
+class DialogTests(unittest.TestCase):
+    """A modal dialog stops the editor's main thread: calls give up at once and say what it asks."""
+
+    SAVE = {"title": "Scene(s) Have Been Modified", "text": "Do you want to save the changes?",
+            "buttons": ["Save", "Don't Save", "Cancel"], "progress": False}
+    IMPORT = {"title": "Importing", "text": "Importing assets", "buttons": ["Cancel"], "progress": True}
+
+    def test_describe_and_leave_out_progress_bars(self):
+        self.assertEqual(ub.describe_dialogs([self.SAVE]), "'Scene(s) Have Been Modified' 창: Do you want to save the changes? "
+                                                           "[버튼: Save / Don't Save / Cancel]")
+        self.assertEqual(ub.waiting_dialogs({"pid": 7}, read=lambda pid: [self.IMPORT, self.SAVE]), [self.SAVE])
+        self.assertEqual(ub.waiting_dialogs(None, read=lambda pid: [self.SAVE]), [])
+        self.assertEqual(ub.waiting_dialogs({"pid": 7}, read=lambda pid: 1 / 0), [])  # reading windows failed: no dialog
+
+    def test_a_call_gives_up_when_a_dialog_stops_the_editor(self):
+        silent = socket.socket()  # accepts, never answers: an editor stuck in a dialog
+        silent.bind(("127.0.0.1", 0))
+        silent.listen()
+        try:
+            entry = {"name": "hand_test", "port": silent.getsockname()[1], "token": "t", "pid": 1234}
+            seen = []
+            dialogs = lambda pid: seen.append(pid) or ([self.SAVE] if len(seen) >= 2 else [])
+            with unittest.mock.patch.object(ub, "DIALOG_POLL_SECONDS", 0.1):
+                with self.assertRaises(ub.BridgeError) as stopped:
+                    ub.request(entry, "ch_editor_status", timeout=30, dialogs=dialogs)
+            self.assertEqual(stopped.exception.code, "DIALOG")
+            self.assertEqual(stopped.exception.retry, "check_first")  # it may still run once the dialog closes
+            self.assertIn("[버튼: Save / Don't Save / Cancel]", stopped.exception.message)
+            self.assertEqual(seen, [1234, 1234])
+        finally:
+            silent.close()
+
+    def test_without_a_dialog_a_silent_editor_still_times_out(self):
+        silent = socket.socket()
+        silent.bind(("127.0.0.1", 0))
+        silent.listen()
+        try:
+            entry = {"name": "hand_test", "port": silent.getsockname()[1], "token": "t", "pid": 1234}
+            with unittest.mock.patch.object(ub, "DIALOG_POLL_SECONDS", 0.1):
+                with self.assertRaises(ub.BridgeError) as late:
+                    ub.request(entry, "ch_editor_status", timeout=0.4, dialogs=lambda pid: [])
+            self.assertEqual(late.exception.code, "UNREACHABLE")
+        finally:
+            silent.close()
+
+    def test_guard_refuses_unity_calls_while_a_dialog_is_up(self):
+        event = {"tool_name": "mcp__unity_hand_test__manage_scene", "tool_input": {"action": "save"}}
+        reason = ch.dialog_block(event, "hand_test@49ac508c", "unity_hand_test", waiting=lambda: [self.SAVE])
+        self.assertIn("대화상자 때문에 멈춰 있어 이 호출을 막았습니다", reason)
+        self.assertIn("Don't Save", reason)
+        self.assertIsNone(ch.dialog_block(event, "hand_test@49ac508c", "unity_hand_test", waiting=lambda: []))
+        self.assertIsNone(ch.dialog_block({"tool_name": "Read"}, "hand_test@49ac508c", "unity_hand_test",
+                                          waiting=lambda: [self.SAVE]))  # not a Unity call
+        self.assertIsNone(ch.dialog_block(event, "hand_test@49ac508c", "unity_hand_test", waiting=lambda: 1 / 0))
+
+
 class BridgeServerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

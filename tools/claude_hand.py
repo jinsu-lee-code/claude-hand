@@ -548,6 +548,7 @@ def render_agent_prompt(inst: Instance, key: str, transport: str) -> str:
 - 씬 저장(`manage_scene`의 `save`)은 요청받았을 때만 한다.
 - 요청마다 첫 동작 직전에 되돌리기 지점이 저절로 찍힌다(채팅창의 [되돌리기]). `execute_code`로 씬을 바꿀 때는 Undo에 남긴다(`Undo.RegisterCreatedObjectUndo`, `Undo.RecordObject`, `Undo.DestroyObjectImmediate`). 그래야 되돌리기가 그 변경까지 되돌린다. MCP for Unity 도구와 `ch_import_*`는 알아서 남긴다.
 - 사용자가 방금 한 일을 취소해 달라고 하면 **다른 도구보다 먼저** `ch_checkpoint(action="undo")`로 되돌리고 무엇을 되돌렸는지 보고한다. 다른 도구를 먼저 쓰면 그 자리에 새 되돌리기 지점이 찍혀 아무것도 되돌아가지 않는다.
+- 호출이 "대화상자 때문에 멈춰 있어 이 호출을 막았습니다"로 막히거나 `DIALOG` 오류가 나면 더 부르지 말고, 그 대화상자의 제목·글·버튼을 그대로 감독에게 보고한다. 버튼은 누르지 않는다(무엇을 누를지는 사용자가 정한다).
 {notes_section(unity_notes_path(inst.path), "프로젝트")}
 ## 작업 순서: 스냅샷 → ref → 행동 → 확인
 1. `ch_scene_snapshot`으로 씬을 보고 대상의 ref(`@s1a2b3c4:e5` 형태)를 고른다. 씬이 크면 `depth`를 낮추고 `root=<ref>`로 파고든다.
@@ -962,6 +963,23 @@ def capture_window(app: str, pin: str, path: str, max_size: int = 640, unity_req
     return None
 
 
+def dialog_block(event: dict, pin: str, server: str, waiting=None) -> str | None:
+    """A Unity call while a dialog stops that editor would only wait for its timeout: refuse it with what the dialog
+    says, so the subagent reports it at once. Detection is best effort: if it fails, the call goes ahead."""
+    tool = str(event.get("tool_name", ""))
+    if not tool.startswith((f"mcp__{server}__", f"mcp__{server}_ch__")):
+        return None
+    try:
+        import unity_bridge
+        dialogs = (waiting or (lambda: unity_bridge.waiting_dialogs(unity_bridge.find_project(hash_=pin.rpartition("@")[2]))))()
+        if not dialogs:
+            return None
+        return (f"Unity가 대화상자 때문에 멈춰 있어 이 호출을 막았습니다: {unity_bridge.describe_dialogs(dialogs)}. 더 부르지 말고 "
+                "이 내용을 그대로 감독에게 보고하세요. 어느 버튼을 누를지는 사용자가 정합니다.")
+    except Exception:
+        return None
+
+
 def run_guard(args: argparse.Namespace, stdin=None, stdout=None) -> int:
     stdin, stdout = stdin or sys.stdin, stdout or sys.stdout
     try:
@@ -969,6 +987,8 @@ def run_guard(args: argparse.Namespace, stdin=None, stdout=None) -> int:
         reason = guard_decision(event, args.pin, args.server, args.transport, args.app)
     except Exception as exc:  # fail closed: a broken guard must not let calls through
         event, reason = {}, f"claude-hand guard 오류로 호출을 막았습니다: {exc}"
+    if not reason and args.app == "unity":
+        reason = dialog_block(event, args.pin, args.server)
     if not reason:
         report_progress(event, args.pin, args.server, args.app)
     if reason:

@@ -72,6 +72,7 @@ namespace ClaudeHand.Editor
             public string Request;
             public string ImagePath;  // "image": a result preview of another window, made by the chat channel
             public string Caption;
+            public bool Alert;        // "notice" from the channel: a dialog stopped the window doing the work
         }
 
         private readonly Dictionary<string, Texture2D> _images = new Dictionary<string, Texture2D>();  // by file; null = gone
@@ -270,6 +271,7 @@ namespace ClaudeHand.Editor
                     Request = item.Value<string>("request"),
                     ImagePath = item.Value<string>("path"),
                     Caption = item.Value<string>("caption"),
+                    Alert = item.Value<bool?>("alert") ?? false,
                 });
             }
             if (_entries.Count > KeptEntries) _entries.RemoveRange(0, _entries.Count - KeptEntries);
@@ -288,7 +290,8 @@ namespace ClaudeHand.Editor
             var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
             if (now - (item.Value<double?>("ts") ?? 0) > AlertFreshSeconds) return false;
             var kind = item.Value<string>("kind");
-            return kind == "permission" || (kind == "reply" && item.Value<string>("origin") != "desktop");
+            return kind == "permission" || (kind == "reply" && item.Value<string>("origin") != "desktop") ||
+                   (kind == "notice" && (item.Value<bool?>("alert") ?? false));
         }
 
         /// <summary>The tab says how many came while it had no focus; Unity's taskbar button blinks while it is behind.</summary>
@@ -548,8 +551,8 @@ namespace ClaudeHand.Editor
                     case "permission":
                         DrawPermission(entry);
                         break;
-                    case "notice":  // shown only here, not sent anywhere
-                        EditorGUILayout.HelpBox(entry.Text, MessageType.Info);
+                    case "notice":  // from this window (되돌리기) or the channel (a dialog stopped another window)
+                        EditorGUILayout.HelpBox(entry.Text, entry.Alert ? MessageType.Warning : MessageType.Info);
                         break;
                     case "image":
                         DrawImage(entry);
