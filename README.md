@@ -17,7 +17,7 @@ Unity·Blender 안의 채팅창 ──(claude-hand-chat 채널)──┐
  └─ 교환 폴더 %USERPROFILE%\.claude-hand\exchange  (.unitypackage / .blend / .fbx + manifest, 30일 지나면 켤 때 정리)
 ```
 
-> 상태: **0.9.0.** Windows의 실제 Unity 6.3과 Blender 5.2에서 써 가며 확인했습니다([12단계](docs/TEST-RESULTS-12-WINDOWS.md), [13~21단계](docs/TEST-RESULTS-13-WINDOWS.md)). macOS·Linux에서는 자동 테스트만 돌렸습니다.
+> 상태: **0.9.1.** Windows의 실제 Unity 6.3과 Blender 5.2에서 써 가며 확인했습니다([12단계](docs/TEST-RESULTS-12-WINDOWS.md), [13~21단계](docs/TEST-RESULTS-13-WINDOWS.md)). macOS·Linux에서는 자동 테스트만 돌렸습니다.
 > 2026-11-10의 구조 개편([점검](docs/REVIEW-2026-11-10.md))과 그 뒤에 더한 기능(다시 보낸 모델을 제자리에서 바꾸기, Unity → Blender, 요청 기록, 중지 버튼)은 자동 테스트와, 창 없이 연 Unity·Blender에서 실제로 돌려 확인했습니다. 열린 창과 감독 세션이 있어야 볼 수 있는 것은 [TEST-PLAN](docs/TEST-PLAN.md) 22·23단계에 있습니다.
 
 ## 매일 쓰는 법
@@ -253,7 +253,7 @@ Blender 쪽 일은 MCP for Blender의 Python 실행 도구(`execute_code`)로 �
 ```powershell
 uv run tools/claude_hand.py selftest --unity-project "C:\경로\프로젝트"
 ```
-Unity를 창 없이 열어, Blender가 실제로 내보낸 모델을 받고, 같은 모델이 다시 왔을 때 제자리에서 바꾸고, 프로젝트 머티리얼에 연결하고, 다시 Blender로 보내는 것까지 확인합니다(2~3분). 저장하지 않는 새 씬에서 하고, 만든 에셋은 끝나면 지웁니다. 바꾸기 전 파일 사본이 `Library/ClaudeHand/replaced/`에 하나 남습니다.
+Unity를 창 없이 열어, Blender가 실제로 내보낸 모델을 받고, 같은 모델이 다시 왔을 때 제자리에서 바꾸고, 프로젝트 머티리얼에 연결하고, 다시 Blender로 보내는 것까지 확인합니다(2~3분). 저장하지 않는 새 씬에서 하고, 만든 에셋은 끝나면 지웁니다. 바꾸기 전 파일 사본이 `Library/ClaudeHand/replaced/`에 몇 개 남습니다.
 
 `sync`에 대해 알아둘 것:
 - 지금 쓰는 MCP 설정(`.mcp.json`, `~/.claude.json`, Claude Desktop 설정)을 찾아서 같은 방식으로 서버를 띄웁니다. Unity는 stdio와 HTTP 둘 다 됩니다.
@@ -295,7 +295,7 @@ Unity를 창 없이 열어, Blender가 실제로 내보낸 모델을 받고, 같
 ## 알려진 한계
 
 - 작업 표시줄 알림, 한글 입력창, 대화상자 감지, Claude Hand 창 자동 최소화는 Windows에서만 됩니다. macOS·Linux에서는 실제 창으로 확인하지 않았습니다.
-- 개발 중인 체크아웃에서 `unity-install`을 하면 Claude Hand Tools가 이 PC의 폴더 경로(`file:`)로 들어가서, 그 프로젝트는 다른 PC에서 열리지 않습니다. 릴리스 태그(`v0.9.0`)를 받은 체크아웃에서는 GitHub 주소로 들어갑니다. `unity-install --dry-run`이 어느 쪽인지 알려 줍니다.
+- 개발 중인 체크아웃에서 `unity-install`을 하면 Claude Hand Tools가 이 PC의 폴더 경로(`file:`)로 들어가서, 그 프로젝트는 다른 PC에서 열리지 않습니다. 릴리스 태그(예: `v0.9.0`)를 받은 체크아웃에서는 GitHub 주소로 들어갑니다. `unity-install --dry-run`이 어느 쪽인지 알려 줍니다.
 - 내보내는 스크립트가 asmdef에 속해 있어도 asmdef는 같이 가지 않습니다. 받는 쪽에서는 기본 어셈블리로 컴파일됩니다.
 - `Packages/` 안의 에셋(URP 셰이더 등)은 `.unitypackage`에 들어가지 않습니다. 받는 프로젝트에 같은 패키지가 있어야 하고, dry run의 `missing_packages`에 표시됩니다.
 - 같은 프로젝트나 같은 Blender 창에 하위 세션 둘을 동시에 붙이면 안 됩니다. 명령이 하나씩 처리되기 때문입니다. 감독 스킬에 이 규칙이 들어 있고, Claude Hand가 켜져 있는 동안에는 안전장치가 나중에 온 하위 세션의 호출을 막습니다.
