@@ -388,7 +388,7 @@ class BlenderTests(unittest.TestCase):
         addon = ast.parse(handlib.constants.CHAT_ADDON_SOURCE.read_text(encoding="utf-8"))
         defined = {node.name for node in addon.body if isinstance(node, ast.FunctionDef)}
         called = set(re.findall(r"claude_hand_chat\.(\w+)\(", prompt))
-        self.assertEqual(called, {"undo_last_request", "export_blend", "import_blend", "export_fbx"})
+        self.assertEqual(called, {"undo_last_request", "export_blend", "import_blend", "export_fbx", "import_model"})
         self.assertLessEqual(called, defined)
         self.assertNotIn("```python", prompt)
 
@@ -854,6 +854,63 @@ class SelftestTests(unittest.TestCase):
         self.assertEqual(cmd[2], handlib.agents.hook_command("python3", "MyGame@aaaa1111", "unity_mygame", "stdio"))  # the installed command as written
         self.assertEqual(event["tool_name"], "mcp__claude_hand_selftest__probe")  # refused before anything is reported or marked
         self.assertEqual([c.ok for c in unknown], [None, None])
+
+    def test_runs_the_unity_selftest_in_a_closed_project(self):
+        """selftest --unity-project: Blender exports two versions of a model, Unity runs ChSelfTest without a window,
+        Blender reads what Unity sent back. Here both programs are stand-ins."""
+        class Done:
+            def __init__(self, out="", code=0):
+                self.stdout, self.stderr, self.returncode = out, "", code
+        ast.parse(handlib.checks.MODEL_FIXTURES_EXPR.format(addon="a.py", folder="tmp"))
+        ast.parse(handlib.checks.MODEL_TAKE_EXPR.format(addon="a.py", manifest="m.json"))
+        self.assertTrue({"ch_import_model", "ch_export_model"} <= set(handlib.checks.repo_unity_tools()))
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "MyGame"
+            (project / "Assets").mkdir(parents=True)
+            self.assertFalse(handlib.checks.unity_batch_checks(project, editor=Path("Unity.exe"), blender_exe=False)[0].ok)  # not a project
+            (project / "ProjectSettings").mkdir()
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 6000.3.25f1\n", encoding="utf-8")
+            ran = []
+
+            def run(cmd, env=None, **kwargs):
+                ran.append(cmd)
+                if cmd[0] == "blender.exe":
+                    if "export_fbx" in cmd[-1]:
+                        return Done('Blender 5.2\nFIXTURES ["C:/x/a.claudehand.json", "C:/x/b.claudehand.json"]\nBlender quit\n')
+                    return Done('TOOK {"added": ["Rock"], "file": "C:/x/out.fbx"}\n')
+                self.assertEqual((env["CLAUDE_HAND_SELFTEST_MODEL_A"], env["CLAUDE_HAND_SELFTEST_MODEL_B"]),
+                                 ("C:/x/a.claudehand.json", "C:/x/b.claudehand.json"))
+                self.assertTrue(Path(env["CLAUDE_HAND_EXCHANGE_DIR"]).is_dir())  # its own exchange folder, not the user's
+                Path(env["CLAUDE_HAND_SELFTEST_OUT"]).write_text(json.dumps({"ok": False, "exported_manifest": "C:/x/out.claudehand.json", "checks": [
+                    {"name": "new model: imported and placed", "ok": True, "detail": "{...}"},
+                    {"name": "same source again: replaced in place", "ok": False, "detail": "a second model appeared"}]}), encoding="utf-8")
+                return Done(code=1)
+            checks = handlib.checks.unity_batch_checks(project, run=run, editor=Path("Unity.exe"), blender_exe="blender.exe")
+            by_item = {c.item: c for c in checks}
+            self.assertEqual([cmd[0] for cmd in ran], ["blender.exe", "Unity.exe", "blender.exe"])
+            self.assertEqual(ran[1][1:5], ["-batchmode", "-projectPath", str(project), "-executeMethod"])
+            self.assertTrue(by_item["Blender가 보낸 모델(FBX)로 시험"].ok)
+            self.assertTrue(by_item["new model: imported and placed"].ok)
+            self.assertEqual((by_item["same source again: replaced in place"].ok, by_item["same source again: replaced in place"].detail),
+                             (False, "a second model appeared"))
+            self.assertTrue(by_item["Unity가 보낸 모델을 Blender가 받음 (import_model)"].ok)
+            self.assertTrue(all(c.area == "Unity 안 테스트 (MyGame)" for c in checks))
+
+            def broken(cmd, env=None, **kwargs):  # the package does not compile: no result file, the reason is in the log
+                Path(cmd[cmd.index("-logFile") + 1]).write_text("Assets/x.cs(3,5): error CS0136: A local variable named 'uses'...\n", encoding="utf-8")
+                return Done(code=1)
+            failed = handlib.checks.unity_batch_checks(project, run=broken, editor=Path("Unity.exe"), blender_exe=False)
+            self.assertEqual([c.ok for c in failed], [False])
+            self.assertIn("CS0136", failed[0].detail)
+
+            (project / "Temp").mkdir()
+            (project / "Temp" / "UnityLockfile").write_text("", encoding="utf-8")  # open in Unity: cannot be opened a second time
+            skipped = handlib.checks.unity_batch_checks(project, run=run, editor=Path("Unity.exe"), blender_exe="blender.exe")
+            self.assertEqual([c.ok for c in skipped], [None])
+            ran.clear()
+            handlib.checks.selftest_checks([], run_tests=False, registry=[], blenders=[], supervisor_on=False, stale=[], hooks=[],
+                                           unity_projects=[project], unity_batch=lambda p, progress=None: ran.append(p) or [])
+            self.assertEqual(ran, [project])
 
     def test_the_guard_refuses_the_selftest_probe_for_both_apps(self):
         import guard

@@ -432,7 +432,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 def cmd_selftest(args: argparse.Namespace) -> int:
     started = time.time()
     progress = None if args.json else (lambda message: print("  " + message, file=sys.stderr, flush=True))
-    results = checks.selftest_checks(discovery.parse_ports(args.blender_ports), run_tests=not args.no_tests, progress=progress)
+    results = checks.selftest_checks(discovery.parse_ports(args.blender_ports), run_tests=not args.no_tests, progress=progress,
+                                     unity_projects=[Path(p).expanduser().resolve() for p in args.unity_project])
     if args.json:
         print(json.dumps([asdict(c) for c in results], ensure_ascii=False, indent=2))
     else:
@@ -602,6 +603,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_st = sub.add_parser("selftest", help="run the tests and check that the open Unity/Blender windows and the chat answer "
                                            "with this version (changes nothing)")
     p_st.add_argument("--no-tests", action="store_true", help="skip the Python and in-Blender test suites")
+    p_st.add_argument("--unity-project", action="append", default=[], metavar="PATH",
+                      help="also open this (closed) Unity project without a window and run Claude Hand Tools' self-test in it: "
+                           "a model comes in, is replaced in place, and goes back out. Takes a minute or two; the test "
+                           "deletes what it made")
     p_st.add_argument("--blender-ports", default=constants.DEFAULT_BLENDER_PORTS)
     p_st.add_argument("--json", action="store_true", help="machine-readable output")
     p_st.set_defaults(func=cmd_selftest)

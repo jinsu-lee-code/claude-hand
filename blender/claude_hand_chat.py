@@ -617,8 +617,9 @@ def exchange_dir():
 
 
 def _transfer_id(name):
-    name = re.sub(r"[^A-Za-z0-9_-]+", "_", str(name)).strip("_") or "transfer"
-    return name[:48] + "_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    """(the name made safe for files and asset paths, that name with the time: one id per transfer)"""
+    name = (re.sub(r"[^A-Za-z0-9_-]+", "_", str(name)).strip("_") or "transfer")[:48]
+    return name, name + "_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
 def _with_children(roots):
@@ -638,11 +639,13 @@ def _with_children(roots):
     return list(roots), found
 
 
-def _write_manifest(transfer_id, data):
+def _write_manifest(name, transfer_id, data):
+    """`source` and `roots` are what the receiving side knows a transfer by: the same ones again are a newer version of
+    the same thing (Unity's ch_import_model then replaces its model in place), whatever `name` says this time."""
     path = os.path.join(exchange_dir(), transfer_id + ".claudehand.json")
     with open(path, "w", encoding="utf-8") as f:
-        json.dump({**data, "transfer_id": transfer_id, "source": bpy.data.filepath, "blender_version": bpy.app.version_string},
-                  f, ensure_ascii=False, indent=2)
+        json.dump({**data, "name": name, "transfer_id": transfer_id, "source": bpy.data.filepath,
+                   "blender_version": bpy.app.version_string}, f, ensure_ascii=False, indent=2)
     return path.replace("\\", "/")
 
 
@@ -650,10 +653,10 @@ def export_blend(roots, name="transfer"):
     """Write the named objects, their children and the data they use (meshes, materials) to a .blend in the exchange
     folder for another Blender. Returns {"manifest": path to hand on, "objects": names written}. Changes nothing here."""
     roots, objects = _with_children(roots)
-    transfer_id = _transfer_id(name)
+    name, transfer_id = _transfer_id(name)
     bpy.data.libraries.write(os.path.join(exchange_dir(), transfer_id + ".blend"), set(objects), path_remap="ABSOLUTE", fake_user=True)
-    manifest = _write_manifest(transfer_id, {"format": "claude-hand/blend@1", "blend_file": transfer_id + ".blend", "roots": roots,
-                                             "objects": sorted(o.name for o in objects)})
+    manifest = _write_manifest(name, transfer_id, {"format": "claude-hand/blend@1", "blend_file": transfer_id + ".blend", "roots": roots,
+                                                   "objects": sorted(o.name for o in objects)})
     return {"manifest": manifest, "objects": sorted(o.name for o in objects)}
 
 
@@ -683,9 +686,10 @@ def import_blend(manifest):
 def export_fbx(roots, name="model"):
     """Export the named objects and their children as an FBX in the exchange folder, set up for Unity (Y up, -Z
     forward, textures embedded). Returns {"manifest": path for Unity's ch_import_model, "objects": names exported}.
-    The selection is put back as it was."""
+    The selection is put back as it was. Sending the same objects of the same saved .blend again makes Unity replace
+    the model it already has in place; from a file that was never saved it cannot tell, and adds a new one."""
     roots, objects = _with_children(roots)
-    transfer_id = _transfer_id(name)
+    name, transfer_id = _transfer_id(name)
     layer = bpy.context.view_layer
     missing = [o.name for o in objects if o.name not in layer.objects]
     if missing:
@@ -704,9 +708,40 @@ def export_fbx(roots, name="model"):
         for obj in layer.objects:
             obj.select_set(obj.name in selected)
         layer.objects.active = active
-    manifest = _write_manifest(transfer_id, {"format": "claude-hand/model@1", "model_file": transfer_id + ".fbx", "roots": roots,
-                                             "objects": sorted(o.name for o in objects)})
-    return {"manifest": manifest, "objects": sorted(o.name for o in objects)}
+    manifest = _write_manifest(name, transfer_id, {"format": "claude-hand/model@1", "model_file": transfer_id + ".fbx", "roots": roots,
+                                                   "objects": sorted(o.name for o in objects)})
+    result = {"manifest": manifest, "objects": sorted(o.name for o in objects)}
+    if not bpy.data.filepath:
+        result["note"] = "이 .blend는 저장된 적이 없어, 같은 것을 다시 보내면 Unity에 새 모델이 하나 더 생깁니다. 저장한 뒤 보내면 제자리에서 바뀝니다."
+    return result
+
+
+def import_model(manifest):
+    """Bring a model that Unity (ch_export_model) or another Blender (export_fbx) left in the exchange folder into the
+    current scene: a claude-hand/model@1 manifest, or the .fbx / .obj / .glb file itself. Returns {"added": the names
+    the new objects have here, "file": what was read}. The new objects end up selected, as after File > Import."""
+    path = str(manifest).strip().strip('"')
+    if path.lower().endswith(".claudehand.json"):
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("format") != "claude-hand/model@1":
+            raise ValueError(f"이 manifest는 '{data.get('format')}' 형식이라 모델로 받을 수 없습니다. "
+                             "다른 Blender가 export_blend로 보낸 것은 import_blend로 받으세요.")
+        path = os.path.join(os.path.dirname(path), data.get("model_file") or "")
+    if not os.path.isfile(path):
+        raise ValueError(f"모델 파일이 없습니다: {path}")
+    extension = os.path.splitext(path)[1].lower()
+    before = set(bpy.data.objects)
+    if extension == ".fbx":
+        # Blender 4.5 and later read FBX themselves (faster, and what File > Import uses); before that, the add-on.
+        (bpy.ops.wm.fbx_import if "fbx_import" in dir(bpy.ops.wm) else bpy.ops.import_scene.fbx)(filepath=path)
+    elif extension == ".obj":
+        (bpy.ops.wm.obj_import if "obj_import" in dir(bpy.ops.wm) else bpy.ops.import_scene.obj)(filepath=path)
+    elif extension in (".glb", ".gltf"):
+        bpy.ops.import_scene.gltf(filepath=path)
+    else:
+        raise ValueError(f"'{extension}' 파일은 받을 수 없습니다. FBX, OBJ, GLB만 됩니다.")
+    return {"added": sorted(o.name for o in bpy.data.objects if o not in before), "file": path.replace("\\", "/")}
 
 
 def apply_event(event, payload):

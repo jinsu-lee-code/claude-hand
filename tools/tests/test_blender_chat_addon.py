@@ -367,9 +367,43 @@ class TransferTests(unittest.TestCase):
         manifest = json.loads(Path(sent["manifest"]).read_text(encoding="utf-8"))
         self.assertEqual((manifest["format"], manifest["roots"]), ("claude-hand/model@1", ["Rock"]))
         self.assertRegex(manifest["model_file"], r"^rock_set_\d{8}_\d{6}\.fbx$")  # a name safe for files and asset paths
+        self.assertEqual(manifest["name"], "rock_set")  # what Unity names the asset: the same when it comes again
         fbx = self.exchange / manifest["model_file"]
         self.assertTrue(fbx.exists() and fbx.stat().st_size > 0)
         self.assertEqual({o.name for o in bpy.context.view_layer.objects if o.select_get()}, {"Bystander"})
+
+    def test_a_resend_is_known_by_the_saved_file_and_the_objects(self):
+        """Unity replaces its model in place when `source` and `roots` come again; a file never saved has no source."""
+        unsaved = self.addon.export_fbx(["Rock"], "rock")
+        self.assertEqual(json.loads(Path(unsaved["manifest"]).read_text(encoding="utf-8"))["source"], "")
+        self.assertIn("저장", unsaved["note"])
+        blend = Path(self.tmp.name) / "rocks.blend"
+        bpy.ops.wm.save_as_mainfile(filepath=str(blend))
+        sent = [self.addon.export_fbx(["Rock"], name) for name in ("rock", "rock_fixed")]
+        self.assertNotIn("note", sent[0])
+        first, second = (json.loads(Path(s["manifest"]).read_text(encoding="utf-8")) for s in sent)
+        self.assertEqual(Path(first["source"]), blend)
+        self.assertEqual((first["source"], first["roots"]), (second["source"], second["roots"]))
+        self.assertNotEqual(first["transfer_id"], second["transfer_id"])
+
+    def test_model_from_unity_comes_in(self):
+        """import_model reads a claude-hand/model@1 manifest, whoever wrote it: here, this add-on's own export_fbx."""
+        sent = self.addon.export_fbx(["Rock"], "rock")
+        bpy.ops.wm.read_factory_settings(use_empty=True)  # "another Blender": an empty scene
+        got = self.addon.import_model(sent["manifest"])
+        self.assertEqual(got["added"], ["Pebble", "Rock"])
+        self.assertEqual(bpy.data.objects["Pebble"].parent.name, "Rock")
+        self.assertTrue(got["file"].endswith(".fbx") and "\\" not in got["file"])
+        again = self.addon.import_model(f'"{got["file"]}"')  # the model file itself works too; names taken get .001
+        self.assertEqual(again["added"], ["Pebble.001", "Rock.001"])
+
+    def test_import_model_refuses_what_is_not_a_model(self):
+        sent = self.addon.export_blend(["Rock"], "rock")
+        with self.assertRaises(ValueError) as wrong:
+            self.addon.import_model(sent["manifest"])
+        self.assertIn("import_blend", str(wrong.exception))
+        with self.assertRaises(ValueError):
+            self.addon.import_model(str(self.exchange / "nothing_here.fbx"))
 
     def test_a_wrong_name_or_manifest_says_so_and_writes_nothing(self):
         with self.assertRaises(ValueError) as wrong:

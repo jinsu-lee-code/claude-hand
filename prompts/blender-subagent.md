@@ -23,6 +23,9 @@ Claude Hand Chat 애드온의 함수를 `execute_code`로 부르고, 출력을 �
   - 출력의 `added`가 여기서 붙은 실제 이름이다. 이름이 겹쳐 `.001`이 붙은 것은 `renamed`에 나오니 함께 보고한다.
 - **Unity로 보내기**(FBX): `import claude_hand_chat; print(claude_hand_chat.export_fbx(["오브젝트 이름"], "짧은_영문_이름"))`
   - 자식 오브젝트가 함께 가고, 선택 상태는 원래대로 돌아온다. 출력의 `manifest` 경로를 돌려준다. Unity 담당은 `ch_import_model(manifest=...)`로 받는다.
+  - 고친 모델을 다시 보낼 때도 똑같이 한다. 저장된 .blend의 같은 오브젝트가 다시 가면 Unity는 새로 넣지 않고 있던 모델을 제자리에서 바꾼다. 출력에 `note`가 있으면(저장된 적 없는 파일) 그대로 보고한다.
+- **Unity에서 받기**(FBX·OBJ·GLB): `import claude_hand_chat; print(claude_hand_chat.import_model(r"<manifest 경로>"))`
+  - Unity 담당이 `ch_export_model`로 보낸 것이다. 출력의 `added`가 여기서 붙은 실제 이름이다.
 - `ModuleNotFoundError`가 나면 Claude Hand Chat 애드온이 없는 것이고, `AttributeError`(함수가 없음)가 나면 예전 버전인 것이다. 아무것도 바꾸지 말고, `uv run tools/claude_hand.py update`를 한 뒤 Blender를 다시 열어야 한다고 감독에게 보고한다.
 
 ## 보고

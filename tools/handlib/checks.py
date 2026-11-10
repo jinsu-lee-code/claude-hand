@@ -288,9 +288,118 @@ def hook_checks(agents_dir: Path, run=subprocess.run, shell=None) -> list[Check]
     return checks
 
 
+# Run inside Blender, with no window: one object of a saved .blend, exported for Unity twice by the add-on as it is in
+# this checkout. The second export has more geometry and another transfer name: Unity must still know it is the same
+# source and replace its model in place.
+MODEL_FIXTURES_EXPR = """import bpy, importlib.util, json, os
+spec = importlib.util.spec_from_file_location("claude_hand_chat", {addon!r})
+addon = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(addon)
+bpy.ops.wm.read_factory_settings(use_empty=True)
+def mesh_of(quads):
+    mesh = bpy.data.meshes.new("ChSelfTestMesh")
+    verts = [v for q in range(quads) for v in ((q * 2, 0, 0), (q * 2 + 1, 0, 0), (q * 2 + 1, 1, 0), (q * 2, 1, 0))]
+    mesh.from_pydata(verts, [], [tuple(range(q * 4, q * 4 + 4)) for q in range(quads)])
+    mesh.materials.append(bpy.data.materials.get("ChSelfTestMat") or bpy.data.materials.new("ChSelfTestMat"))
+    return mesh
+obj = bpy.data.objects.new("ChSelfTest", mesh_of(1))
+bpy.context.scene.collection.objects.link(obj)
+bpy.ops.wm.save_as_mainfile(filepath=os.path.join({folder!r}, "ch_selftest.blend"))
+first = addon.export_fbx(["ChSelfTest"], "ch_selftest")
+obj.data = mesh_of(2)
+second = addon.export_fbx(["ChSelfTest"], "ch_selftest_again")
+print("FIXTURES " + json.dumps([first["manifest"], second["manifest"]]))
+"""
+
+
+# Run inside Blender: take what Unity's ch_export_model wrote.
+MODEL_TAKE_EXPR = """import bpy, importlib.util, json
+spec = importlib.util.spec_from_file_location("claude_hand_chat", {addon!r})
+addon = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(addon)
+bpy.ops.wm.read_factory_settings(use_empty=True)
+print("TOOK " + json.dumps(addon.import_model({manifest!r})))
+"""
+
+
+def marked_json(output: str, mark: str):
+    """What a script printed after `mark` on a line of its own (Blender prints much else), or None."""
+    found = re.search(rf"^{mark} (.+)$", output or "", re.M)
+    try:
+        return json.loads(found.group(1)) if found else None
+    except ValueError:
+        return None
+
+
+def unity_batch_checks(project: Path, run=subprocess.run, editor=None, blender_exe=None, progress=None) -> list[Check]:
+    """Open a closed Unity project without a window and run Claude Hand Tools' own self-test in it (ChSelfTest.cs): a
+    model comes in, comes in again and is replaced in place, takes the project's materials, and goes back out. With
+    Blender installed the model is one its add-on really exported, and what Unity sends back is read by Blender again.
+    The test works in a scene it never saves and deletes the assets it made."""
+    area, checks = f"Unity 안 테스트 ({project.name})", []
+    progress = progress or (lambda message: None)
+    add = lambda item, ok, detail="", fix="": checks.append(Check(area, item, ok, detail, fix))
+    if not install.is_unity_project(project):
+        add("프로젝트", False, f"{project}: Unity 프로젝트가 아님", "경로를 확인하세요")
+        return checks
+    if (project / "Temp" / "UnityLockfile").exists():
+        add("프로젝트", None, "Unity로 열려 있어 건너뜀 (창 없이 한 번 더 열 수 없음). 닫고 다시 돌리면 확인")
+        return checks
+    version = install.read_project_version(project)
+    editor = editor or (install.find_unity_editor(version) if version else None)
+    if editor is None:
+        add("프로젝트", None, f"Unity {version or '?'} 에디터를 Unity Hub 기본 위치에서 못 찾아 건너뜀")
+        return checks
+    if blender_exe is None:
+        blender_exe = next(iter(install.find_blender_executables()), None)
+
+    with tempfile.TemporaryDirectory(prefix="claude-hand-selftest-") as tmp:
+        exchange, out, log = Path(tmp) / "exchange", Path(tmp) / "result.json", Path(tmp) / "unity.log"
+        exchange.mkdir()
+        env = {**os.environ, "CLAUDE_HAND_EXCHANGE_DIR": str(exchange), "CLAUDE_HAND_SELFTEST_OUT": str(out)}
+        in_blender = lambda expr: run([str(blender_exe), "--background", "--factory-startup", "--python-expr", expr], env=env,
+                                      capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+        if blender_exe:
+            progress("Blender에서 시험용 모델 내보내는 중...")
+            proc = in_blender(MODEL_FIXTURES_EXPR.format(addon=str(constants.CHAT_ADDON_SOURCE), folder=tmp))
+            fixtures = marked_json(proc.stdout, "FIXTURES")
+            if fixtures:
+                env.update(CLAUDE_HAND_SELFTEST_MODEL_A=fixtures[0], CLAUDE_HAND_SELFTEST_MODEL_B=fixtures[1])
+            add("Blender가 보낸 모델(FBX)로 시험", bool(fixtures) or None,
+                "export_fbx로 같은 오브젝트를 두 번 내보냄" if fixtures else "내보내지 못해 OBJ 파일로 대신함: " +
+                ((proc.stderr or proc.stdout).strip().splitlines() or ["출력 없음"])[-1][:200])
+        progress(f"Unity {version}를 창 없이 열어 시험하는 중 (1~2분)...")
+        try:
+            proc = run([str(editor), "-batchmode", "-projectPath", str(project), "-executeMethod", "ClaudeHand.Editor.ChSelfTest.Run",
+                        "-logFile", str(log)], env=env, capture_output=True, text=True, errors="replace", timeout=900)
+        except subprocess.TimeoutExpired:
+            add("Unity 실행", False, "15분 안에 끝나지 않음", "Unity가 대화상자를 띄웠는지 작업 관리자에서 확인하세요")
+            return checks
+        try:
+            result = json.loads(out.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            text = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
+            errors = re.findall(r"^.*error CS\d+.*$", text, re.M)
+            add("Unity 실행", False, (errors[0][:300] if errors else f"결과 파일이 없음 (종료 코드 {proc.returncode}): " +
+                                    (text.strip().splitlines() or ["로그 없음"])[-1][:200]),
+                "Unity로 프로젝트를 열어 Console의 컴파일 오류를 보세요" if errors else "프로젝트에 Claude Hand Tools가 들어 있는지 보세요 (unity-install)")
+            return checks
+        for check in result.get("checks", []):
+            add(str(check.get("name")), bool(check.get("ok")), "" if check.get("ok") else str(check.get("detail", ""))[:400])
+        sent = result.get("exported_manifest")
+        if blender_exe and sent:
+            progress("Unity가 보낸 모델을 Blender에서 받는 중...")
+            proc = in_blender(MODEL_TAKE_EXPR.format(addon=str(constants.CHAT_ADDON_SOURCE), manifest=sent))
+            took = marked_json(proc.stdout, "TOOK")
+            add("Unity가 보낸 모델을 Blender가 받음 (import_model)", bool(took and took.get("added")),
+                ", ".join(took["added"]) if took and took.get("added") else
+                ((proc.stderr or proc.stdout).strip().splitlines() or ["출력 없음"])[-1][:200])
+    return checks
+
+
 def selftest_checks(blender_ports: list[int], run_tests: bool = True, run=subprocess.run, progress=None,
                     registry=None, unity_request=None, blender=None, blenders=None, chat_lines=None,
-                    supervisor_on=None, stale=None, hooks=None) -> list[Check]:
+                    supervisor_on=None, stale=None, hooks=None, unity_projects=(), unity_batch=None) -> list[Check]:
     checks: list[Check] = []
     progress = progress or (lambda message: None)
     add = lambda *a: checks.append(Check(*a))
@@ -312,6 +421,9 @@ def selftest_checks(blender_ports: list[int], run_tests: bool = True, run=subpro
                 "" if ok else "selftest 출력의 실패한 테스트 이름으로 tools/tests/test_blender_chat_addon.py를 보세요")
         else:
             add("테스트", "Blender 안 애드온 테스트", None, "Blender 실행 파일을 못 찾아 건너뜀")
+
+    for project in unity_projects:
+        checks += (unity_batch or unity_batch_checks)(Path(project), progress=progress)
 
     progress("Unity 확인 중...")
     import unity_bridge

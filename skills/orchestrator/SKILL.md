@@ -1,6 +1,6 @@
 ---
 name: claude-hand
-description: Unity 프로젝트나 Blender 창 여러 개를 동시에 다룰 때 쓰는 감독 규칙. 사용자가 둘 이상의 Unity 프로젝트나 Blender 파일을 언급하거나, 오브젝트·프리팹·모델을 한 곳에서 다른 곳(Unity↔Unity, Blender↔Blender, Blender→Unity)으로 옮기라고 하거나, unity-*/blender-* 하위 세션에게 일을 나눠 맡겨야 할 때, 또는 "Claude Hand 켜줘", "Claude Hand 시작해줘"라고 할 때 사용한다.
+description: Unity 프로젝트나 Blender 창 여러 개를 동시에 다룰 때 쓰는 감독 규칙. 사용자가 둘 이상의 Unity 프로젝트나 Blender 파일을 언급하거나, 오브젝트·프리팹·모델을 한 곳에서 다른 곳(Unity↔Unity, Blender↔Blender, Blender↔Unity)으로 옮기라고 하거나, unity-*/blender-* 하위 세션에게 일을 나눠 맡겨야 할 때, 또는 "Claude Hand 켜줘", "Claude Hand 시작해줘"라고 할 때 사용한다.
 ---
 
 # Unity·Blender 여러 개 감독하기 (claude-hand)
@@ -58,7 +58,15 @@ uv run "{{CLAUDE_HAND}}/tools/claude_hand.py" start
 1. `blender-a`에게: "<오브젝트>를 'Unity로 보내기' 방법으로 FBX로 내보내고 manifest 경로를 돌려줘."
 2. `unity-b`에게: "`ch_import_model(manifest=<manifest 경로>)`로 가져와서 씬에 배치하고 `placed`와 `warnings`를 돌려줘." 특정 부모 아래에 둘 거면 먼저 스냅샷으로 부모 ref를 찾게 한다.
 3. 같은 모델을 Unity 프로젝트 여러 개에 넣을 때는 1번을 한 번만 하고, 2번만 프로젝트마다 맡긴다. 이건 동시에 해도 된다.
-4. 재질이 다르게 보이면 FBX 머티리얼의 한계라고 알리고, Unity에서 머티리얼을 손볼지 사용자에게 묻는다.
+4. **고친 모델을 다시 보낼 때도 1~2번을 그대로 한다.** 저장된 같은 .blend의 같은 오브젝트가 다시 오면 Unity는 새로 넣지 않고, 프로젝트에 있던 모델 파일을 제자리에서 바꾼다(결과의 `updated`가 true). 씬과 프리팹에 놓인 것이 그 자리에서 새 모양이 된다. 사용자에게 "새로 넣지 않고 있던 모델을 바꿨고, 씬의 N개가 새 모양이 됐다"고 알린다. 이 파일 교체는 채팅창의 [되돌리기]로 돌아가지 않으니, 바꾸기 전 파일이 `previous_file`에 남아 있다는 것도 알린다. 사용자가 따로 한 벌을 원할 때만 `new_copy=true`로 받게 한다.
+5. 재질이 다르게 보이면 FBX 머티리얼의 한계라고 알린다. 프로젝트에 같은 이름의 머티리얼이 있으면 `ch_import_model(..., materials="project")`로 다시 받아 그 머티리얼에 연결할 수 있다고 알리고, 그렇게 할지 묻는다. 사용자가 "이 프로젝트는 항상 그렇게"라고 하면 프로젝트 메모에 적어 둔다.
+
+## Unity → Blender
+1. `unity-a`에게: "<대상>을 `ch_export_model`로 내보내고 `manifest_path`, `via`, `warnings`를 돌려줘." 씬 오브젝트면 먼저 스냅샷으로 ref를 찾게 하고, 모델 에셋 그대로면 `asset_path`를 쓰게 한다.
+2. 결과의 `via`가 `source_file`이면 그 오브젝트의 원본 모델 파일이 가져올 때 모습 그대로 간 것이다. `warnings`에 "씬에서 바꾼 것은 가지 않는다"가 있으면 사용자에게 알린다.
+3. "FBX Exporter가 필요하다"는 오류면 그 오브젝트는 Unity에서 만든 메시라는 뜻이다. Package Manager에서 FBX Exporter(`com.unity.formats.fbx`)를 설치할지 사용자에게 묻는다. 혼자 설치하지 않는다.
+4. `blender-b`에게: "<manifest 경로>를 'Unity에서 받기' 방법으로 가져오고, 추가된 오브젝트 이름을 돌려줘."
+5. 무엇이 어떤 이름으로 들어왔는지 보고한다. .blend 파일은 사용자가 원할 때만 저장하게 한다.
 
 ## 하위 세션이 막혔을 때
 - `STALE_REF`: 스냅샷을 다시 찍게 한다.
