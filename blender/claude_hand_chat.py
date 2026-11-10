@@ -1,8 +1,11 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 jinsu-lee-code. This file is installed on its own, so it says so itself; the full text is in
+# LICENSE at the root of https://github.com/jinsu-lee-code/claude-hand
 """Claude Hand Chat: talk to this Blender window's claude-hand subagent from the 3D Viewport sidebar.
 
 It is also what that subagent calls, through MCP for Blender's execute_code, for the things claude-hand does in
-Blender: undo points (mark_undo_point, undo_last_request) and moving objects to another Blender or to Unity
-(export_blend, import_blend, export_fbx).
+Blender: undo points (mark_undo_point, undo_last_request) and moving objects to another Blender or to and from Unity
+(export_blend, import_blend, export_fbx, import_model).
 
 Messages go to the claude-hand-chat channel (tools/chat_channel.py in the claude-hand repo), which
 the supervisor Claude Code session runs; the supervisor hands them to blender-<file> and answers here.

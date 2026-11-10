@@ -313,3 +313,7 @@ python -m unittest discover -s tools/tests -v     # Python 3.10 이상, 따로 �
 GitHub에 올리면 같은 테스트가 Windows와 Linux, Python 3.10과 3.13에서 돕니다(`.github/workflows/tests.yml`). 버전은 저장소 루트의 `VERSION` 한 곳에서 정하고, Unity 패키지와 Blender 애드온에 적힌 번호가 같은지 테스트가 확인합니다.
 `tools/tests/test_blender_chat_addon.py`는 Blender 애드온(채팅, 되돌리기, 중지, .blend 보내기·받기, FBX 내보내기, 모델 받기)을 실제 Blender 안에서 실행합니다. 위 명령으로는 건너뛰고(Python에 `bpy`가 없으므로), `uv run tools/claude_hand.py selftest`가 설치된 Blender를 화면 없이 띄워 돌립니다.
 Unity 쪽은 패키지 안의 `ChSelfTest.cs`가 모델 도구를 실제 Unity에서 돌립니다. `selftest --unity-project <닫힌 프로젝트>`가 Unity를 창 없이 열어 실행합니다. 테스트는 진짜 이벤트 기록을 건드리지 않게 `CLAUDE_HAND_LOG=off`로 돕니다.
+
+## 라이선스
+
+[MIT](LICENSE)입니다. 함께 쓰는 MCP for Unity, MCP for Blender, agent-desktop은 이 저장소에 들어 있지 않고 각자의 라이선스를 따릅니다.
