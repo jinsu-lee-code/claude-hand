@@ -62,7 +62,9 @@ def resolved_runner(runner: str, which=shutil.which) -> str:
     head, sep, rest = runner.partition(" ")
     found = which(head) if head and not re.search(r"[/\\]", head) else None
     if found and " " not in found:
-        head = Path(found).as_posix()
+        # Forward slashes for a Windows path (Git Bash reads a backslash as an escape). Not Path(found).as_posix():
+        # that only turns backslashes where this process runs on Windows, and the result must not depend on that.
+        head = found.replace("\\", "/") if re.match(r"[A-Za-z]:[\\/]", found) else found
     return head + sep + rest
 
 

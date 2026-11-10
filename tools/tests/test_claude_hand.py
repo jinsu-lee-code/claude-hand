@@ -913,6 +913,17 @@ class SelftestTests(unittest.TestCase):
                                            unity_projects=[project], unity_batch=lambda p, progress=None: ran.append(p) or [])
             self.assertEqual(ran, [project])
 
+    def test_ci_reports_a_failure_as_an_annotation(self):
+        """tools/tests/ci.py (what GitHub Actions runs): a job's log needs a sign-in, an annotation does not."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import ci
+        line = ci.annotation(self, "Traceback (most recent call last):\n  File x\nAssertionError: 50% != 'C:\\x'\n")
+        self.assertEqual(line, f"::error title={self.id()}::Traceback (most recent call last):%0A  File x%0AAssertionError: 50%25 != 'C:\\x'")
+        self.assertEqual(len(line.splitlines()), 1)  # one workflow command
+        self.assertLessEqual(len(ci.annotation(self, "x" * 9000)), ci.TRACE_CHARS + 200)
+        workflow = (handlib.constants.REPO_ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+        self.assertIn("python tools/tests/ci.py", workflow)
+
     def test_the_guard_refuses_the_selftest_probe_for_both_apps(self):
         import guard
         self.assertIsNotNone(guard.guard_decision(handlib.checks.HOOK_PROBE, "MyGame@aaaa1111", "unity_mygame", "stdio", "unity"))
