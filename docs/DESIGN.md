@@ -28,7 +28,7 @@ MCP for Unity는 테스트를 실행할 때 Unity 창을 잠깐 앞으로 끌어
 ## 구조
 
 ```
-사용자 ⇄ 감독 세션 (Claude Code 메인 대화, 스킬: claude-hand-unity)
+사용자 ⇄ 감독 세션 (Claude Code 메인 대화, 스킬: claude-hand)
             │ Agent 도구로 위임 (병렬 가능)
             ├── unity-a (서브에이전트) ─ 인라인 stdio MCP 서버 (--default-instance A@hash) ─┐
             │                            └ unity_a_ch: unity_bridge.py --hash <A> ─────┼──┐
@@ -193,7 +193,7 @@ Blender N 패널 애드온 (urllib)  ─┼──▶ chat_channel.py ──stdio
 - **창 쪽 구현**
   - Unity: IMGUI EditorWindow다. 긴 폴링(최대 20초)으로 답을 받는다. 도메인 리로드 뒤에는 서버 기록으로 대화를 다시 채우고, 감독 세션이 바뀌면(pid) 기록을 비운다.
   - Blender: 통신은 백그라운드 스레드에서 하고, bpy는 메인 스레드 타이머에서만 만진다. 입력칸에서 Enter를 치면 보낸다.
-- **검증:** 채널 서버는 실제 프로세스로 띄워 MCP 핸드셰이크, 메시지 전달, `reply`, 권한 중계를 끝까지 테스트했다. Blender 애드온은 실제 Blender 5.0.1에서 채널 서버와 주고받기, 권한 버튼, 화면 없는 활성화까지 테스트했다. Unity 창은 스텁 컴파일만 했다.
+- **검증:** 채널 서버는 실제 프로세스로 띄워 MCP 핸드셰이크, 메시지 전달, `reply`, 권한 중계를 끝까지 테스트했다. Blender 애드온은 실제 Blender 5.0.1에서 채널 서버와 주고받기, 권한 버튼, 화면 없는 활성화까지 테스트했다. 그 뒤 Windows의 실제 Unity 6.3과 Blender 5.2에서 사용자가 화면으로 확인했다(TEST-RESULTS-12·13-WINDOWS). `selftest`가 Blender 안 테스트와 열린 창의 응답을 한 번에 돌린다.
 
 ## 쉬운 시작: 터미널을 몰라도 쓰기
 
@@ -235,12 +235,34 @@ TEST-PLAN 12(Windows)에서 Remote Control과 Channels를 한 세션에 같이 �
 
 - **모드 없음.** `config.json`의 예전 `"mode"` 값은 무시하고 지운다(`write_user_config`). `mode` 명령은 그 사실만 알린다. `doctor`의 채팅 항목은 늘 필요한 항목이다.
 - **Remote Control 기본 켜짐.** `config.json`에 `remote_control: false`가 없으면 켠다. 환경변수로 안 되는 조건(API 키, 다른 서버를 가리키는 `ANTHROPIC_BASE_URL`, Bedrock·Vertex·Foundry)을 찾으면 `preflight`가 `.launch-args`에서 플래그를 빼고 이유를 창에 쓴다. 데스크톱 앱이 자기 세션에 넣는 `ANTHROPIC_BASE_URL=https://api.anthropic.com`은 문제로 보지 않는다(Windows 결과 과제 5). 구독이 아닌 claude.ai 로그인처럼 환경변수로 알 수 없는 경우는 Claude Code가 알린다.
-- **창은 보이게 열고, 쓰기 시작하면 최소화.** 개발용 채널 경고는 Claude Code의 보안 확인이라 대신 답하지 않는다. 그래서 바로가기와 채팅창 버튼은 창을 보이게 연다. 채널 서버가 Claude의 첫 도구 호출이나 첫 허락 요청을 받으면(그때는 시작 질문을 지나온 것이 확실하다) Windows에서 그 창을 최소화한다. 방법: 창 없는 Python을 따로 띄워 `FreeConsole` → `AttachConsole(<claude pid>)` → `GetConsoleWindow` → `ShowWindow(SW_MINIMIZE)`. 채널 서버 자신은 콘솔을 바꾸지 않는다. `minimize off`(config `minimize_after_start`)로 끈다.
+- **창은 보이게 열고, 쓰기 시작하면 최소화.** 개발용 채널 경고는 Claude Code의 보안 확인이라 대신 답하지 않는다. 그래서 바로가기와 채팅창 버튼은 창을 보이게 연다. 채널 서버가 Claude의 첫 도구 호출이나 첫 허락 요청을 받으면(그때는 시작 질문을 지나온 것이 확실하다) Windows에서 그 창을 최소화한다. 방법: 프로세스 표에서 Claude Code와 그 위 두 단계(콘솔을 가진 cmd)를 찾고, `EnumWindows`로 그 프로세스들의 **보이는** 콘솔 창(`ConsoleWindowClass`)을 골라 `ShowWindowAsync(SW_MINIMIZE)`한다. 처음 방식(창 없는 Python에서 `AttachConsole` → `GetConsoleWindow`)은 Claude Code 아래에서 15초 시간 초과로 멈췄다. 보이지 않는 콘솔까지 잡으면 숨어 있던 Unity·릴레이 콘솔이 튀어나와서 보이는 것만 고른다. Windows Terminal 탭이면 찾지 못하고 그대로 둔다. `minimize off`(config `minimize_after_start`)로 끈다.
 - **처음 메시지로 켜기.** 채팅창은 Claude Hand가 꺼져 있거나(`server.json` 없음) 응답이 없으면 메시지를 맡아 두고 시작 스크립트를 연다. 그동안 "Claude Hand 창에서 확인을 눌러 주세요"를 보여 준다. 서버가 응답하면 맡아 둔 메시지를 보낸다. Unity는 `[SerializeField]`로 스크립트 리로드에도 남긴다. 채널 서버는 Claude Code가 `notifications/initialized`를 보내기 전에 온 메시지를 모아 두었다가 그때 보낸다(`backlog`).
 - **현재 상황 공유(`current_context`).** Unity는 `ChContextReporter`(InitializeOnLoad)가 `Selection.selectionChanged`, `EditorApplication.focusChanged`, `activeSceneChangedInEditMode`에 반응해, Blender는 애드온 타이머가 바뀐 것을 비교해, 활성 씬·파일, 선택한 오브젝트·에셋(각 20개까지), 포커스를 `/v1/context`로 보낸다. 0.5초에 한 번까지, 바뀌었을 때만, 1분마다 한 번 새로 보낸다. Claude Hand가 꺼져 있으면 아무것도 보내지 않는다. 채널 서버는 창마다 마지막 상태와 마지막으로 쓴 시각을 들고, 감독의 `current_context` 도구가 최근 순(포커스 먼저)으로 돌려준다.
 - **데스크톱 앱에서 시킨 일도 채팅창에.** `reply`에 `origin: "desktop"`, `request`(무엇을 시켰는지 한 줄)를 더했다. 채널 서버는 패널이 한 번도 말하지 않은 창이라도 그 창의 하위 세션 이름이면 받아 기록한다. 채팅창은 "데스크톱 앱에서" 아래에 요청과 결과를 보여 준다. 감독 지침(채널 instructions, 감독 스킬)에 "채널 태그 없는 요청이 창을 바꿨으면 그 창에 이렇게 남긴다"를 넣었다.
 - **데스크톱 앱에서 켜기.** 데스크톱 앱에는 cmd를 여는 방법이 문서에 없다. 그래서 아무 Code 탭 세션에서 "Claude Hand 켜줘"라고 하면 감독 스킬이 `claude_hand.py start`를 실행한다. 이 명령은 이미 켜져 있거나 자기가 Claude Hand(`CLAUDE_HAND_SUPERVISOR=1`)면 아무것도 열지 않고, 아니면 새 창을 연 뒤 확인 질문과 세션 목록의 "Claude Hand"로 옮겨 가라고 안내한다.
 - Code 탭에서 새로 연 다른 세션은 Claude Hand가 아니다. 채널 서버는 대기 모드로 뜨고(채널 옵션이 없음), 감독 스킬은 작업을 "Claude Hand" 세션에서 하라고 한 번 권한다. 그래도 여기서 하길 원하면 하위 세션으로 일은 되지만 채팅창 기록과 `current_context`는 없다.
+
+## 매일 쓰기: 이어 쓰기, 되돌리기, 알림 (TEST-PLAN 14~21)
+
+Windows에서 며칠 써 보며 더한 것들이다. 공통 원칙은 **토큰이 드는 길을 피하는 것**이다. 감독이 도구를 한 번 더 부르게 하지 않고, 패널·채널 서버·guard 훅·Unity 패키지가 직접 한다. 그래서 감독이 단계를 세어 채우던 진행 막대(`progress` 도구)는 만들었다가 뺐다(실제로도 감독이 잘 부르지 않았다).
+
+- **대화 이어 쓰기.** 작업은 며칠씩 이어지는데, 켤 때마다 새 세션이면 감독이 앞일을 모르고 데스크톱 앱에도 세션이 쌓인다. `preflight`가 `config.json`의 `supervisor_session`을 `claude --resume`으로 연다. 처음 한 번은 이 폴더에서 가장 최근의 "Claude Hand" 대화(대화 파일의 `customTitle`)를 이어받고, 없으면 `--session-id`로 새 ID를 정한다. 긴 대화는 Claude Code가 알아서 압축한다. `new-session`은 다음 시작을 새 대화로 한다. 다시 켜면 예전 하위 세션은 없을 수 있어서, 채널 지침에 "`SendMessage`가 실패하면 새로 맡긴다"를 넣었다.
+- **채팅 기록.** 채널 서버가 창마다 최근 100개(나·Claude·그림)를 `~/.claude-hand/chat/history/<chat_id>.json`에 두고 시작할 때 다시 보여 준다. 허락 요청과 안내는 남기지 않는다. 대화의 본체는 Claude Code에 있으니 패널은 맥락을 짐작할 만큼만 든다. Unity는 100개(한 번에 40개, 메시지 1500자), Blender는 60개(40줄, 메시지 14줄)를 보여 주고 나머지는 "전체 복사"로 꺼낸다. 오래 쓴 패널이 느려지거나 입력칸이 밀려나지 않게 하려는 것이다. Blender는 사이드바 너비를 `blf`로 재서 줄을 바꾼다.
+- **세션 변수 정리.** 데스크톱 앱의 Code 탭에서 "Claude Hand 켜줘"로 켜면 그 세션의 환경변수(`CLAUDECODE`, `CLAUDE_CODE_*` 등)가 새 감독에게 넘어가, 감독이 남의 세션 소켓을 물려받았다. `preflight`가 넘겨받은 세션 변수 이름을 `.launch-unset`(git 제외)에 쓰고 시작 스크립트가 지운다. 사용자가 정한 설정(`CLAUDE_CODE_USE_*`, `CLAUDE_CODE_GIT_BASH_PATH`, `CLAUDE_CODE_OAUTH_TOKEN`, 영구 환경변수)은 남긴다.
+- **작업 중 표시.** 하위 세션의 guard 훅이 허락한 Unity·Blender 호출마다 채널 서버 `/v1/progress`로 도구와 요약을 보낸다(0.5초 안에 못 보내면 건너뜀). 패널은 입력칸 위에 "작업 중 · N초 · <동작> · N번째 동작" 한 줄을 보여 주고, 답이 오면 지운다. Claude는 이 보고를 보지 않는다. 막대 그림은 사용자 요청으로 뺐다.
+- **되돌리기.** 같은 보고에 채널 서버가 "그 요청의 첫 동작"인지 답하면, guard가 그 창에 되돌리기 지점을 찍는다.
+  - Unity: `ch_checkpoint`가 이름 붙인 Undo 그룹을 SessionState에 20개까지 둔다(Undo 기록처럼 에디터를 끄면 사라진다). 채팅창 버튼과 `action=undo`가 `Undo.RevertAllDownToGroup`으로 돌아간다. Undo에 남는 변경만 돌아가서, 하위 세션 지침에 `execute_code`의 변경을 Undo에 남기라고 적었다.
+  - Blender: Python에서 실행 취소 기록 목록을 볼 수 없어서 지점을 데이터에 남긴다. 모든 씬의 숨은 속성에 "이번 실행:번호"를 넣고 `ed.undo_push`를 한다. 되돌릴 때는 "되돌리기 전" 단계를 하나 넣고(Ctrl+Shift+Z로 살릴 수 있게), 번호가 지점보다 작아질 때까지 `ed.undo`, 그다음 `ed.redo` 한 번이면 지점을 찍은 바로 그 상태다. 한도(실행 취소 단계 수)를 넘으면 제자리로 돌려놓고 실패를 알린다. 연산자 안에서 undo하면 연산자가 쥔 데이터가 풀리므로 버튼은 타이머에서 돌린다. guard는 MCP for Blender의 `execute_code`로 채팅 애드온을 불러 지점을 찍는다.
+  - "방금 거 취소해줘"도 새 요청이라, 다른 도구를 먼저 쓰면 그 자리에 빈 지점이 찍혀 아무것도 돌아가지 않았다. guard는 되돌리기 호출 앞에서는 찍지 않고, 지침은 "다른 도구보다 먼저 되돌린다"로 했다.
+- **프로젝트·파일 메모.** 며칠 가는 규칙(이름, 폴더, 재질)은 대화 속에만 두면 압축될 때 흐려진다. `<프로젝트>/ClaudeHand/NOTES.md`(Assets 밖이라 Unity가 가져오지 않음)와 `<파일>.claude-hand.md`에 두고, 하위 세션이 시작할 때 읽고 감독이 고친다. 이 폴더 밖이라 Read·Edit가 매번 허락을 물어서, `sync`·`update`·시작 때 창마다 그 파일 하나만 미리 허용한다. Windows 경로는 `Read(//c/…)`처럼 써야 맞는다는 것을 `claude -p`로 확인했다.
+- **Blender 한글 입력창.** Blender 입력칸은 Windows 한글 입력기와 맞지 않아 조합을 끝내는 띄어쓰기·기호가 빠지고 글자가 한 박자 늦게 보인다. Python이 키를 받기 전에 생기는 일이라 애드온으로는 고칠 수 없다. 그래서 [한글] 버튼이 PowerShell WinForms 텍스트 상자를 띄운다(`-EncodedCommand`, 창 이름은 base64로 넣어 스크립트로 읽히지 않음). 메시지는 한 줄씩 base64(UTF-8)로 받아 그 창의 채팅으로 보낸다. Blender가 끝나면 1초 안에 닫힌다.
+- **결과 미리보기.** 한 창에서 시킨 일이 다른 창을 바꾸면(Blender에서 "Unity로 보내줘"), 답과 함께 그 창의 지금 모습을 붙인다. 채널 서버가 창마다 마지막으로 일한 때를 기억해 답이 올 때 판단하고, 직접 찍는다. Unity는 `ch_capture`(씬 뷰 카메라를 복사한 카메라로 RenderTexture에 그림, URP와 백그라운드에서 동작, 기즈모 없음), Blender는 `execute_code`로 `GPUOffScreen.draw_view3d`를 쓴다. `render.opengl`은 사용자의 Render Result를 덮어써서 버렸다. 그림은 최근 60장, 채팅 기록에도 남는다.
+- **끝났다는 알림.** 패널이 30초 안에 생긴 답·허락 요청·대화상자 안내를 받았는데 앱이 앞에 없으면 `FlashWindowEx`로 작업 표시줄을 그 앱이 앞에 올 때까지 깜빡인다. Unity 채팅 탭에는 안 읽은 수를 글자로 붙인다. 색이 아니라 깜빡임과 글자로 알린다. 다시 켠 뒤 다시 보이는 기록과 데스크톱 앱에서 시킨 일의 답은 알리지 않는다.
+- **대화상자 감지(Unity, Windows).** 모달 대화상자는 메인 스레드를 막아 모든 호출이 시간 초과까지 기다렸다. Unity의 `DisplayDialog`는 Windows 기본 대화상자(`#32770`, 주인은 Unity 주 창)라 밖에서 읽힌다. 제목은 창 글자, 본문은 `Edit` 컨트롤(다른 프로세스라 `WM_GETTEXT`로), 선택지는 `Button`이다. 진행 막대 창(`msctls_progress32`)은 고를 것이 없어 뺀다. pid는 Claude Hand Tools 등록 파일에서 얻는다.
+  - guard: Unity 호출 직전에 대화상자가 있으면 내용과 함께 막는다. 하위 세션은 버튼을 누르지 않고 감독에게 보고한다.
+  - Claude Hand 통로: 기다리는 동안 1.5초마다 보고, 대화상자가 뜨면 `DIALOG`(retry `check_first`: 닫히면 그때 실행될 수 있음)로 바로 끝낸다.
+  - 채널 서버: 하위 세션이 일하는 동안 2초마다 보고, 답을 기다리는 **다른** 창의 채팅에 알린다(깜빡임 포함). 무엇을 누를지는 항상 사용자가 정한다.
+- **selftest.** `doctor`가 "설치됐나"를 본다면 `selftest`는 "도나"를 본다. 테스트 두 묶음(Python, Blender 안), 열린 Unity의 `ch_*` 도구가 저장소와 같은지(옛 컴파일 잡기)와 씬 뷰 찍기, 열린 Blender의 채팅 애드온 버전, 채널, 설치 파일을 본다. 아무것도 바꾸지 않는다.
 
 ## 처음 세팅 (claude-hand-setup 스킬)
 
@@ -302,10 +324,10 @@ TEST-PLAN 12(Windows)에서 Remote Control과 Channels를 한 세션에 같이 �
 | 17 | Windows에서 PowerShell `Get-CimInstance Win32_Process`가 채널 서버 시작 중에 30초 안에 끝난다(보통 1~2초) | 환경변수 경로만 쓴다 |
 | 18 | `settings.local.json`의 `enabledMcpjsonServers`가 `.mcp.json` 승인 질문을 없앤다(문서는 local 파일의 승인이 믿는 폴더에서 적용된다고만 함) | 처음 한 번 질문에 답한다(안내 문구가 있음) |
 | 19 | Unity·Blender 버튼의 `cmd /c start "Claude Hand" <script>`가 새 콘솔 창을 연다 | 바탕화면 아이콘을 쓴다 |
-| 20 | `--remote-control`과 `--dangerously-load-development-channels`를 한 세션에 같이 쓸 수 있다 | `remote-control off`로 끄고, 필요할 때 그 창에서 `/remote-control`을 입력한다 |
+| 20 | **확인됨(Windows)** `--remote-control`과 `--dangerously-load-development-channels`를 한 세션에 같이 쓸 수 있다 | `remote-control off`로 끄고, 필요할 때 그 창에서 `/remote-control`을 입력한다 |
 | 21 | 데스크톱 앱 Code 탭이 `~/.claude/agents`의 하위 세션(인라인 MCP 서버·훅 포함)과 저장소의 `.claude/skills`를 읽는다 | "Claude Hand 켜줘"가 안 되면 바탕화면 아이콘으로 켠다 |
-| 22 | 개발용 채널 경고는 Claude Code가 시작할 때 묻고, Claude의 첫 도구 호출은 그 뒤에만 온다. 그래서 그때 최소화하면 질문을 가리지 않는다. **경고는 켤 때마다 뜬다**(Windows에서 확인). 문서상으로도 그렇다: 직접 만든 채널은 Anthropic 허용 목록에 없어서 `--dangerously-load-development-channels`가 필요하고, 경고를 끄는 설정은 없다. 피하는 길은 Team·Enterprise 관리자의 `allowedChannelPlugins`(플러그인으로 묶어 조직 허용 목록에 넣기)나 공식 마켓플레이스 등록뿐이고, Pro·Max 개인 계정에는 없다. 문서의 예시는 "경고를 수락한 뒤 채널 서버를 띄운다"고 적고 있다 | `minimize off` |
-| 23 | 창 없는 Python에서 `AttachConsole(<claude pid>)`로 Claude Hand 콘솔 창을 찾아 최소화할 수 있다(Windows 10 conhost). Windows Terminal이 기본 터미널이면 `GetConsoleWindow`가 가짜 창을 줄 수 있다 | 최소화가 안 될 뿐 동작에는 지장이 없다. 사용자가 직접 최소화한다 |
+| 22 | **확인됨(Windows)** 개발용 채널 경고는 Claude Code가 시작할 때 묻고, Claude의 첫 도구 호출은 그 뒤에만 온다. 그래서 그때 최소화하면 질문을 가리지 않는다. **경고는 켤 때마다 뜬다**(Windows에서 확인). 문서상으로도 그렇다: 직접 만든 채널은 Anthropic 허용 목록에 없어서 `--dangerously-load-development-channels`가 필요하고, 경고를 끄는 설정은 없다. 피하는 길은 Team·Enterprise 관리자의 `allowedChannelPlugins`(플러그인으로 묶어 조직 허용 목록에 넣기)나 공식 마켓플레이스 등록뿐이고, Pro·Max 개인 계정에는 없다. 문서의 예시는 "경고를 수락한 뒤 채널 서버를 띄운다"고 적고 있다 | `minimize off` |
+| 23 | ~~창 없는 Python에서 `AttachConsole(<claude pid>)`로 Claude Hand 콘솔 창을 찾아 최소화할 수 있다~~ **틀림**: Claude Code 아래에서 멈췄다. 지금은 Claude Code 위 두 단계 프로세스의 보이는 콘솔 창을 `EnumWindows`로 찾아 `ShowWindowAsync`한다(Windows 10 conhost에서 확인). 남은 가정: Windows Terminal이 기본 터미널이면 콘솔 창을 찾지 못한다 | 최소화가 안 될 뿐 동작에는 지장이 없다. 사용자가 직접 최소화한다 |
 | 24 | Remote Control로 들어온 데스크톱 앱 입력이 채널 태그 없는 일반 사용자 메시지로 보인다(그래서 감독이 "데스크톱에서 온 요청"으로 구분한다) | 지침을 "채널 태그가 없으면"에서 다른 표시로 바꾼다 |
 
 ## 정한 방향: "데스크톱 앱 + 채팅창" 하나로
@@ -315,5 +337,6 @@ TEST-PLAN 12에서 확인된 뒤 위의 "하나로 정리한 방식"으로 만�
 ## 다음 단계 (2단계 후보)
 
 - **세션 간 직접 대화:** Claude Code 에이전트 팀(실험 기능)을 쓰거나 Channels로 감독을 거치지 않고 메시지를 주고받는다. 지금은 감독이 중계한다.
-- **모달 대화상자 자동 감지:** Unity(Windows)는 만들었다. Unity의 대화상자는 Windows 기본 대화상자라 밖에서 제목·글·버튼을 읽는다. guard가 호출 전에, Claude Hand 통로가 기다리는 동안 보고 바로 알리고, 채널 서버는 일을 시킨 다른 창의 채팅에 알린다(TEST-PLAN 21단계). 남은 것: Blender(자기 창 안의 팝업), Unity 자체 모달 창(`EditorWindow.ShowModal`), macOS.
+- **대화상자 감지의 남은 곳:** Unity(Windows)는 위 "매일 쓰기"에서 만들었다. 남은 것은 Blender(자기 창 안에 그리는 팝업이라 밖에서 안 읽힘), Unity 자체 모달 창(`EditorWindow.ShowModal`, `#32770`이 아님), macOS.
+- **macOS·Linux:** 작업 표시줄 알림, 한글 입력창, 대화상자 감지, 창 최소화는 Windows API로만 만들었다.
 - **백그라운드 보완:** 실측 결과 Windows에서 막히면 Unity 쪽에서 메인 루프를 깨우는 장치를 넣는다.

@@ -105,3 +105,5 @@
 
 `ChBridge` 통로는 이 문제와 상관없이 동작하므로 그대로 두면 됩니다. MCP for Unity에는 "Python 3.14에서 커스텀 도구 전역 등록 실패(`functools.wraps`가 `__annotations__`를 복사하지 않음)"로 보고할 만합니다.
 
+**(2026-11-10 확인) 이미 보고·수정됨:** [CoplayDev/unity-mcp#1430](https://github.com/CoplayDev/unity-mcp/issues/1430)이 같은 증상과 원인(Python 3.14의 `functools.wraps`가 `__annotate__`를 복사, 10.1.2~10.3.0, 3.13은 정상)으로 보고했고, [PR #1432](https://github.com/CoplayDev/unity-mcp/pull/1432)("keep handler annotations through wrappers on Python 3.14")가 2026-10-19 `beta`에 들어가 닫혔다. 이 날 기준 최신 릴리스는 수정 전의 10.3.0이라 다음 릴리스를 기다리면 된다. 따로 보고하지 않는다. 그 전에 MCP for Unity 쪽으로도 커스텀 도구가 필요하면 서버를 Python 3.13으로 띄우는 것이 이슈에 적힌 우회다(claude-hand는 `ChBridge`로 부르므로 필요 없음).
+

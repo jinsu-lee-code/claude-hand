@@ -150,7 +150,7 @@
 
 ## 남은 것·참고
 
-- **`Bash(uv run *)` 미리 허용**: 새 `settings.local.json`이 이 폴더 세션의 `uv run …`을 허락 없이 실행하게 함. 12단계 E에서 본 `list` 같은 확인창은 이제 안 뜸. `uv run`은 아무 스크립트나 돌릴 수 있어 범위가 넓음.
+- **`Bash(uv run *)` 미리 허용**: 이 PC의 `settings.local.json`에만 있던 규칙(코드 기록에는 없음 — 확인창에서 "다시 묻지 않기"로 생긴 것으로 보임). `uv run`은 아무 스크립트나 돌릴 수 있어 범위가 넓어서, 2026-11-10 정리 때 `Bash(uv run tools/claude_hand.py *)`와 감독 스킬이 쓰는 절대 경로 형태 `Bash(uv run "C:/…/claude-hand/tools/claude_hand.py" *)` 두 개로 좁힘. 다른 `uv run`은 다시 허락을 물음.
 - **최소화가 멈춘 정확한 지점**: 옛 방식에서 `AttachConsole`과 `ShowWindow` 중 어디서 멈췄는지는 모름. 새 방식은 둘 다 쓰지 않음.
 - **E의 "한 번도 쓰지 않은 Blender 창"**: 감독을 다시 켠 뒤 Blender 채팅창을 건드리지 않고 데스크톱에서 시켜 봐야 함.
 - **Blender 줄바꿈 여유(×1.2, 여백 50px)**: 배율 1.0, 사이드바 328px에서 사용자 확인. 다른 배율·글꼴 설정에서는 확인 안 함.
@@ -163,4 +163,4 @@
 - ~~**끝났다는 알림**~~: 20단계로 만듦(작업 표시줄 깜빡임, Unity 탭 안 읽은 수).
 - ~~**자동 점검 명령 `selftest`**~~: 만듦(위 "selftest 명령"). 감독 세션의 환경 변수는 밖에서 읽을 방법이 마땅치 않아 넣지 않음.
 - ~~**대화상자 자동 감지**~~: 21단계로 만듦(Unity, Windows).
-- 정리: DESIGN.md를 오늘 바뀐 내용에 맞추기(최소화 방식, 대화 이어 쓰기, 채팅 기록, 세션 변수 정리, 되돌리기, 메모, 한글 입력창, 미리보기), `Bash(uv run *)`를 `uv run tools/claude_hand.py *`로 좁히기, MCP for Unity Python 3.14 버그 보고.
+- ~~정리~~ (2026-11-10 끝냄): DESIGN.md에 "매일 쓰기" 절을 더하고 최소화 방식·스킬 이름·가정 20·22·23·2단계 후보를 고침. `Bash(uv run *)`는 이 PC 설정에서 `claude_hand.py` 두 형태로 좁힘. MCP for Unity Python 3.14 버그는 이미 #1430으로 보고되고 PR #1432로 beta에 고쳐져 있어 따로 보고하지 않음(TEST-RESULTS-12-WINDOWS 참고, 다음 릴리스 대기).
