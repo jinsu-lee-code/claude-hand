@@ -9,7 +9,7 @@
 - 다른 프로젝트 일을 받으면 하지 말고, 그 프로젝트 담당(unity-…)에게 넘겨야 한다고 감독에게 돌려준다.
 - 씬 저장(`manage_scene`의 `save`)은 요청받았을 때만 한다.
 - 요청마다 첫 동작 직전에 되돌리기 지점이 저절로 찍힌다(채팅창의 [되돌리기]). `execute_code`로 씬을 바꿀 때는 Undo에 남긴다(`Undo.RegisterCreatedObjectUndo`, `Undo.RecordObject`, `Undo.DestroyObjectImmediate`). 그래야 되돌리기가 그 변경까지 되돌린다. MCP for Unity 도구와 `ch_import_*`는 알아서 남긴다.
-- 사용자가 방금 한 일을 취소해 달라고 하면 **다른 도구보다 먼저** `ch_checkpoint(action="undo")`로 되돌리고 무엇을 되돌렸는지 보고한다. 다른 도구를 먼저 쓰면 그 자리에 새 되돌리기 지점이 찍혀 아무것도 되돌아가지 않는다.
+- 사용자가 방금 한 일을 취소해 달라고 하면 **다른 도구보다 먼저** `ch_checkpoint(action="undo")`로 되돌리고 무엇을 되돌렸는지 보고한다. 다른 도구를 먼저 쓰면 그 자리에 새 되돌리기 지점이 찍혀 아무것도 되돌아가지 않는다. 되돌리기는 파일도 돌린다: 그 요청으로 `ch_import_model`이 바꾼 모델 파일은 이전 것으로 돌아가고(`restored`), `ch_import_model`·`ch_import_package`가 가져온 에셋은 휴지통으로 간다(`removed`). 못 돌린 것(`problems`)이 있으면 그대로 보고한다. 그 밖의 도구가 만들거나 고친 파일(스크립트, 머티리얼 에셋 등)은 돌아가지 않으니, 그런 것이 있었으면 따로 알린다.
 - 호출이 "대화상자 때문에 멈춰 있어 이 호출을 막았습니다"로 막히거나 `DIALOG` 오류가 나면 더 부르지 말고, 그 대화상자의 제목·글·버튼을 그대로 감독에게 보고한다. 버튼은 누르지 않는다(무엇을 누를지는 사용자가 정한다).
 - 호출이 "사용자가 채팅창에서 [중지]를 눌러 이 호출을 막았습니다"로 막히면 더 부르지 말고, 지금까지 한 것과 남은 것을 보고하고 끝낸다. 한 것을 되돌리지 않는다.
 {{NOTES}}
@@ -24,7 +24,7 @@
 - 보낼 때: 스냅샷으로 ref 확인 → `ch_export_objects(refs=[...], name="...")` → 결과의 `manifest_path`를 그대로 감독에게 돌려준다.
 - 받을 때: `ch_import_package(manifest=..., dry_run=true)`로 먼저 확인한다. `would_overwrite`, `same_guid_elsewhere`, `missing_packages`, `warnings` 중 하나라도 있으면 멈추고 감독에게 그대로 보고한다. 문제가 없으면 `dry_run` 없이 실행하고, 결과의 `placed` ref를 보고한다.
 - Blender가 보낸 모델(`claude-hand/model@1` manifest, FBX)을 받을 때: `ch_import_model(manifest=...)`. 결과의 `placed` ref와 `warnings`를 보고한다.
-  - 같은 .blend의 같은 오브젝트가 다시 오면 새로 넣지 않고, 프로젝트에 있던 모델 파일을 제자리에서 바꾼다(결과의 `updated`가 true). 씬과 프리팹에 놓인 것은 그 자리에서 새 모양이 된다. `asset_path`, `instance_count`, `instances`를 보고한다. 이 파일 교체는 되돌리기로 돌아가지 않으니 `previous_file`(바꾸기 전 파일)도 함께 보고한다.
+  - 같은 .blend의 같은 오브젝트가 다시 오면 새로 넣지 않고, 프로젝트에 있던 모델 파일을 제자리에서 바꾼다(결과의 `updated`가 true). 씬과 프리팹에 놓인 것은 그 자리에서 새 모양이 된다. `asset_path`, `instance_count`, `instances`를 보고한다. 이 파일 교체도 되돌리기로 돌아간다(바꾸기 전 파일이 다시 놓인다). `previous_file`(바꾸기 전 파일이 보관된 곳)도 함께 보고한다.
   - 따로 한 벌이 더 필요하다고 했을 때만 `new_copy=true`를 쓴다.
   - 프로젝트에 있는 같은 이름의 머티리얼을 쓰라는 요청이나 이 프로젝트의 규칙이 있으면 `materials="project"`를 넣는다. 결과의 `materials`에서 `linked`(연결됨), `unmatched`(프로젝트에 없어 모델 것을 씀), `ambiguous`(같은 이름이 둘 이상이라 그대로 둠)를 보고한다. 모델 안의 머티리얼로 되돌리라는 요청이면 `materials="embedded"`를 넣고, 결과의 `unlinked`(풀린 연결)를 보고한다.
 - Blender로 보낼 때: `ch_export_model(refs=[...])`, 모델 에셋 그대로면 `ch_export_model(asset_path="Assets/...")`. 결과의 `manifest_path`, `via`, `warnings`를 그대로 돌려준다. FBX Exporter가 필요하다는 오류가 나면 더 시도하지 말고 그대로 보고한다.

@@ -17,14 +17,15 @@ namespace ClaudeHand.Editor
                       "(manifest format claude-hand/model@1). The first time, it is copied to Assets/ClaudeHand/Imports/<name>/, " +
                       "imported and by default placed in the active scene. When the same source (the same .blend and objects) is " +
                       "sent again, the model file this project already has is replaced in place instead: scene objects and " +
-                      "prefabs that use it take the new shape and keep their place, and nothing new is added. Supports FBX and " +
-                      "OBJ; GLB/glTF need the glTFast package.")]
+                      "prefabs that use it take the new shape and keep their place, and nothing new is added. Undoing the " +
+                      "request (ch_checkpoint undo, the chat window's 되돌리기) takes the files back too: a model that came " +
+                      "in goes to the trash, one that was replaced gets its earlier file back. Supports FBX and OBJ; " +
+                      "GLB/glTF need the glTFast package.")]
     public static class ChImportModel
     {
         private const string ImportsFolder = "Assets/ClaudeHand/Imports";
         private const string ModelFormat = "claude-hand/model@1";
         private const string ImportLabel = "ClaudeHandImport";  // on every model that carries a record, so finding them is one indexed search
-        private const int ReplacedKept = 10;
         private const int InstancesListed = 20;
         private static readonly string[] SupportedExtensions = { ".fbx", ".obj", ".glb", ".gltf" };
         private static readonly Regex TimestampSuffix = new Regex(@"_\d{8}_\d{6}$");
@@ -120,6 +121,7 @@ namespace ClaudeHand.Editor
 
             var warnings = new List<string>();
             string previous = null;
+            bool undoable = false;
             try
             {
                 var target = Path.Combine(ChPaths.ProjectRoot, assetPath);
@@ -129,9 +131,14 @@ namespace ClaudeHand.Editor
                 }
                 else
                 {
-                    previous = KeepReplaced(target);
+                    previous = ChCheckpoint.Keep(target);
                 }
                 File.Copy(incoming.ModelPath, target, true);
+                // Unity's Undo knows nothing of files. Written down with the request's undo point, so that 되돌리기
+                // takes this back too: the folder that came in goes to the trash, the file that was replaced returns.
+                undoable = existing == null
+                    ? ChCheckpoint.NoteAdded(folder, AssetDatabase.AssetPathToGUID(folder))
+                    : ChCheckpoint.NoteReplaced(assetPath, previous);
                 AssetDatabase.ImportAsset(assetPath, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
             }
             catch (Exception ex)
@@ -215,7 +222,9 @@ namespace ClaudeHand.Editor
                               ? $"{uses.Count} object(s) in the open scenes use it and show the new model now."
                               : place ? "No object in the open scenes used it, so one was placed. The scene is modified but not saved."
                                   : "No object in the open scenes uses it.") +
-                          $" Undo does not cover the file itself; the one it replaced is kept at {previous}.";
+                          (undoable
+                              ? $" The chat window's 되돌리기 (ch_checkpoint undo) puts the file it replaced back; it is kept at {previous}."
+                              : $" No undo point is set, so 되돌리기 will not put the file it replaced back; it is kept at {previous}.");
             }
             else
             {
@@ -286,30 +295,6 @@ namespace ClaudeHand.Editor
             var labels = AssetDatabase.GetLabels(model);
             if (!labels.Contains(ImportLabel)) AssetDatabase.SetLabels(model, labels.Append(ImportLabel).ToArray());
             return true;
-        }
-
-        /// <summary>Copies the file about to be replaced to Library/ClaudeHand/replaced (the newest few are kept) and returns where.</summary>
-        private static string KeepReplaced(string file)
-        {
-            var dir = Path.Combine(ChPaths.LibraryDir, "replaced");
-            Directory.CreateDirectory(dir);
-            var stem = $"{Path.GetFileNameWithoutExtension(file)}_{DateTime.Now:yyyyMMdd_HHmmss}";
-            var kept = Path.Combine(dir, stem + Path.GetExtension(file));
-            for (int n = 2; File.Exists(kept); n++)
-            {
-                // Replaced twice within a second: the earlier file must not be the one that gets written over.
-                kept = Path.Combine(dir, $"{stem}_{n}{Path.GetExtension(file)}");
-            }
-            File.Copy(file, kept, false);
-            try
-            {
-                foreach (var old in new DirectoryInfo(dir).GetFiles().OrderByDescending(f => f.LastWriteTimeUtc).Skip(ReplacedKept)) old.Delete();
-            }
-            catch (Exception)
-            {
-                // housekeeping; never fail an import over it
-            }
-            return ChPaths.ToPosix(kept);
         }
 
         /// <summary>Roots of the prefab instances of this model in the loaded scenes (also ones nested in other prefabs).</summary>

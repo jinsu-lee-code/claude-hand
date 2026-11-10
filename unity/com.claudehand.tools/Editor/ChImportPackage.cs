@@ -14,7 +14,9 @@ namespace ClaudeHand.Editor
     [ChTool("ch_import_package",
         Description = "Import a transfer made by ch_export_objects in another project: checks it first, imports the .unitypackage, " +
                       "waits for Unity to finish importing and compiling, then (by default) places the exported prefabs in the " +
-                      "active scene and returns refs to them. Run with dry_run=true first to see what would be added or overwritten.",
+                      "active scene and returns refs to them. Run with dry_run=true first to see what would be added or overwritten. " +
+                      "Undoing the request (ch_checkpoint undo, the chat window's 되돌리기) takes the files back too: what the " +
+                      "package added goes to the trash, what it wrote over gets its earlier file back.",
         RequiresPolling = true,
         PollAction = "status",
         MaxPollSeconds = 600)]
@@ -143,11 +145,55 @@ namespace ClaudeHand.Editor
 
             if (!plan.NothingToImport)
             {
+                NoteForUndo(manifest);
                 // interactive=false: no dialog; the import finishes on later editor ticks and may trigger a domain reload.
                 AssetDatabase.ImportPackage(packagePath, false);
             }
 
             return new ChPending($"Importing {manifest.transfer_id} ({plan.asset_count} assets)...", 1.0, new { manifest.transfer_id, stage = state.stage });
+        }
+
+        /// <summary>
+        /// Unity's Undo knows nothing of the files a package brings. Before the import, the files it will write over
+        /// are kept and the assets it will add are written down with the request's undo point (ChCheckpoint), so
+        /// that undoing the request puts the files back as well.
+        /// </summary>
+        private static void NoteForUndo(ChTransferManifest manifest)
+        {
+            if (ChCheckpoint.Marks.Count == 0) return;
+            var notes = new List<ChCheckpoint.FileNote>();
+            var newFolders = new List<string>();
+            foreach (var asset in manifest.assets)
+            {
+                var existingPath = IsPresent(asset.guid) ? AssetDatabase.GUIDToAssetPath(asset.guid) : null;
+                if (!string.IsNullOrEmpty(existingPath))
+                {
+                    // Already here, at this path or (same GUID) at another: the import writes over that file.
+                    var file = Path.Combine(ChPaths.ProjectRoot, existingPath);
+                    if (!File.Exists(file)) continue;  // a folder
+                    notes.Add(new ChCheckpoint.FileNote { kind = "replaced", path = existingPath, kept = ChCheckpoint.Keep(file, manifest.transfer_id) });
+                    continue;
+                }
+                var folder = TopmostNewFolder(asset.path);
+                if (folder == null) notes.Add(new ChCheckpoint.FileNote { kind = "added", path = asset.path, guid = asset.guid });
+                else if (!newFolders.Contains(folder)) newFolders.Add(folder);
+            }
+            // The folders the import will make go last, so that undoing (newest first) takes them, and all in them, first.
+            notes.AddRange(newFolders.Select(folder => new ChCheckpoint.FileNote { kind = "added", path = folder }));
+            ChCheckpoint.Note(notes);
+        }
+
+        /// <summary>The highest folder above an asset path that this project does not have yet; null when its folder is there.</summary>
+        private static string TopmostNewFolder(string assetPath)
+        {
+            var parts = assetPath.Split('/');
+            var current = parts[0];
+            for (int i = 1; i < parts.Length - 1; i++)
+            {
+                current += "/" + parts[i];
+                if (!AssetDatabase.IsValidFolder(current)) return current;
+            }
+            return null;
         }
 
         private static object Status()

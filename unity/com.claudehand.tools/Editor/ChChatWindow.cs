@@ -608,14 +608,22 @@ namespace ClaudeHand.Editor
             if (marks.Count == 0 || _progress != null) return;
             var mark = marks[marks.Count - 1];
             if (!GUILayout.Button($"되돌리기: {mark.label} ({mark.time})", EditorStyles.miniButton)) return;
+            // What the request did to files goes back too (ChCheckpoint): say so before, since it is not Unity's own Undo.
+            var notes = mark.files ?? new List<ChCheckpoint.FileNote>();
+            int replaced = notes.Where(n => n.kind == "replaced").Select(n => n.path).Distinct().Count();
+            int added = notes.Count(n => n.kind == "added");
+            var files = (replaced > 0 ? $"\n이 요청이 바꾼 파일 {replaced}개는 이전 것으로 돌아갑니다." : "") +
+                        (added > 0 ? $"\n이 요청이 가져온 에셋 {added}개는 휴지통으로 갑니다." : "");
             var ok = EditorUtility.DisplayDialog("Claude Hand 되돌리기",
                 $"'{mark.label}' 요청({mark.time}) 이후 이 Unity에서 바뀐 것을 모두 되돌립니다.\n" +
-                "그 뒤에 직접 고친 것도 함께 되돌아갑니다. 저장해 둔 씬 파일은 다시 저장해야 바뀝니다.", "되돌리기", "취소");
+                "그 뒤에 직접 고친 것도 함께 되돌아갑니다. 저장해 둔 씬 파일은 다시 저장해야 바뀝니다." + files, "되돌리기", "취소");
             if (!ok) return;
             var undone = ChCheckpoint.UndoLast();
             if (undone == null) return;
-            _entries.Add(new Entry { Kind = "notice", Text = $"되돌렸어요: '{undone.label}' ({undone.time}) 이후의 변경" });
-            _undoNote = $"[사용자가 채팅창에서 '{undone.label}' ({undone.time}) 요청 이후의 Unity 변경을 Undo로 되돌렸음]";
+            var done = undone.report?.Summary();
+            _entries.Add(new Entry { Kind = "notice", Text = $"되돌렸어요: '{undone.label}' ({undone.time}) 이후의 변경." + (done != null ? " " + done : "") });
+            _undoNote = $"[사용자가 채팅창에서 '{undone.label}' ({undone.time}) 요청 이후의 Unity 변경을 Undo로 되돌렸음" +
+                        (done != null ? ". " + done : "") + "]";
             _followNewest = true;
             _scroll.y = float.MaxValue;
             GUIUtility.ExitGUI();  // the dialog and the undo changed things mid-frame
