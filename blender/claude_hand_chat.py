@@ -18,7 +18,7 @@ Install: `uv run tools/claude_hand.py blender-install-chat` (or Preferences > Ad
 bl_info = {
     "name": "Claude Hand Chat",
     "author": "claude-hand",
-    "version": (0, 11, 0),
+    "version": (0, 12, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar (N) > Claude Hand",
     "description": "Chat with this Blender window's claude-hand subagent",

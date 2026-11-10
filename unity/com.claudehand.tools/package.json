@@ -1,6 +1,6 @@
 {
   "name": "com.claudehand.tools",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "displayName": "Claude Hand Tools",
   "description": "The Unity side of claude-hand: the ch_* tools (scene snapshots with refs, cross-project object export/import, model import and export, undo points, scene view capture, editor status) behind claude-hand's own loopback bridge, and the chat window (Window > Claude Hand > Chat). Works next to MCP for Unity but does not need it to compile.",
   "unity": "2021.3",

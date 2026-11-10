@@ -17,8 +17,8 @@ Unity·Blender 안의 채팅창 ──(claude-hand-chat 채널)──┐
  └─ 교환 폴더 %USERPROFILE%\.claude-hand\exchange  (.unitypackage / .blend / .fbx + manifest, 30일 지나면 켤 때 정리)
 ```
 
-> 상태: **0.11.0.** Windows의 실제 Unity 6.3과 Blender 5.2에서 써 가며 확인했습니다([12단계](docs/TEST-RESULTS-12-WINDOWS.md), [13~21단계](docs/TEST-RESULTS-13-WINDOWS.md)). macOS·Linux에서는 자동 테스트만 돌렸습니다.
-> 2026-11-10의 구조 개편([점검](docs/REVIEW-2026-11-10.md))과 그 뒤에 더한 기능(다시 보낸 모델을 제자리에서 바꾸기, Unity → Blender, 요청 기록, 중지 버튼)은 자동 테스트와, 창 없이 연 Unity·Blender에서 실제로 돌려 확인했습니다. 열린 창과 감독 세션이 있어야 볼 수 있는 것은 [TEST-PLAN](docs/TEST-PLAN.md) 22~25단계에 있습니다.
+> 상태: **0.12.0.** Windows의 실제 Unity 6.3과 Blender 5.2에서 써 가며 확인했습니다([12단계](docs/TEST-RESULTS-12-WINDOWS.md), [13~21단계](docs/TEST-RESULTS-13-WINDOWS.md)). macOS·Linux에서는 자동 테스트만 돌렸습니다.
+> 2026-11-10의 구조 개편([점검](docs/REVIEW-2026-11-10.md))과 그 뒤에 더한 기능(다시 보낸 모델을 제자리에서 바꾸기, Unity → Blender, 요청 기록, 중지 버튼)은 자동 테스트와, 창 없이 연 Unity·Blender에서 실제로 돌려 확인했습니다. 열린 창과 감독 세션이 있어야 볼 수 있는 것은 [TEST-PLAN](docs/TEST-PLAN.md) 22~26단계에 있습니다.
 
 ## 매일 쓰는 법
 
@@ -113,6 +113,7 @@ Blender 패널 ─┼─ 채널 ─ 감독 ┼─ blender-props
 - Unity가 "씬을 저장할까요?" 같은 대화상자에서 멈추면(Windows) 시간 초과를 기다리지 않고 바로 알아채, 대화상자의 글과 버튼을 감독과 채팅창에 알립니다. 무엇을 누를지는 사용자가 정합니다.
 - 일이 끝나면 입력칸 위에 **되돌리기** 버튼이 뜹니다. 그 요청이 시작되기 직전으로 Unity Undo나 Blender 실행 취소 기록을 되돌립니다. "방금 거 취소해줘"라고 해도 됩니다.
 - 일하는 동안에는 "작업 중" 줄 옆에 **중지** 버튼이 있습니다. 누르면 그 요청으로 일하던 하위 세션의 다음 동작부터 막히고(하던 동작 하나는 끝까지 갑니다), 감독이 어디까지 했는지 알려 줍니다. 한 것은 되돌리지 않습니다. 되돌리려면 그다음에 **되돌리기**를 누릅니다.
+- 입력칸 위의 **다른 창** 줄이 채팅창이 열려 있는 다른 창들을 한 줄씩 보여 줍니다: `작업 중`(다른 창의 요청으로 일하면 "○○의 요청"), `답 기다림`, `대화상자로 멈춤`. 한가한 창은 한 줄에 모읍니다. 그 창으로 가 보지 않아도 누가 무엇을 하는지 압니다. 채널이 이미 아는 것을 보여 주는 것이라 토큰이 들지 않습니다.
 
 준비(세팅 스킬이 대신 해 줍니다):
 ```powershell
@@ -146,6 +147,18 @@ uv run tools/claude_hand.py chat-status
 - `start-supervisor`가 넘긴 표시(`CLAUDE_HAND_SUPERVISOR=1`, `.mcp.json`의 `env`로 전달)가 있을 때
 - 자기를 띄운 Claude Code가 이 서버를 채널로 불러왔을 때(`--dangerously-load-development-channels server:claude-hand-chat`)
 
+### 지금 창들이 무엇을 하고 있는지 보기
+
+```powershell
+uv run tools/claude_hand.py status
+```
+Claude Hand가 켜져 있는 동안, 채팅창이 열려 있거나 일하고 있는 창을 한 줄씩 보여 줍니다. 채팅창의 **다른 창** 줄과 같은 내용에 경과 시간과 지금 하는 동작이 붙습니다.
+```
+Level (Unity) · 작업 중 · 1분 15초 · props의 요청 · ch_import_model · “의자를 Level로 보내줘”
+props (Blender) · 답 기다림 · 1분 20초 · “의자를 Level로 보내줘”
+한가함: MyGame (Unity)
+```
+
 ### 한 요청에 무슨 일이 있었는지 보기
 
 ```powershell
@@ -171,10 +184,10 @@ uv run tools/claude_hand.py update     # 하위 세션·감독 스킬·채팅 �
 |---|---|
 | `.claude/skills/claude-hand-setup/` | 처음 세팅 스킬입니다. 이 폴더에서 Claude Code를 열면 바로 쓸 수 있습니다. |
 | `skills/orchestrator/` | 평소에 감독 세션이 따르는 규칙(스킬)입니다. `sync`가 `~/.claude/skills/claude-hand/`에 설치합니다. |
-| `tools/claude_hand.py` | 하위 세션 생성(`list`, `sync`), 세팅 도우미(`doctor`, `selftest`, `update`, `mode`, `unity-install`, `unity-open`, `blender-open`, `chat-setup`, `blender-install-chat`, `chat-status`, `shortcut`, `remote-control`), 요청 기록 보기(`trace`), 교환 폴더 정리(`clean-exchange`)가 들어 있습니다. |
+| `tools/claude_hand.py` | 하위 세션 생성(`list`, `sync`), 세팅 도우미(`doctor`, `selftest`, `update`, `mode`, `unity-install`, `unity-open`, `blender-open`, `chat-setup`, `blender-install-chat`, `chat-status`, `shortcut`, `remote-control`), 창들의 현황 보기(`status`), 요청 기록 보기(`trace`), 교환 폴더 정리(`clean-exchange`)가 들어 있습니다. |
 | `tools/guard.py` | 하위 세션의 안전장치(PreToolUse 훅)입니다. 다른 대상으로 가는 호출을 막습니다. 표준 라이브러리만 쓰는 작은 파일로 따로 두어, 다른 파일의 실수가 안전장치를 멈추지 못하게 했습니다. |
 | `tools/supervisor_hook.py` | 감독 세션의 훅입니다. 감독이 하위 세션에게 일을 맡길 때마다 그 일이 어느 채팅창 요청의 것인지(`[요청 <번호>]`) 채널에 알립니다. 번호가 빠진 맡기기는 거부하고 적는 법을 알려 줍니다. `start-supervisor`로 연 세션에만 달립니다. |
-| `tools/handlib/` | 위 스크립트들을 이루는 모듈입니다: 열린 창 찾기(`discovery`), 하위 세션 정의 만들기(`agents`), 채팅 설정(`chatsetup`), 시작 준비(`launch`), 진단(`checks`), 요청 기록(`eventlog`) 등. 목록은 `tools/handlib/__init__.py`에 있습니다. |
+| `tools/handlib/` | 위 스크립트들을 이루는 모듈입니다: 열린 창 찾기(`discovery`), 하위 세션 정의 만들기(`agents`), 채팅 설정(`chatsetup`), 시작 준비(`launch`), 진단(`checks`), 요청 기록(`eventlog`), 창들의 현황(`overview`) 등. 목록은 `tools/handlib/__init__.py`에 있습니다. |
 | `prompts/` | Claude에게 주는 지침의 원문입니다. 하위 세션용(`unity-subagent.md`, `blender-subagent.md`)에는 `{{이름}}` 자리에 창마다의 값이 들어갑니다. `chat-rules.md`는 감독이 채팅창을 다루는 규칙으로, 채널 서버와 감독 스킬이 같은 글을 씁니다. 고친 뒤에는 `update`로 다시 설치하고 Claude Hand를 다시 켭니다. |
 | `tools/chat_channel.py` | 채팅 채널 서버입니다. Claude Code가 실행하는 MCP 서버이고, Unity·Blender 채팅창과는 로컬 HTTP로 통신합니다. |
 | `unity/com.claudehand.tools/` | Unity 패키지입니다. `ch_*` 도구 9개와 채팅창(Window > Claude Hand > Chat)을 추가합니다. `ch_*` 도구는 이 패키지가 여는 자기 통로로 불립니다. MCP for Unity 없이도 컴파일되고, 그 버전에 상관없이 동작합니다. |
