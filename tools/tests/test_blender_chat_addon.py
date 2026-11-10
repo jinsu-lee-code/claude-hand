@@ -258,7 +258,7 @@ class BlenderChatAddonTests(unittest.TestCase):
         handlib.agents.write_agent_files(handlib.agents.build_agent_files([handlib.discovery.Instance(name="MyGame", hash="aaaa1111")], handlib.discovery.ServerConfig(transport="stdio"),
                                                   [handlib.discovery.BlenderInstance(port=9876, filepath=str(root / "props.blend"))], None, "uv run"),
                              root / "agents")
-        self.hub.acted["unity-mygame"] = time.time() + 1  # its subagent worked after the request
+        self.hub.acted["unity-mygame"] = self.hub.seq  # its subagent worked after the request
         self.hub.reply("blender-props", "Unity에 놓았어요")
         self.assertTrue(wait_for(lambda: any(e.get("kind") == "image" for e in addon._entries), addon))
         entry = next(e for e in addon._entries if e.get("kind") == "image")

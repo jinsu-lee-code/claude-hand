@@ -426,7 +426,7 @@ class SetupHelperTests(unittest.TestCase):
     def test_unity_install_adds_both_and_keeps_other_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = make_unity_project(Path(tmp))
-            plan, manifest = handlib.install.plan_unity_install(project, package_dir=Path(tmp) / "pkg")
+            plan, manifest = handlib.install.plan_unity_install(project, package_dir=Path(tmp) / "pkg", source="folder")
             self.assertEqual(len(plan.changes), 2)
             handlib.install.apply_unity_install(project, manifest, plan)
             written = json.loads((project / "Packages" / "manifest.json").read_text(encoding="utf-8"))
@@ -437,13 +437,13 @@ class SetupHelperTests(unittest.TestCase):
             self.assertEqual(written["scopedRegistries"], [])
             backup = json.loads(Path(plan.backup).read_text(encoding="utf-8"))
             self.assertNotIn(handlib.constants.MCP_FOR_UNITY_PACKAGE, backup["dependencies"])
-            again, manifest_again = handlib.install.plan_unity_install(project, package_dir=Path(tmp) / "pkg")
+            again, manifest_again = handlib.install.plan_unity_install(project, package_dir=Path(tmp) / "pkg", source="folder")
             self.assertEqual((again.changes, manifest_again), ([], None))
 
     def test_unity_install_respects_existing_mcp_for_unity(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = make_unity_project(Path(tmp), deps={handlib.constants.MCP_FOR_UNITY_PACKAGE: "https://example/fork.git"})
-            plan, manifest = handlib.install.plan_unity_install(project, package_dir=Path(tmp) / "pkg")
+            plan, manifest = handlib.install.plan_unity_install(project, package_dir=Path(tmp) / "pkg", source="folder")
             self.assertEqual(manifest["dependencies"][handlib.constants.MCP_FOR_UNITY_PACKAGE], "https://example/fork.git")
             self.assertEqual(len(plan.changes), 1)
 
@@ -459,10 +459,10 @@ class SetupHelperTests(unittest.TestCase):
         self.assertTrue(handlib.install.follows_a_branch("https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity"))
         with tempfile.TemporaryDirectory() as tmp:
             project = make_unity_project(Path(tmp), deps={handlib.constants.MCP_FOR_UNITY_PACKAGE: main})
-            plan, manifest = handlib.install.plan_unity_install(project, package_dir=Path(tmp) / "pkg")
+            plan, manifest = handlib.install.plan_unity_install(project, package_dir=Path(tmp) / "pkg", source="folder")
             self.assertEqual(manifest["dependencies"][handlib.constants.MCP_FOR_UNITY_PACKAGE], main)  # left alone unless asked
             self.assertTrue(any("--pin-mcp-for-unity" in note for note in plan.notes))
-            plan, manifest = handlib.install.plan_unity_install(project, package_dir=Path(tmp) / "pkg", pin_mcp_for_unity=True)
+            plan, manifest = handlib.install.plan_unity_install(project, package_dir=Path(tmp) / "pkg", source="folder", pin_mcp_for_unity=True)
             self.assertEqual(manifest["dependencies"][handlib.constants.MCP_FOR_UNITY_PACKAGE], handlib.constants.MCP_FOR_UNITY_GIT_URL)
 
     def test_the_unity_package_does_not_need_mcp_for_unity_to_compile(self):
@@ -477,11 +477,75 @@ class SetupHelperTests(unittest.TestCase):
         manifest = json.loads((package / "package.json").read_text(encoding="utf-8"))
         self.assertIn("com.unity.nuget.newtonsoft-json", manifest["dependencies"])  # the one package it does need
 
+    def test_a_released_checkout_installs_the_package_from_github(self):
+        """From a folder path the project's manifest names this PC, and the project opens nowhere else."""
+        url = handlib.constants.CLAUDE_HAND_PACKAGE_GIT_URL
+        self.assertEqual(url, "https://github.com/jinsu-lee-code/claude-hand.git?path=/unity/com.claudehand.tools#v" + handlib.constants.VERSION)
+        with tempfile.TemporaryDirectory() as tmp:
+            project = make_unity_project(Path(tmp))
+            plan = lambda **kw: handlib.install.plan_unity_install(project, package_dir=Path(tmp) / "pkg", **kw)
+            released, manifest = plan(released=lambda: True)
+            self.assertEqual(manifest["dependencies"][handlib.constants.CLAUDE_HAND_PACKAGE], url)
+            self.assertFalse(any("this PC" in note for note in released.notes))
+            working, manifest = plan(released=lambda: False)
+            self.assertTrue(manifest["dependencies"][handlib.constants.CLAUDE_HAND_PACKAGE].startswith("file:"))
+            self.assertTrue(any("this PC" in note for note in working.notes))  # said, not left to be found out
+            self.assertEqual(plan(source="release", released=lambda: False)[1]["dependencies"][handlib.constants.CLAUDE_HAND_PACKAGE], url)
+            self.assertTrue(plan(source="folder", released=lambda: True)[1]["dependencies"][handlib.constants.CLAUDE_HAND_PACKAGE].startswith("file:"))
+
+    def test_released_checkout_means_exactly_this_versions_tag(self):
+        class Done:
+            def __init__(self, out, code=0):
+                self.stdout, self.returncode = out, code
+        tag = "v" + handlib.constants.VERSION
+        check = lambda run, git="git": handlib.install.released_checkout(run=run, git=git)
+        self.assertTrue(check(lambda cmd, **kw: Done(tag + "\n")))
+        self.assertFalse(check(lambda cmd, **kw: Done("v0.0.1\n")))  # another release
+        self.assertFalse(check(lambda cmd, **kw: Done("", 128)))  # a branch tip, or not a git checkout
+        self.assertFalse(check(lambda cmd, **kw: 1 / 0, git=""))  # no git: nothing is run
+        self.assertFalse(check(lambda cmd, **kw: (_ for _ in ()).throw(OSError("gone"))))
+
+    def test_everything_carries_the_one_version(self):
+        import chat_channel
+        import unity_bridge
+        version = handlib.constants.VERSION
+        self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+        package = json.loads((handlib.constants.CLAUDE_HAND_PACKAGE_DIR / "package.json").read_text(encoding="utf-8"))
+        self.assertEqual(package["version"], version)
+        self.assertEqual(handlib.checks.addon_version(handlib.constants.CHAT_ADDON_SOURCE.read_text(encoding="utf-8")), version)
+        self.assertEqual((chat_channel.SERVER_VERSION, unity_bridge.SERVER_VERSION), (version, version))
+
+    def test_old_transfer_files_leave_the_exchange_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "exchange"
+            (folder / "sub").mkdir(parents=True)
+            now = 1_800_000_000.0
+            old, new = now - 40 * 86400, now - 2 * 86400
+            for name, when in (("rock_1.unitypackage", old), ("rock_1.claudehand.json", old), ("hero_1.fbx", old), ("set_1.blend", old),
+                               ("capture-20260101-000000.png", old), ("notes.txt", old), ("sub/deep.fbx", old), ("hero_2.fbx", new)):
+                (folder / name).write_bytes(b"x" * 10)
+                os.utime(folder / name, (when, when))
+            find = lambda days: sorted(p.name for p in handlib.launch.old_exchange_files(days, folder, now))
+            self.assertEqual(find(30), ["capture-20260101-000000.png", "hero_1.fbx", "rock_1.claudehand.json", "rock_1.unitypackage", "set_1.blend"])
+            self.assertEqual(find(1), sorted(find(30) + ["hero_2.fbx"]))
+            self.assertEqual(find(0), [])  # 0: never cleaned
+            self.assertEqual(handlib.launch.clean_exchange(30, folder, now, dry_run=True), (5, 50))
+            self.assertTrue((folder / "hero_1.fbx").exists())
+            self.assertEqual(handlib.launch.clean_exchange(30, folder, now), (5, 50))
+            self.assertEqual(sorted(p.name for p in folder.iterdir()), ["hero_2.fbx", "notes.txt", "sub"])  # only what claude-hand wrote
+            self.assertTrue((folder / "sub" / "deep.fbx").exists())
+            self.assertEqual(handlib.launch.clean_exchange(30, Path(tmp) / "gone", now), (0, 0))
+        self.assertEqual(handlib.launch.exchange_keep_days({}), handlib.launch.EXCHANGE_KEEP_DAYS)
+        self.assertEqual(handlib.launch.exchange_keep_days({"exchange_keep_days": 0}), 0)
+        self.assertEqual(handlib.launch.exchange_keep_days({"exchange_keep_days": "soon"}), handlib.launch.EXCHANGE_KEEP_DAYS)
+        self.assertEqual(handlib.link.exchange_dir({"CLAUDE_HAND_HOME": "/h", "CLAUDE_HAND_EXCHANGE_DIR": "/x"}), Path("/x"))
+        self.assertEqual(handlib.link.exchange_dir({"CLAUDE_HAND_HOME": "/h"}), Path("/h") / "exchange")
+
     def test_unity_install_detects_asset_store_copy(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = make_unity_project(Path(tmp))
             (project / "Assets" / "MCPForUnity").mkdir()
-            plan, manifest = handlib.install.plan_unity_install(project, package_dir=Path(tmp) / "pkg")
+            plan, manifest = handlib.install.plan_unity_install(project, package_dir=Path(tmp) / "pkg", source="folder")
             self.assertNotIn(handlib.constants.MCP_FOR_UNITY_PACKAGE, manifest["dependencies"])
             self.assertTrue(any("Asset Store" in n for n in plan.notes))
 
@@ -750,6 +814,15 @@ class SelftestTests(unittest.TestCase):
         self.assertIsNone(by_item["감독 세션"].ok)  # Claude Hand off is not a failure
         self.assertTrue(by_item["하위 세션 정의·감독 스킬·Blender 애드온 파일"].ok)
         self.assertEqual({tool for _, tool in calls} - {"__ping__", "ch_capture"}, set())  # nothing that changes a scene
+        current = {**live, "tools": [{"name": t} for t in wanted], "version": handlib.constants.VERSION}
+        older = {**current, "name": "Older", "hash": "cccc3333", "version": "0.0.1"}
+        checks = handlib.checks.selftest_checks([], run_tests=False, registry=[current, older], unity_request=unity, blenders=[],
+                                                supervisor_on=False, stale=[], hooks=[])
+        by_item = {c.item: c for c in checks}
+        self.assertTrue(by_item["MyGame: Claude Hand Tools"].ok)
+        self.assertIn(handlib.constants.VERSION, by_item["MyGame: Claude Hand Tools"].detail)
+        self.assertFalse(by_item["Older: Claude Hand Tools"].ok)  # an editor that has not compiled this checkout's package yet
+        self.assertIn("0.0.1", by_item["Older: Claude Hand Tools"].detail)
 
     def test_runs_each_subagents_guard_hook_as_claude_code_does(self):
         class Done:

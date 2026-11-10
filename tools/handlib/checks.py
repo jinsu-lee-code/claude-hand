@@ -241,7 +241,7 @@ def hook_shell(env=os.environ, platform=sys.platform, which=shutil.which) -> lis
     if platform != "win32":
         return ["sh", "-c"]
     candidates = [env.get("CLAUDE_CODE_GIT_BASH_PATH") or ""]
-    git = which("git")
+    git = install.find_git(env, platform, which)
     if git:  # .../Git/cmd/git.exe -> .../Git/bin/bash.exe
         candidates.append(str(Path(git).resolve().parent.parent / "bin" / "bash.exe"))
     candidates += [str(Path(env[var]) / tail) for var, tail in (("ProgramFiles", "Git/bin/bash.exe"),
@@ -327,9 +327,13 @@ def selftest_checks(blender_ports: list[int], run_tests: bool = True, run=subpro
         seen.add(entry.get("hash"))
         name = entry.get("name", "?")
         missing = [tool for tool in wanted if tool not in {t.get("name") for t in entry.get("tools", [])}]
-        add("Unity", f"{name}: Claude Hand Tools", not missing, f"ch_* 도구 {len(wanted)}개 응답" if not missing else
-            "저장소에 있는데 Unity에 없는 도구: " + ", ".join(missing),
-            "" if not missing else "Unity 창을 앞으로 가져와 새 패키지를 컴파일하게 하고, Console에 컴파일 오류가 없는지 보세요")
+        version = str(entry.get("version") or "")  # written by Claude Hand Tools 0.8.0 and later
+        behind = bool(version) and version != constants.VERSION
+        add("Unity", f"{name}: Claude Hand Tools", not missing and not behind,
+            "저장소에 있는데 Unity에 없는 도구: " + ", ".join(missing) if missing else
+            f"{version} (저장소 {constants.VERSION})" if behind else
+            f"ch_* 도구 {len(wanted)}개 응답" + (f", {version}" if version else ""),
+            "" if not (missing or behind) else "Unity 창을 앞으로 가져와 새 패키지를 컴파일하게 하고, Console에 컴파일 오류가 없는지 보세요")
         shot = Path(tempfile.gettempdir()) / f"claude-hand-selftest-{entry.get('hash')}.png"
         try:
             call(entry, "ch_capture", {"path": str(shot), "max_size": 128}, timeout=20)

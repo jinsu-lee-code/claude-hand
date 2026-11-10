@@ -91,6 +91,13 @@ namespace ClaudeHand.Editor
             }
         }
 
+        /// <summary>Claude Hand Tools' version (package.json), so selftest can tell an old compile from this checkout.</summary>
+        private static string PackageVersion()
+        {
+            var info = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(ChBridge).Assembly);
+            return info != null ? info.version : string.Empty;
+        }
+
         private static void WriteRegistry()
         {
             var data = new
@@ -105,6 +112,7 @@ namespace ClaudeHand.Editor
                 token = _token,
                 pid = System.Diagnostics.Process.GetCurrentProcess().Id,
                 unity_version = Application.unityVersion,
+                version = PackageVersion(),
                 heartbeat_utc = DateTime.UtcNow.ToString("o"),
                 tools = DescribeTools(),
             };

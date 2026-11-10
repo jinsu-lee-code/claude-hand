@@ -29,9 +29,10 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from handlib.constants import VERSION  # noqa: E402
 from handlib.link import claude_hand_home  # noqa: E402
 
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = VERSION
 REGISTRY_FORMAT = "claude-hand/unity-bridge@1"
 DIALOG_POLL_SECONDS = 1.5  # while a call waits, how often to look for a dialog that stopped the editor
 

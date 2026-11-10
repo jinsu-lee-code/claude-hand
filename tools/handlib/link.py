@@ -21,6 +21,12 @@ def chat_home(env=os.environ) -> Path:
     return claude_hand_home(env) / "chat"
 
 
+def exchange_dir(env=os.environ) -> Path:
+    """Where Unity and Blender windows leave files for each other. The same rule as Claude Hand Tools (ChPaths) and
+    the Blender add-on: CLAUDE_HAND_EXCHANGE_DIR, else exchange/ in claude-hand's home folder."""
+    return Path(env.get("CLAUDE_HAND_EXCHANGE_DIR") or claude_hand_home(env) / "exchange")
+
+
 def read_chat_files(home: Path | None = None) -> tuple[dict | None, dict | None]:
     """(server.json, status.json) of the chat channel; None for one that is missing or unreadable."""
     home = home or chat_home()

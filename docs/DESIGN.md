@@ -358,6 +358,16 @@ Windows에서 며칠 써 보며 더한 것들이다. 공통 원칙은 **토큰�
 
 TEST-PLAN 12에서 확인된 뒤 위의 "하나로 정리한 방식"으로 만들었다. 사용자와 정한 것: 모드는 하나, Remote Control 기본 켜짐, 현재 상황 공유, 데스크톱 앱에서 시킨 일을 채팅창에도 기록, 처음 대화할 때 자동 시작(컴퓨터를 켤 때 자동 실행은 하지 않음), 데스크톱 앱의 아무 Code 탭 세션에서 "Claude Hand 켜줘". 바뀐 점 하나: 창을 처음부터 최소화로 열기로 했었지만, 개발용 채널 경고가 켤 때마다 떠서 사용자가 그 창에서 답해야 한다. 그래서 보이게 열고 쓰기 시작하면 최소화한다(가정 22).
 
+## 배포와 설치 (2026-11-10 개편)
+
+- **버전은 한 곳.** 저장소 루트의 `VERSION`이 원본이다. 채널 서버와 통로 서버는 그것을 읽는다. Unity 패키지(`package.json`)와 Blender 애드온(`bl_info`)은 체크아웃 밖으로 복사돼 쓰이므로 같은 번호를 적어 두고, 테스트가 같은지 확인한다. 전에는 네 곳이 따로였다(0.1.0 셋, 애드온 0.7.1). Unity 통로의 등록 파일에도 패키지 버전이 들어가서 `selftest`가 "예전 컴파일"을 버전으로도 잡는다.
+- **Claude Hand Tools를 어디서 받는가.** 처음에는 늘 이 체크아웃의 폴더 경로(`file:C:/…`)를 프로젝트의 `Packages/manifest.json`에 적었다. 그러면 그 프로젝트는 다른 PC에서 열리지 않고, 이 PC에서는 작업 중인 코드가 열린 프로젝트 전부에 바로 컴파일된다(REVIEW-2026-11-10의 2번). 지금은 `unity-install`이 고른다.
+  - 이 체크아웃이 정확히 `v<VERSION>` 태그면 GitHub 주소(`…claude-hand.git?path=/unity/com.claudehand.tools#v<VERSION>`)로 넣는다.
+  - 그 밖의 체크아웃(브랜치 끝, 고치는 중)이면 폴더 경로로 넣고, 그 프로젝트가 이 PC에서만 열린다고 알린다. GitHub 주소로 넣으면 지금 코드와 다른 코드를 받게 되기 때문이다.
+  - `--release`와 `--folder`로 정해 줄 수도 있다. 태그가 GitHub에 올라가기 전에는 `--release`로 넣은 프로젝트가 패키지를 받지 못한다.
+- **교환 폴더는 하나의 규칙으로 찾고, 오래된 것은 지운다.** `CLAUDE_HAND_EXCHANGE_DIR`, 없으면 claude-hand 홈(`CLAUDE_HAND_HOME` 또는 `~/.claude-hand`)의 `exchange`다. Python, Unity 패키지, Blender 애드온이 같은 규칙을 쓴다(전에는 Unity와 Blender가 `CLAUDE_HAND_HOME`을 보지 않았다). 옮긴 파일은 사본이라 시작할 때(`preflight`) 30일 넘은 것을 지운다. claude-hand가 쓰는 종류(`.unitypackage`, `.blend`, `.fbx`, manifest, 캡처)이고 폴더 바로 아래에 있는 파일만 지운다. `config.json`의 `exchange_keep_days`로 바꾸고 0이면 지우지 않는다.
+- **자동 테스트.** `.github/workflows/tests.yml`이 Windows·Linux, Python 3.10·3.13에서 돌린다. 3.10에서 돌려 보니 스크립트가 약속한 `requires-python >=3.10`이 지켜지지 않고 있었다(f-string 안의 역슬래시는 3.12부터). 3.12에서는 "무엇이 먼저 일어났나"를 시각으로 비교하던 곳이 틀렸다: Windows의 Python 3.13 전 시계는 15ms쯤씩 움직여서 메시지와 그 직후의 동작이 같은 시각이 된다. 그런 비교는 시각이 아니라 항목 번호(`seq`)로 한다.
+
 ## 다음 단계 (2단계 후보)
 
 - **세션 간 직접 대화:** Claude Code 에이전트 팀(실험 기능)을 쓰거나 Channels로 감독을 거치지 않고 메시지를 주고받는다. 지금은 감독이 중계한다.

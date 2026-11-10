@@ -1,0 +1,25 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    # The Python tests need nothing installed: no uv, Unity, Blender or Claude Code. Tests that need Blender's bpy
+    # skip themselves here; `claude_hand.py selftest` runs those inside a real Blender on a PC that has one.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        python: ["3.10", "3.13"]  # the oldest the scripts promise (requires-python), and a current one
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Tests
+        run: python -m unittest discover -s tools/tests
+      - name: Every script still parses on this Python
+        run: python -m compileall -q tools blender

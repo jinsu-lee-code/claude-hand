@@ -137,10 +137,39 @@ def follows_a_branch(git_url: str) -> bool:
     return not re.fullmatch(r"v?\d+(\.\d+)+\S*|[0-9a-f]{7,40}", ref)
 
 
+def find_git(env=os.environ, platform=sys.platform, which=shutil.which) -> str | None:
+    """git, also where the Windows installer puts it when it is not on this process's PATH."""
+    found = which("git")
+    if found or platform != "win32":
+        return found
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        candidate = Path(env.get(var) or "") / ("Programs/Git/cmd/git.exe" if var == "LOCALAPPDATA" else "Git/cmd/git.exe")
+        if env.get(var) and candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def released_checkout(root: Path = constants.REPO_ROOT, run=subprocess.run, git=None) -> bool:
+    """This checkout is exactly the release its VERSION names (git tag v<VERSION>). Projects can then take Claude
+    Hand Tools from GitHub at that tag; from any other checkout that address would give them different code."""
+    git = git if git is not None else find_git()
+    if not git:
+        return False
+    try:
+        proc = run([git, "-C", str(root), "describe", "--exact-match", "--tags", "HEAD"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and proc.stdout.strip() == f"v{constants.VERSION}"
+
+
 def plan_unity_install(project: Path, mcp_for_unity: bool = True, claude_hand: bool = True,
-                       package_dir: Path = constants.CLAUDE_HAND_PACKAGE_DIR, pin_mcp_for_unity: bool = False) -> tuple[ManifestPlan, dict | None]:
+                       package_dir: Path = constants.CLAUDE_HAND_PACKAGE_DIR, pin_mcp_for_unity: bool = False,
+                       source: str = "auto", released=released_checkout) -> tuple[ManifestPlan, dict | None]:
     """What unity-install would change, plus the new manifest (None when nothing changes).
-    pin_mcp_for_unity: also move an MCP for Unity that follows a branch to the release claude-hand was tested with."""
+    pin_mcp_for_unity: also move an MCP for Unity that follows a branch to the release claude-hand was tested with.
+    source: where Claude Hand Tools comes from. "release": GitHub at this version's tag, which opens on any PC.
+    "folder": this checkout by its path, for working on claude-hand itself; the project's manifest then names a
+    folder of this PC. "auto": release when this checkout is that release, else folder."""
     plan = ManifestPlan(project=str(project))
     if not is_unity_project(project):
         raise SystemExit(f"{project} is not a Unity project (needs Assets/ and ProjectSettings/).")
@@ -165,13 +194,18 @@ def plan_unity_install(project: Path, mcp_for_unity: bool = True, claude_hand: b
             deps[constants.MCP_FOR_UNITY_PACKAGE] = constants.MCP_FOR_UNITY_GIT_URL
             plan.changes.append(f"add {constants.MCP_FOR_UNITY_PACKAGE}: {constants.MCP_FOR_UNITY_GIT_URL} (Unity fetches it with git)")
     if claude_hand:
-        wanted = "file:" + package_dir.resolve().as_posix()
+        from_release = source == "release" or (source == "auto" and released())
+        wanted = constants.CLAUDE_HAND_PACKAGE_GIT_URL if from_release else "file:" + package_dir.resolve().as_posix()
         current = deps.get(constants.CLAUDE_HAND_PACKAGE)
         if current == wanted:
-            plan.notes.append("Claude Hand Tools is already installed from this folder.")
+            plan.notes.append(f"Claude Hand Tools is already installed ({'release ' + constants.VERSION if from_release else 'from this folder'}).")
         else:
             deps[constants.CLAUDE_HAND_PACKAGE] = wanted
             plan.changes.append(f"{'change' if current else 'add'} {constants.CLAUDE_HAND_PACKAGE}: {wanted}")
+        if not from_release:
+            plan.notes.append("Claude Hand Tools comes from this folder, so the project's manifest names a path on this PC and "
+                              "the project will not open elsewhere. For a project you share, install from a released "
+                              f"checkout (git tag v{constants.VERSION}) or with --release once that tag is on GitHub.")
     return plan, (manifest if plan.changes else None)
 
 

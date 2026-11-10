@@ -63,16 +63,15 @@ namespace ClaudeHand.Editor
 
         /// <summary>
         /// Shared folder where projects drop packages for each other.
-        /// Default: %USERPROFILE%/.claude-hand/exchange. Override with CLAUDE_HAND_EXCHANGE_DIR.
+        /// CLAUDE_HAND_EXCHANGE_DIR, else exchange/ in <see cref="ClaudeHandHome"/> (the same rule as tools/handlib/link.py
+        /// and the Blender add-on).
         /// </summary>
         public static string ExchangeDir
         {
             get
             {
                 var env = Environment.GetEnvironmentVariable("CLAUDE_HAND_EXCHANGE_DIR");
-                var dir = string.IsNullOrEmpty(env)
-                    ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude-hand", "exchange")
-                    : env;
+                var dir = string.IsNullOrEmpty(env) ? Path.Combine(ClaudeHandHome, "exchange") : env;
                 Directory.CreateDirectory(dir);
                 return dir;
             }

@@ -156,6 +156,9 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     if not skill.exists() or skill.read_text(encoding="utf-8") != agents.rendered_skill():
         agents.install_skill(Path.home() / ".claude" / "skills")
     config = launch.read_user_config(home)
+    cleaned, freed = launch.clean_exchange(launch.exchange_keep_days(config))
+    if cleaned:
+        print(f"교환 폴더에서 {launch.exchange_keep_days(config)}일 넘은 파일 {cleaned}개({freed / 1e6:.1f}MB)를 지웠습니다.")
     session_args, session, resumed = launch.supervisor_session(config)
     if config.get("supervisor_session") != session:
         config["supervisor_session"] = session
@@ -180,6 +183,24 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     if not marker.exists():
         print(launch.FIRST_RUN_GUIDE)
         marker.write_text(time.strftime("%Y-%m-%d %H:%M:%S"), encoding="utf-8")
+    return 0
+
+
+def cmd_clean_exchange(args: argparse.Namespace) -> int:
+    """Delete old transfer files from the exchange folder now (preflight does it on every start)."""
+    config = launch.read_user_config()
+    if args.keep_days is not None:
+        config["exchange_keep_days"] = args.keep_days
+        settings.write_json_files({link.claude_hand_home() / "config.json": config})
+        print(f"교환 폴더의 파일을 {args.keep_days}일 동안 둡니다." if args.keep_days else "교환 폴더를 자동으로 정리하지 않습니다.")
+    days = args.days if args.days is not None else launch.exchange_keep_days(config)
+    folder = link.exchange_dir()
+    if days <= 0:
+        print(f"{folder}: 자동 정리가 꺼져 있습니다. 지금 지우려면 --days N을 붙이세요.")
+        return 0
+    count, size = launch.clean_exchange(days, dry_run=args.dry_run)
+    print(f"{'(dry run) ' if args.dry_run else ''}{folder}: {days}일 넘은 파일 {count}개({size / 1e6:.1f}MB)"
+          + ("를 지울 수 있습니다." if args.dry_run else "를 지웠습니다."))
     return 0
 
 
@@ -415,7 +436,8 @@ def cmd_selftest(args: argparse.Namespace) -> int:
 def cmd_unity_install(args: argparse.Namespace) -> int:
     project = Path(args.project).expanduser().resolve()
     plan, manifest = install.plan_unity_install(project, mcp_for_unity=not args.no_mcp_for_unity, claude_hand=not args.no_claude_hand,
-                                        pin_mcp_for_unity=args.pin_mcp_for_unity)
+                                                pin_mcp_for_unity=args.pin_mcp_for_unity,
+                                                source="release" if args.release else "folder" if args.folder else "auto")
     for note in plan.notes:
         print(f"그대로: {note}")
     if manifest is None:
@@ -536,6 +558,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="claude_hand", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--version", action="version", version=f"claude-hand {constants.VERSION}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_list = sub.add_parser("list", help="show Unity editors MCP for Unity can see")
@@ -580,6 +603,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_ui.add_argument("--no-claude-hand", action="store_true", help="only add MCP for Unity")
     p_ui.add_argument("--pin-mcp-for-unity", action="store_true",
                       help=f"move an MCP for Unity that follows a branch (#main) to {constants.MCP_FOR_UNITY_TESTED}, the tested release")
+    how = p_ui.add_mutually_exclusive_group()
+    how.add_argument("--release", action="store_true",
+                     help=f"take Claude Hand Tools from GitHub at v{constants.VERSION} (default when this checkout is that release)")
+    how.add_argument("--folder", action="store_true",
+                     help="take Claude Hand Tools from this folder (default otherwise; the project then opens on this PC only)")
     p_ui.add_argument("--dry-run", action="store_true")
     p_ui.set_defaults(func=cmd_unity_install)
 
@@ -615,6 +643,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_pre.add_argument("--runner", default="uv run -q --no-project")
     p_pre.add_argument("--blender-ports", default=constants.DEFAULT_BLENDER_PORTS)
     p_pre.set_defaults(func=cmd_preflight)
+
+    p_ce = sub.add_parser("clean-exchange", help="delete old transfer files from the exchange folder (every start does this too)")
+    p_ce.add_argument("--days", type=int, help="delete files older than this many days now (default: the kept setting)")
+    p_ce.add_argument("--keep-days", type=int, help=f"how long every start keeps them from now on (default {launch.EXCHANGE_KEEP_DAYS}; 0: never clean)")
+    p_ce.add_argument("--dry-run", action="store_true")
+    p_ce.set_defaults(func=cmd_clean_exchange)
 
     p_mode = sub.add_parser("mode", help="(earlier versions) there is one mode now; clears an old setting")
     p_mode.add_argument("mode", nargs="?")

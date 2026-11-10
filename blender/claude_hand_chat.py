@@ -608,9 +608,10 @@ def _forget_undo_points(*_args):
 
 
 def exchange_dir():
-    """Where Unity and Blender windows leave files for each other: CLAUDE_HAND_EXCHANGE_DIR, or ~/.claude-hand/exchange
-    (the same rule as Claude Hand Tools in Unity)."""
-    path = os.environ.get("CLAUDE_HAND_EXCHANGE_DIR") or os.path.join(os.path.expanduser("~"), ".claude-hand", "exchange")
+    """Where Unity and Blender windows leave files for each other: CLAUDE_HAND_EXCHANGE_DIR, else exchange/ in
+    claude-hand's home folder (the same rule as Claude Hand Tools in Unity and tools/handlib/link.py)."""
+    home = os.environ.get("CLAUDE_HAND_HOME") or os.path.join(os.path.expanduser("~"), ".claude-hand")
+    path = os.environ.get("CLAUDE_HAND_EXCHANGE_DIR") or os.path.join(home, "exchange")
     os.makedirs(path, exist_ok=True)
     return path
 

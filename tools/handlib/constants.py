@@ -10,6 +10,10 @@ from pathlib import Path
 # This checkout
 TOOLS_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = TOOLS_DIR.parent
+# One version for everything in the repository. The Unity package (package.json) and the Blender add-on (bl_info)
+# are copied out of the checkout, so they carry the same number written out; a test keeps them equal.
+VERSION = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+REPO_GIT_URL = "https://github.com/jinsu-lee-code/claude-hand.git"
 TOOL_PATH = TOOLS_DIR / "claude_hand.py"
 GUARD_SCRIPT = TOOLS_DIR / "guard.py"
 CHAT_CHANNEL_SCRIPT = TOOLS_DIR / "chat_channel.py"
@@ -33,6 +37,7 @@ MCP_FOR_UNITY_GIT_URL = f"https://github.com/CoplayDev/unity-mcp.git?path=/MCPFo
 # Claude Hand Tools (the Unity package)
 CLAUDE_HAND_PACKAGE = "com.claudehand.tools"
 CLAUDE_HAND_PACKAGE_DIR = REPO_ROOT / "unity" / CLAUDE_HAND_PACKAGE
+CLAUDE_HAND_PACKAGE_GIT_URL = f"{REPO_GIT_URL}?path=/unity/{CLAUDE_HAND_PACKAGE}#v{VERSION}"  # what a released checkout installs
 
 # MCP for Blender and the chat add-on
 BLENDER_PACKAGE_HINTS = ("mcp-for-blender", "blender-mcp")

@@ -14,11 +14,11 @@ Unity·Blender 안의 채팅창 ──(claude-hand-chat 채널)──┐
  ├─ 하위 세션 unity-mygame      ── 전용 MCP 서버 (MyGame에 고정)  ── Unity 창: MyGame
  ├─ 하위 세션 unity-props       ── 전용 MCP 서버 (Props에 고정)   ── Unity 창: Props
  ├─ 하위 세션 blender-character ── 전용 MCP 서버 (포트 9876 고정) ── Blender 창: character.blend
- └─ 교환 폴더 %USERPROFILE%\.claude-hand\exchange  (.unitypackage / .blend / .fbx + manifest)
+ └─ 교환 폴더 %USERPROFILE%\.claude-hand\exchange  (.unitypackage / .blend / .fbx + manifest, 30일 지나면 켤 때 정리)
 ```
 
-> 상태: **0.1 시제품.** C# 코드는 Unity API 스텁으로 컴파일만 확인했고, 실제 Unity·Blender에서는 아직 실행하지 않았습니다.
-> [docs/TEST-PLAN.md](docs/TEST-PLAN.md)의 순서대로 확인해 주세요.
+> 상태: **0.8.0.** Windows의 실제 Unity 6.3과 Blender 5.2에서 써 가며 확인했습니다([12단계](docs/TEST-RESULTS-12-WINDOWS.md), [13~21단계](docs/TEST-RESULTS-13-WINDOWS.md)). macOS·Linux에서는 자동 테스트만 돌렸습니다.
+> 2026-11-10의 구조 개편([점검](docs/REVIEW-2026-11-10.md)) 뒤로는 자동 테스트와 Unity 컴파일까지 확인했고, 열린 Unity·Blender 창에서의 확인은 [TEST-PLAN](docs/TEST-PLAN.md) 22단계에 있습니다.
 
 ## 매일 쓰는 법
 
@@ -51,6 +51,7 @@ Claude Hand는 기본으로 Claude Code의 **Remote Control**로 열립니다. �
 ```powershell
 uv run tools/claude_hand.py remote-control off   # 데스크톱 앱에서 보기 끄기 (on으로 다시 켜기)
 uv run tools/claude_hand.py minimize off         # Claude Hand 창 자동 최소화 끄기
+uv run tools/claude_hand.py clean-exchange --keep-days 30   # 교환 폴더의 옮긴 파일을 며칠 둘지 (기본 30일, 0이면 지우지 않음)
 ```
 
 알아둘 점:
@@ -273,11 +274,8 @@ Blender 쪽 일은 MCP for Blender의 Python 실행 도구(`execute_code`)로 �
 
 ## 알려진 한계
 
-- 실제 Unity·Blender에서 아직 검증하지 않았습니다. 특히 다음은 직접 확인이 필요합니다.
-  - Windows에서 창을 최소화한 상태로 명령이 처리되는지
-  - 하위 세션 전용 MCP 서버의 도구 이름 형식
-  - 패키지 가져오기
-  - `blender-open`의 포트 지정
+- 작업 표시줄 알림, 한글 입력창, 대화상자 감지, Claude Hand 창 자동 최소화는 Windows에서만 됩니다. macOS·Linux에서는 실제 창으로 확인하지 않았습니다.
+- 개발 중인 체크아웃에서 `unity-install`을 하면 Claude Hand Tools가 이 PC의 폴더 경로(`file:`)로 들어가서, 그 프로젝트는 다른 PC에서 열리지 않습니다. 릴리스 태그(`v0.8.0`)를 받은 체크아웃에서는 GitHub 주소로 들어갑니다. `unity-install --dry-run`이 어느 쪽인지 알려 줍니다.
 - 내보내는 스크립트가 asmdef에 속해 있어도 asmdef는 같이 가지 않습니다. 받는 쪽에서는 기본 어셈블리로 컴파일됩니다.
 - `Packages/` 안의 에셋(URP 셰이더 등)은 `.unitypackage`에 들어가지 않습니다. 받는 프로젝트에 같은 패키지가 있어야 하고, dry run의 `missing_packages`에 표시됩니다.
 - 같은 프로젝트나 같은 Blender 창에 하위 세션 둘을 동시에 붙이면 안 됩니다. 명령이 하나씩 처리되기 때문입니다. 감독 스킬에 이 규칙이 들어 있고, Claude Hand가 켜져 있는 동안에는 안전장치가 나중에 온 하위 세션의 호출을 막습니다.
@@ -287,6 +285,7 @@ Blender 쪽 일은 MCP for Blender의 Python 실행 도구(`execute_code`)로 �
 ## 개발
 
 ```bash
-python -m unittest discover -s tools/tests -v     # 생성기·안전장치·세팅 도우미 테스트
+python -m unittest discover -s tools/tests -v     # Python 3.10 이상, 따로 설치할 것 없음
 ```
+GitHub에 올리면 같은 테스트가 Windows와 Linux, Python 3.10과 3.13에서 돕니다(`.github/workflows/tests.yml`). 버전은 저장소 루트의 `VERSION` 한 곳에서 정하고, Unity 패키지와 Blender 애드온에 적힌 번호가 같은지 테스트가 확인합니다.
 `tools/tests/test_blender_chat_addon.py`는 Blender 애드온(채팅, 되돌리기, .blend 보내기·받기, FBX 내보내기)을 실제 Blender 안에서 실행합니다. 위 명령으로는 건너뛰고(Python에 `bpy`가 없으므로), `uv run tools/claude_hand.py selftest`가 설치된 Blender를 화면 없이 띄워 돌립니다.

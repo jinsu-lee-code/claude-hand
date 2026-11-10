@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -29,6 +30,49 @@ def write_user_config(home: Path | None = None, root: Path = constants.REPO_ROOT
 
 def read_user_config(home: Path | None = None) -> dict:
     return settings.read_json_file((home or link.claude_hand_home()) / "config.json")
+
+
+EXCHANGE_KEEP_DAYS = 30
+EXCHANGE_PATTERNS = ("*.unitypackage", "*.blend", "*.blend1", "*.fbx", "*.claudehand.json", "capture-*.png")
+
+
+def exchange_keep_days(config: dict) -> int:
+    """config.json "exchange_keep_days": how long transfer files stay in the exchange folder (0: never cleaned)."""
+    value = config.get("exchange_keep_days", EXCHANGE_KEEP_DAYS)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else EXCHANGE_KEEP_DAYS
+
+
+def old_exchange_files(days: int, folder: Path | None = None, now: float | None = None) -> list[Path]:
+    """Transfer files in the exchange folder older than `days`. They are copies: what was sent is in the source
+    project or .blend, and what was received was copied into the target. Only the kinds claude-hand writes there, and
+    only files directly in the folder, so a folder the user shares with other things is left alone otherwise."""
+    folder = folder or link.exchange_dir()
+    if days <= 0 or not folder.is_dir():
+        return []
+    cutoff = (now or time.time()) - days * 86400
+    found = []
+    for pattern in EXCHANGE_PATTERNS:
+        for path in folder.glob(pattern):
+            try:
+                if path.is_file() and path.stat().st_mtime < cutoff:
+                    found.append(path)
+            except OSError:
+                continue
+    return sorted(set(found))
+
+
+def clean_exchange(days: int, folder: Path | None = None, now: float | None = None, dry_run: bool = False) -> tuple[int, int]:
+    """Delete them. (files, bytes) deleted, or that would be with dry_run."""
+    count = size = 0
+    for path in old_exchange_files(days, folder, now):
+        try:
+            length = path.stat().st_size
+            if not dry_run:
+                path.unlink()
+        except OSError:
+            continue
+        count, size = count + 1, size + length
+    return count, size
 
 
 def is_truthy(value: str | None) -> bool:

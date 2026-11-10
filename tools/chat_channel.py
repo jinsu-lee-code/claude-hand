@@ -53,11 +53,12 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from handlib.agents import AgentInfo, installed_agents, prompt_template, refresh_agents, slug  # noqa: E402
 from handlib.capture import capture_window  # noqa: E402
+from handlib.constants import VERSION  # noqa: E402
 from handlib.link import claude_hand_home, supervisor_running  # noqa: E402
 from unity_bridge import describe_dialogs, find_project, waiting_dialogs  # noqa: E402
 
 SERVER_NAME = "claude-hand-chat"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = VERSION
 DEFAULT_PORT = 8765
 PORT_ATTEMPTS = 10
 MAX_TEXT = 8000
@@ -160,8 +161,10 @@ class ChatHub:
         self.history_dir: Path | None = None  # where each chat's recent messages are kept across restarts
         self.progress: dict[str, dict] = {}  # chat_id -> what its subagent is doing now (shown as a bar in the panel)
         self.progress_rev: dict[str, int] = {}  # bumped on every change, so a waiting panel wakes up
-        self.acted: dict[str, float] = {}  # chat_id -> when its window's subagent last worked for a request made elsewhere
-        self.previewed: dict[str, float] = {}  # chat_id -> when its replies last looked for other windows to show
+        # "Before" and "after" below are counted in items (self.seq), not timed: on Windows before Python 3.13 the
+        # clock moves in steps of about 15 ms, and a message and the work it starts can fall into the same step.
+        self.acted: dict[str, int] = {}  # chat_id -> the item count when its window's subagent last worked for a request made elsewhere
+        self.previewed: dict[str, int] = {}  # chat_id -> the item count when its replies last looked for other windows to show
         self.capture = None  # callable(app, pin, path) -> path or None: a picture of what a window shows now
         self.images_dir: Path | None = None  # where result previews are kept (None: no previews)
         self.find_dialogs = None  # callable(app, pin) -> the dialogs that stop that window now ([] for none)
@@ -290,10 +293,10 @@ class ChatHub:
         get each other's pictures. Called with the lock held."""
         if self.capture is None or self.images_dir is None:
             return []
-        asked = max((i["ts"] for i in self.logs.get(chat_id, []) if i.get("kind") == "user"), default=0.0)
-        since = max(asked, self.previewed.get(chat_id, 0.0))
-        self.previewed[chat_id] = time.time()
-        return sorted(other for other, when in self.acted.items() if other != chat_id and when > since)
+        asked = max((i["seq"] for i in self.logs.get(chat_id, []) if i.get("kind") == "user"), default=0)
+        since = max(asked, self.previewed.get(chat_id, 0))
+        self.previewed[chat_id] = self.seq
+        return sorted(other for other, when in self.acted.items() if other != chat_id and when >= since)
 
     def _attach_previews(self, chat_id: str, others: list[str]) -> None:
         """Background thread: capture each window and add the picture to the chat (no Claude involved, no tokens)."""
@@ -302,7 +305,8 @@ class ChatHub:
             agent = agents.get(other)
             if agent is None:
                 continue
-            path = self.images_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{re.sub(r'[^\w.-]', '_', other)}.png"
+            safe_name = re.sub(r"[^\w.-]", "_", other)
+            path = self.images_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{safe_name}.png"
             try:
                 self.images_dir.mkdir(parents=True, exist_ok=True)
                 captured = self.capture(agent.app, agent.pin, str(path))
@@ -363,7 +367,7 @@ class ChatHub:
                 if request is None or request["ts"] < self.started or self.reminded.get(chat_id) == request["seq"]:
                     continue
                 heard = max(i["ts"] for i in self.logs[chat_id] if i["seq"] >= request["seq"] and i.get("kind") in ("user", "reply"))
-                worked = last_work > request["ts"]
+                worked = last_work >= request["ts"]
                 if now - max(heard, last_work if worked else 0.0) < (ANSWER_GRACE if worked else STALL_SECONDS):
                     continue
                 self.reminded[chat_id] = request["seq"]
@@ -536,7 +540,7 @@ class ChatHub:
                 worker.update(last=now, stopped=0.0)
             own = self._open_request(agent.name)
             if not own:  # its own panel waits on nothing: the work was asked in another window, whose reply may show it
-                self.acted[agent.name] = now
+                self.acted[agent.name] = self.seq
             entry = self._progress_entry(agent.name, now)
             first = not entry.get("marked")
             entry.update(tool=tool[:80], detail=detail[:120], actions=entry["actions"] + 1, updated=now, marked=True)
