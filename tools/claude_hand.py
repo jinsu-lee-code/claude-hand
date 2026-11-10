@@ -175,7 +175,14 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     if config.get("supervisor_session") != session:
         config["supervisor_session"] = session
         settings.write_json_files({home / "config.json": config})
-    constants.LAUNCH_ARGS_FILE.write_text(" ".join([*session_args, launch.launch_args(config)]).strip() + "\n", encoding="utf-8")
+    # The supervisor's own hook (whose request is the work it hands out for), in a settings file only this session gets.
+    # "supervisor_hook": false in config.json starts without it: the channel then guesses, as it did before the hook.
+    hook_settings = constants.LAUNCH_ARGS_FILE.with_name(".launch-settings.json")
+    hooked = config.get("supervisor_hook", True) is not False
+    settings.write_json_files({hook_settings: agents.supervisor_settings(args.runner) if hooked else {}})
+    constants.LAUNCH_ARGS_FILE.write_text(" ".join(filter(None, [*session_args, launch.launch_args(config),
+                                                                 f'--settings "{hook_settings.as_posix()}"' if hooked else ""])) + "\n",
+                                          encoding="utf-8")
     inherited = launch.inherited_session_env()
     constants.LAUNCH_ARGS_FILE.with_name(".launch-unset").write_text("".join(f"{name}\n" for name in inherited), encoding="utf-8")
     print(launch.BANNER)

@@ -64,6 +64,7 @@ class BlenderChatAddonTests(unittest.TestCase):
     def tearDown(self):
         self.addon.unregister()
         self.httpd.shutdown()
+        self.httpd.server_close()  # or its port stays taken until the server object is collected, and the next tests run out of ports
         os.environ.pop("CLAUDE_HAND_HOME", None)
         self.tmp.cleanup()
 
@@ -74,6 +75,7 @@ class BlenderChatAddonTests(unittest.TestCase):
         bpy.context.window_manager.claude_hand_chat_input = "큐브 하나 추가해줘"  # Enter in the field sends it
         self.assertTrue(wait_for(lambda: self.emitted, addon))
         note = self.emitted[0]["params"]
+        self.assertRegex(note["meta"].pop("request"), r"^\d{4}-\d{6}-\d+$")  # the id the supervisor puts on the work it hands out
         self.assertEqual(note["meta"], {"chat_id": "blender-props", "app": "blender", "window": "props", "agent": "blender-props"})
         self.assertIn("큐브 하나 추가해줘", note["content"])
         self.assertIn("파일:", note["content"])

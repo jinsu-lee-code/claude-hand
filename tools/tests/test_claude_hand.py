@@ -1256,8 +1256,20 @@ class RemoteControlTests(unittest.TestCase):
                 runner = EverydayStartTests()
                 _, text, _, _ = runner.run_preflight(tmp)
                 session = handlib.launch.read_user_config(home)["supervisor_session"]  # no earlier Claude Hand conversation here
+                hook_settings = Path(tmp) / ".launch-settings.json"
                 self.assertEqual((Path(tmp) / ".launch-args").read_text(encoding="utf-8").strip(),
-                                 f"--session-id {session} " + handlib.launch.launch_args({"remote_control": True}))
+                                 f"--session-id {session} " + handlib.launch.launch_args({"remote_control": True}) +
+                                 f' --settings "{hook_settings.as_posix()}"')
+                # Only the supervisor gets this hook: it tells the chat channel whose request each hand-out is for.
+                [hook] = json.loads(hook_settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
+                self.assertEqual(hook["matcher"], "Agent|Task|SendMessage")
+                self.assertIn(f'"{handlib.constants.SUPERVISOR_HOOK_SCRIPT.as_posix()}"', hook["hooks"][0]["command"])
+                # The way out if that hook ever stands in the supervisor's way: config.json says to start without it.
+                config = handlib.launch.read_user_config(home)
+                handlib.settings.write_json_files({home / "config.json": {**config, "supervisor_hook": False}})
+                runner.run_preflight(tmp)
+                self.assertNotIn("--settings", (Path(tmp) / ".launch-args").read_text(encoding="utf-8"))
+                handlib.settings.write_json_files({home / "config.json": config})
                 ch.main(["remote-control", "off"])
                 self.assertFalse(handlib.launch.read_user_config(home)["remote_control"])
         self.assertIn("Code 탭", text)

@@ -77,6 +77,9 @@ class HubTests(unittest.TestCase):
         self.assertEqual(result, {"chat_id": "unity-mygame", "agent": "unity-mygame", "delivered": True})
         note = self.emitted.messages[-1]
         self.assertEqual(note["method"], "notifications/claude/channel")
+        request = note["params"]["meta"].pop("request")  # the id the supervisor puts on the work it hands out for this message
+        self.assertRegex(request, r"^\d{4}-\d{6}-\d+$")
+        self.assertEqual(self.hub.logs["unity-mygame"][-1]["request"], request)
         self.assertEqual(note["params"]["meta"], {"chat_id": "unity-mygame", "app": "unity", "window": "MyGame", "agent": "unity-mygame"})
         self.assertTrue(all(k.isidentifier() for k in note["params"]["meta"]))  # hyphenated keys are dropped by Claude Code
         self.assertIn("큐브 만들어줘", note["params"]["content"])
@@ -566,6 +569,20 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual((image["window"], self.shots), ("Level", [("unity", "Level@bbbb2222")]))
         self.assertEqual(self.images("unity-mygame", 0), [])
 
+    def test_with_two_panels_waiting_the_hand_out_says_whose_work_a_third_window_does(self):
+        write_agents(Path(self.tmp.name) / "agents", [handlib.discovery.Instance(name="Level", hash="bbbb2222")])
+        self.hub.post_user_message("unity", "MyGame", "큐브를 빨갛게", pin="MyGame@aaaa1111")
+        self.hub.post_user_message("blender", "props", "의자를 Level로 보내줘", pin="props@9877")
+        self.hub.assign("unity-level", self.hub.logs["blender-props"][-1]["request"])  # the supervisor's hook: [요청 …]
+        self.hub.report_action("unity", "MyGame@aaaa1111", "manage_material", "red")
+        self.hub.report_action("unity", "Level@bbbb2222", "ch_import_model", "")
+        self.hub.reply("unity-mygame", "빨갛게 했어요")
+        time.sleep(0.3)
+        self.assertEqual(self.shots, [])
+        self.hub.reply("blender-props", "Level에 놓았어요")  # even from a supervisor that does not name the windows
+        [image] = self.images("blender-props")
+        self.assertEqual((image["window"], self.shots), ("Level", [("unity", "Level@bbbb2222")]))
+
     def test_what_the_supervisor_names_goes_before_what_the_channel_saw(self):
         self.hub.post_user_message("blender", "props", "의자를 Unity로 보내줘", pin="props@9877")
         self.hub.report_action("unity", "MyGame@aaaa1111", "ch_import_model", "")
@@ -889,8 +906,8 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(note["method"], "notifications/claude/channel")
         self.assertTrue(note["params"]["content"].startswith("[claude-hand] "))
         self.assertIn("큐브 만들어줘", note["params"]["content"])
-        self.assertEqual(note["params"]["meta"], {"chat_id": "unity-mygame", "app": "unity", "window": "MyGame",
-                                                  "agent": "unity-mygame", "reminder": "unanswered"})
+        self.assertEqual(note["params"]["meta"], {"chat_id": "unity-mygame", "app": "unity", "window": "MyGame", "agent": "unity-mygame",
+                                                  "request": self.hub.logs["unity-mygame"][0]["request"], "reminder": "unanswered"})
         self.assertEqual(self.hub.updates("unity-mygame", 0, 0)[-1]["kind"], "notice")  # the user sees it was chased
         self.assertEqual(self.reminded(cc.STALL_SECONDS * 3), [])  # once per request
 
@@ -926,7 +943,7 @@ class WorkerTests(unittest.TestCase):
         self.assertIn(rules, skill)
         self.assertNotRegex(skill, r"\{\{\w+\}\}")
         for rule in ("`reply` 도구로", "`SendMessage`로", "`agent_id`", "`run_in_background`", "`working: true`", "`current_context`",
-                     '`"desktop"`', "[claude-hand]", "[중지]를 눌렀습니다", "`changed_windows`"):
+                     '`"desktop"`', "[claude-hand]", "[중지]를 눌렀습니다", "`changed_windows`", "`[요청 <번호>]`", "`[요청 없음]`"):
             self.assertIn(rule, rules)
 
     # ------------------------------------------------------------------ 중지
@@ -993,6 +1010,75 @@ class WorkerTests(unittest.TestCase):
         self.hub.reply("unity-mygame", "만들었어요")
         self.assertEqual([e["request"] for e in events if e["event"] in ("action", "stopped", "reply")], [mine] * 4)
         self.assertNotEqual(mine, props)
+
+    # ------------------------------------------------------------------ whose request (the supervisor's hook says)
+
+    def request_of(self, chat_id):
+        return next(i["request"] for i in reversed(self.hub.logs[chat_id]) if i["kind"] == "user")
+
+    def test_the_supervisor_says_whose_request_a_windows_work_is_for(self):
+        events = []
+        self.hub.events = lambda event, **fields: events.append({"event": event, **fields})
+        self.hub.post_user_message("unity", "MyGame", "큐브 백 개 만들어줘")
+        self.hub.post_user_message("blender", "props", "의자를 Props로 보내줘", pin="props@9877")
+        theirs = self.request_of("blender-props")
+        # Two panels wait: by itself the channel cannot tell whose work Props is about to do.
+        self.assertEqual(self.hub.assign("unity-props", theirs), {"ours": True, "chat_id": "unity-props", "asker": "blender-props"})
+        action = self.act("ccc", pin="Props@bbbb2222")
+        self.assertEqual((action["new_request"], action["label"]), (True, "의자를 Props로 보내줘"))  # the undo point names it
+        self.assertEqual(self.hub.acted["unity-props"], {"blender-props": self.hub.seq})
+        self.assertEqual([e["request"] for e in events if e["event"] in ("assigned", "action")], [theirs, theirs])
+        self.stop()  # MyGame's 중지 leaves that work alone
+        self.assertNotIn("stop", self.act("ccc", pin="Props@bbbb2222"))
+        self.hub.request_stop("blender", "props", "props@9877")  # the asking panel's does not
+        self.assertEqual(self.act("ccc", pin="Props@bbbb2222")["by"], "blender-props")
+        # ... and no more of that request is handed out
+        self.assertEqual(self.hub.assign("unity-props", theirs), {"ours": True, "chat_id": "unity-props", "stop": True})
+
+    def test_a_hand_out_names_a_window_or_a_subagent_that_worked_there_and_ends_when_it_stops(self):
+        self.hub.post_user_message("unity", "MyGame", "큐브 만들어줘")
+        mine = self.request_of("unity-mygame")
+        self.assertEqual(self.hub.assign("general-purpose", mine), {"ours": False})  # not a window's subagent
+        self.assertEqual(self.hub.assign("ccc", mine), {"ours": False})  # an id no window's subagent has reported
+        self.assertEqual(self.hub.assign("unity-props", None), {"ours": True, "chat_id": "unity-props", "missing": True})  # no tag
+        self.assertEqual(self.hub.assign("unity-props", "0101-000000-9"), {"ours": True, "chat_id": "unity-props", "unknown": True})
+        self.assertEqual(self.hub.assigned, {})
+        self.act("ccc", pin="Props@bbbb2222")  # not told: one panel waits, so the channel takes it for MyGame's
+        self.hub.agent_stopped("unity", "Props@bbbb2222", "ccc")
+        self.stop()
+        self.assertEqual(self.act("ccc", pin="Props@bbbb2222")["by"], "unity-mygame")
+        self.hub.agent_stopped("unity", "Props@bbbb2222", "ccc")
+        # Resumed with SendMessage, the hook only has the subagent's id. [요청 없음]: asked in the terminal or the Claude app.
+        self.assertEqual(self.hub.assign("ccc", ""), {"ours": True, "chat_id": "unity-props", "asker": ""})
+        action = self.act("ccc", pin="Props@bbbb2222")  # nobody's panel request: MyGame's 중지 does not reach it
+        self.assertEqual((action.get("stop"), action["label"]), (None, ""))
+        self.hub.agent_stopped("unity", "Props@bbbb2222", "ccc")
+        self.assertEqual(self.hub.assigned, {})  # that hand-out is over; the next one says anew whose it is
+        self.assertEqual(self.act("ccc", pin="Props@bbbb2222")["by"], "unity-mygame")
+
+    def test_a_hand_out_whose_subagent_never_said_it_stopped_does_not_hold_forever(self):
+        self.hub.post_user_message("unity", "MyGame", "큐브 만들어줘")
+        self.hub.assign("unity-props", "")
+        self.hub.assigned["unity-props"]["ts"] -= cc.PROGRESS_TTL + 1
+        self.assertEqual(self.act("ccc", pin="Props@bbbb2222")["label"], "큐브 만들어줘")  # back to the channel's own guess
+        self.assertEqual(self.hub.assigned, {})
+
+    def test_assign_over_http(self):
+        httpd = cc.start_http(self.hub, "t", port=18796)
+        try:
+            def post(body):
+                req = urllib.request.Request(f"http://127.0.0.1:{httpd.server_address[1]}/v1/assign", data=json.dumps(body).encode("utf-8"),
+                                             method="POST", headers={"X-Claude-Hand-Token": "t", "Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    return json.loads(response.read())
+            self.hub.post_user_message("unity", "MyGame", "큐브 만들어줘")
+            self.assertEqual(post({"target": "unity-mygame"}), {"ok": True, "ours": True, "chat_id": "unity-mygame", "missing": True})
+            self.assertEqual(post({"target": "unity-mygame", "request": self.request_of("unity-mygame")}),
+                             {"ok": True, "ours": True, "chat_id": "unity-mygame", "asker": "unity-mygame"})
+            self.assertEqual(post({"target": "Explore", "request": ""}), {"ok": True, "ours": False})
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
 
     def test_stop_does_not_outlast_a_supervisor_that_never_answers(self):
         self.hub.post_user_message("unity", "MyGame", "큐브 만들어줘")

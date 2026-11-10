@@ -7,3 +7,4 @@ Thumbs.db
 /.claude/settings.local.json
 /.launch-args
 /.launch-unset
+/.launch-settings.json

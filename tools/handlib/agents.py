@@ -74,6 +74,14 @@ def hook_command(runner: str, pin: str, key: str, transport: str, app: str = "un
             f'--transport {transport} --app {app}')
 
 
+def supervisor_settings(runner: str) -> dict:
+    """What the supervisor's Claude Code gets on top of its own settings (start-supervisor passes the file with
+    --settings, so no other session opened in this folder gets it): the hook on handing work to a subagent, which
+    tells the chat channel whose request that work is for (tools/supervisor_hook.py)."""
+    command = f'{resolved_runner(runner)} "{constants.SUPERVISOR_HOOK_SCRIPT.as_posix()}"'
+    return {"hooks": {"PreToolUse": [{"matcher": "Agent|Task|SendMessage", "hooks": [{"type": "command", "command": command}]}]}}
+
+
 def hook_block(command: str) -> list[str]:
     """PreToolUse: the guard decides on every Unity/Blender call. Stop: the same script tells the chat channel the
     subagent finished its turn (Claude Code runs a subagent's Stop hook when that subagent stops)."""

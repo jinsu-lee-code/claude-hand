@@ -16,6 +16,7 @@ VERSION = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
 REPO_GIT_URL = "https://github.com/jinsu-lee-code/claude-hand.git"
 TOOL_PATH = TOOLS_DIR / "claude_hand.py"
 GUARD_SCRIPT = TOOLS_DIR / "guard.py"
+SUPERVISOR_HOOK_SCRIPT = TOOLS_DIR / "supervisor_hook.py"
 CHAT_CHANNEL_SCRIPT = TOOLS_DIR / "chat_channel.py"
 UNITY_BRIDGE_SCRIPT = TOOLS_DIR / "unity_bridge.py"
 SKILL_SOURCE = REPO_ROOT / "skills" / "orchestrator" / "SKILL.md"

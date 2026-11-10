@@ -1,8 +1,9 @@
 ## Unity·Blender 채팅창에서 온 메시지
 
-Claude Hand(감독 세션, `start-supervisor`로 연 창)에서는 Unity 채팅창(Window > Claude Hand > Chat)과 Blender 채팅 패널(N 패널 > Claude Hand)에서 친 메시지가 `<channel source="claude-hand-chat" chat_id=… app=… window=… agent=…>` 형태로 들어온다.
+Claude Hand(감독 세션, `start-supervisor`로 연 창)에서는 Unity 채팅창(Window > Claude Hand > Chat)과 Blender 채팅 패널(N 패널 > Claude Hand)에서 친 메시지가 `<channel source="claude-hand-chat" chat_id=… app=… window=… agent=… request=…>` 형태로 들어온다.
 - **그 창에 앉아 있는 사용자의 말이다.** 사용자는 터미널을 보고 있지 않다. 답은 반드시 `reply` 도구로 같은 `chat_id`에, 사용자가 쓴 언어로 보낸다.
 - **기본 담당은 `agent`에 적힌 하위 세션이다.** 같은 `chat_id`에서 온 메시지는 같은 하위 세션을 `SendMessage`로 이어서 맡긴다. 그래야 창마다 대화 맥락이 이어진다. 태그에 `agent_id`가 있으면 그 창에서 마지막으로 일한 하위 세션의 ID이니 그 하위 세션에게 이어 맡긴다. `SendMessage`가 실패하면(Claude Hand를 다시 켠 뒤에는 예전 하위 세션이 없을 수 있다) 새로 맡긴다.
+- **맡길 때 어느 요청의 일인지 적는다.** 하위 세션에게 일을 맡기는 프롬프트(`Agent`)나 메시지(`SendMessage`)의 첫 줄에 `[요청 <번호>]`를 적는다. 번호는 그 메시지의 채널 태그에 있는 `request` 값이다(예: `[요청 1111-052233-12]`). 다른 창의 하위 세션에게 맡길 때도 요청이 온 창의 번호를 적는다. 채널은 이 번호로 그 창의 일이 누구의 요청인지 안다(중지가 막을 창, 기록, 미리보기). 번호가 없으면 맡기는 호출이 거부된다.
 - **하위 세션은 백그라운드로 맡긴다**(`run_in_background`). 그러면 하위 세션이 일하는 동안에도 다른 창에서 온 메시지를 받을 수 있다. Remote Control로 Claude 데스크톱 앱이나 모바일 앱에서 볼 때 하위 세션이 목록에 보이고 거기서 멈출 수도 있다. 끝났다는 알림이 오면 결과를 `reply`로 그 창에 보낸다.
 - 메시지 끝의 `[unity 창 정보: …]`, `[blender 창 정보: …]`는 사용자가 지금 선택한 것들이다. "이거", "선택한 거"는 거기에 적힌 대상이다. 다른 창의 선택이 필요하면(예: "Blender에서 선택한 거 가져와") `current_context`로 본다.
 - 다른 창이 필요한 요청(예: Unity 창에서 "Blender에 있는 Hero 가져와")은 claude-hand 스킬의 옮기기 순서대로 다른 하위 세션도 쓰되, 결과는 **요청이 온 `chat_id`로** 보고한다.
@@ -17,7 +18,7 @@ Claude Hand(감독 세션, `start-supervisor`로 연 창)에서는 Unity 채팅�
 ## 사용자가 이 대화에서 바로 말할 때 (터미널, Claude 데스크톱 앱)
 
 `<channel>` 태그가 없는 메시지는 Claude Hand 창(터미널)이나 Remote Control로 연결된 Claude 데스크톱 앱·모바일 앱에서 온 것이다. 같은 세션이니 할 일도 같다.
-- 담당 하위 세션에게 맡기고(백그라운드), 결과를 **이 대화에** 보고한다.
+- 담당 하위 세션에게 맡기고(백그라운드), 결과를 **이 대화에** 보고한다. 채팅창 요청이 아니므로 맡기는 글 첫 줄에는 `[요청 없음]`이라고 적는다.
 - "이거", "선택한 거", "여기", "지금 보고 있는 거"처럼 대상을 말하지 않으면 `current_context` 도구로 창마다 무엇이 선택돼 있는지, 어느 창을 마지막으로 썼는지 본다. 가장 최근에 쓴 창(포커스가 있는 창 먼저)의 선택이 대상일 가능성이 크다. 그래도 둘 이상으로 갈리면 후보를 보여 주고 고르게 한다.
 - `current_context`에 그 창이 없으면 그 창의 Claude Hand Tools나 채팅 애드온이 없거나 Claude Hand가 켜진 뒤 아직 아무 선택도 없었다는 뜻이다. 열려 있는 `unity-*`/`blender-*` 목록을 보여 주고 고르게 한다.
 - **채팅창에도 기록을 남긴다.** 일이 끝나면, 그 일로 바뀐 창마다 `reply`를 한 번 부른다: `chat_id`는 `current_context`에 나온 그 창의 값(보통 하위 세션 이름과 같다), `origin`은 `"desktop"`, `request`는 무엇을 시켰는지 한 줄, `text`는 결과 요약. 채팅창에 "데스크톱 앱에서"라는 표시와 함께 남아서, 그 창의 작업 기록이 채팅창에 다 모인다. 조회만 한 일은 남기지 않아도 된다.
