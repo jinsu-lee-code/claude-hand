@@ -265,6 +265,15 @@ class BlenderChatAddonTests(unittest.TestCase):
         self.assertIsNotNone(addon.image_preview(entry["path"]))
         self.assertIsNone(addon.image_preview(str(Path(self.tmp.name) / "gone.png")))
 
+    def test_only_fresh_answers_to_this_window_call_the_user_back(self):
+        want, now = self.addon.wants_attention, 1000.0
+        self.assertTrue(want({"kind": "reply", "ts": now - 2}, now))
+        self.assertTrue(want({"kind": "permission", "ts": now}, now))  # work is waiting on the user
+        self.assertFalse(want({"kind": "reply", "ts": now - 120}, now))  # history shown again after a restart
+        self.assertFalse(want({"kind": "reply", "origin": "desktop", "ts": now}, now))  # asked in the Claude app
+        self.assertFalse(want({"kind": "user", "ts": now}, now))
+        self.assertFalse(want({"kind": "image", "ts": now}, now))  # comes with a reply that already called
+
     def test_lines_fit_the_sidebar(self):
         """Korean is about twice as wide as Latin text; a fixed character count overflowed into "..."."""
         addon = self.addon

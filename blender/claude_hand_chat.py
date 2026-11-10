@@ -11,7 +11,7 @@ Install: `uv run tools/claude_hand.py blender-install-chat` (or Preferences > Ad
 bl_info = {
     "name": "Claude Hand Chat",
     "author": "claude-hand",
-    "version": (0, 5, 0),
+    "version": (0, 6, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar (N) > Claude Hand",
     "description": "Chat with this Blender window's claude-hand subagent",
@@ -54,6 +54,7 @@ LABEL_HEADROOM = 1.2    # blf's width at the label size can come out a little na
 CHAR_PX = 6.0           # without blf: width of a narrow character at 11 px (wide ones such as Korean count twice)
 SHOWN_KINDS = ("user", "reply", "permission", "notice", "image")
 IMAGE_LINES = 8         # what a result preview counts for when the panel decides how much history fits
+ALERT_FRESH_SECONDS = 30.0  # older items (history shown again after a restart) never blink the taskbar
 UNDO_KEPT = 20          # undo points kept for the newest requests
 UNDO_PROP = "claude_hand_undo"  # on every scene: "<this run>:<newest undo point set before this state>"
 
@@ -417,7 +418,8 @@ def open_native_input():
     return True
 
 
-def _bring_to_front(pid):
+def _windows_of(pid):
+    """Windows: the visible top-level windows of a process, front first."""
     import ctypes
     from ctypes import wintypes
     user32 = ctypes.windll.user32
@@ -432,9 +434,53 @@ def _bring_to_front(pid):
         return True
 
     user32.EnumWindows(each, 0)
-    for hwnd in found[:1]:
+    return found
+
+
+def _bring_to_front(pid):
+    import ctypes
+    user32 = ctypes.windll.user32
+    for hwnd in _windows_of(pid)[:1]:
         user32.ShowWindow(hwnd, 9)  # SW_RESTORE
         user32.SetForegroundWindow(hwnd)
+
+
+# --------------------------------------------------------------------------- "done" alert (main thread)
+
+
+def wants_attention(item, now):
+    """A fresh reply to a request made here, or a permission prompt: worth calling the user back for. Not history shown
+    again after a restart, and not replies to work asked in the Claude app (the user is there)."""
+    if now - float(item.get("ts") or 0) > ALERT_FRESH_SECONDS:
+        return False
+    kind = item.get("kind")
+    return kind == "permission" or (kind == "reply" and item.get("origin") != "desktop")
+
+
+def flash_taskbar():
+    """Windows: blink Blender's taskbar button until Blender comes to the front, unless it is in front already (or
+    the user is typing in this panel's input box). Returns whether it blinked."""
+    if sys.platform != "win32":
+        return False
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    owner = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), ctypes.byref(owner))
+    box = _native_input[0]
+    if owner.value == os.getpid() or (box is not None and owner.value == box.pid):
+        return False
+    windows = _windows_of(os.getpid())
+    if not windows:
+        return False
+
+    class FlashInfo(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.UINT), ("hwnd", wintypes.HWND), ("dwFlags", wintypes.DWORD),
+                    ("uCount", wintypes.UINT), ("dwTimeout", wintypes.DWORD)]
+
+    info = FlashInfo(ctypes.sizeof(FlashInfo), windows[0], 0x3 | 0xC, 0, 0)  # FLASHW_ALL | FLASHW_TIMERNOFG
+    user32.FlashWindowEx(ctypes.byref(info))
+    return True
 
 
 def close_native_input():
@@ -574,6 +620,7 @@ def apply_event(event, payload):
         elif payload.get("delivered") is False:
             _status[0] = "Claude 세션이 아직 연결 중입니다. 잠시 뒤 답이 옵니다."
     elif event == "items":
+        now = time.time()
         for item in payload:
             if item.get("kind") == "permission_resolved":
                 for entry in _entries:
@@ -584,6 +631,8 @@ def apply_event(event, payload):
                 _last_user[0] = 0.0
             _entries.append(dict(item))
         del _entries[:-KEPT_ENTRIES]
+        if any(wants_attention(item, now) for item in payload):
+            flash_taskbar()
 
 
 def tick():

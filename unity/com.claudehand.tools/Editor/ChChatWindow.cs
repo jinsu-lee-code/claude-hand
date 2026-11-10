@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
+using UnityEditorInternal;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
@@ -28,6 +29,7 @@ namespace ClaudeHand.Editor
         private const int ShownStep = 40;     // entries drawn per page: IMGUI lays out every drawn label each frame
         private const int ShownChars = 1500;  // longer messages show their start; "전체 복사" has the rest
         private const double ProgressStaleSeconds = 300;  // as the server's PROGRESS_TTL
+        private const double AlertFreshSeconds = 30;      // older items (history shown again after a restart) never alert
         private static readonly HttpClient Http = new HttpClient { Timeout = TimeSpan.FromSeconds(45) };
 
         private readonly List<Entry> _entries = new List<Entry>();
@@ -38,6 +40,7 @@ namespace ClaudeHand.Editor
         private long _progressRev = -1;     // the server's revision of it, so polling wakes on changes
         private double _progressReceivedAt;
         private double _lastBusyRepaint;
+        private int _unread;                // replies and permission prompts that came while this window had no focus
         [SerializeField] private string _undoNote;  // goes along with the next message after "되돌리기"
         private bool _followNewest = true;  // scrolled to the bottom: new messages keep it there; reading older ones: stay put
         private float _contentHeight;
@@ -244,6 +247,7 @@ namespace ClaudeHand.Editor
             if (rev.HasValue && rev.Value != _progressRev) SetProgress(updates["progress"] as JObject, rev.Value);
             var items = updates["items"] as JArray;
             if (items == null) return;
+            int alerts = items.OfType<JObject>().Count(WantsAttention);
             foreach (var item in items.OfType<JObject>())
             {
                 var kind = item.Value<string>("kind");
@@ -271,7 +275,43 @@ namespace ClaudeHand.Editor
             if (_entries.Count > KeptEntries) _entries.RemoveRange(0, _entries.Count - KeptEntries);
             _after = updates.Value<long?>("next") ?? _after;
             if (_followNewest) _scroll.y = float.MaxValue;
+            if (alerts > 0) Alert(alerts);
             Repaint();
+        }
+
+        /// <summary>
+        /// A fresh reply to a request made here, or a permission prompt: worth calling the user back for. Not history
+        /// shown again after a restart, and not replies to work asked in the Claude app (the user is there).
+        /// </summary>
+        private static bool WantsAttention(JObject item)
+        {
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+            if (now - (item.Value<double?>("ts") ?? 0) > AlertFreshSeconds) return false;
+            var kind = item.Value<string>("kind");
+            return kind == "permission" || (kind == "reply" && item.Value<string>("origin") != "desktop");
+        }
+
+        /// <summary>The tab says how many came while it had no focus; Unity's taskbar button blinks while it is behind.</summary>
+        private void Alert(int count)
+        {
+            if (!hasFocus)
+            {
+                _unread += count;
+                UpdateTitle();
+            }
+            if (!InternalEditorUtility.isApplicationActive) ChTaskbar.Flash();
+        }
+
+        private void OnFocus()
+        {
+            if (_unread == 0) return;
+            _unread = 0;
+            UpdateTitle();
+        }
+
+        private void UpdateTitle()
+        {
+            titleContent = new GUIContent(_unread > 0 ? $"Claude Hand ({_unread})" : "Claude Hand");
         }
 
         private void Send()
