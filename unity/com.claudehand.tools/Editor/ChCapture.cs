@@ -1,7 +1,5 @@
 using System;
 using System.IO;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
@@ -13,17 +11,17 @@ namespace ClaudeHand.Editor
     /// when a request made in another window changed this project. A copy of the Scene view camera renders into a
     /// texture, so it works while Unity is in the background (no screen grab) and draws no gizmos.
     /// </summary>
-    [McpForUnityTool("ch_capture",
+    [ChTool("ch_capture",
         Description = "Save a PNG of the Scene view as it is now (no gizmos) and return its path. Changes nothing in the scene. " +
                       "The chat panels use it for result previews.")]
     public static class ChCapture
     {
         public class Parameters
         {
-            [ToolParameter("Where to write the PNG (default: the exchange folder)", Required = false)]
+            [ChParameter("Where to write the PNG (default: the exchange folder)", Required = false)]
             public string path { get; set; }
 
-            [ToolParameter("Longest side in pixels (default 640)", Required = false)]
+            [ChParameter("Longest side in pixels (default 640)", Required = false)]
             public int? max_size { get; set; }
         }
 
@@ -39,7 +37,7 @@ namespace ClaudeHand.Editor
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".");
             var (width, height) = Fit(view.camera.pixelWidth, view.camera.pixelHeight, Mathf.Clamp(p.max_size ?? 640, 64, 2048));
             File.WriteAllBytes(path, Render(view.camera, width, height));
-            return new SuccessResponse("Scene view captured", new
+            return new ChSuccess("Scene view captured", new
             {
                 path = ChPaths.ToPosix(Path.GetFullPath(path)),
                 width,

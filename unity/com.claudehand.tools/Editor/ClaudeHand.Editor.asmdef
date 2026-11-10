@@ -1,9 +1,7 @@
 {
     "name": "ClaudeHand.Editor",
     "rootNamespace": "ClaudeHand.Editor",
-    "references": [
-        "MCPForUnity.Editor"
-    ],
+    "references": [],
     "includePlatforms": [
         "Editor"
     ],

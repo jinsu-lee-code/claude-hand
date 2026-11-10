@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
@@ -16,7 +14,7 @@ namespace ClaudeHand.Editor
     /// ch_import_*, and execute_code that registers its changes with Undo.
     /// Kept in SessionState: survives script reloads and ends with the editor, like the Undo history itself.
     /// </summary>
-    [McpForUnityTool("ch_checkpoint",
+    [ChTool("ch_checkpoint",
         Description = "Undo points for requests. mark (default): set one before changing anything for a new request (the " +
                       "guard hook already does this before your first action). undo: revert everything since the newest point " +
                       "(use it when the user asks to cancel what you just did). list: show the points.")]
@@ -35,10 +33,10 @@ namespace ClaudeHand.Editor
 
         public class Parameters
         {
-            [ToolParameter("mark (default), undo or list", Required = false)]
+            [ChParameter("mark (default), undo or list", Required = false)]
             public string action { get; set; }
 
-            [ToolParameter("For mark: the request in a few words, shown on the chat window's undo button", Required = false)]
+            [ChParameter("For mark: the request in a few words, shown on the chat window's undo button", Required = false)]
             public string label { get; set; }
         }
 
@@ -87,14 +85,14 @@ namespace ClaudeHand.Editor
                     var busy = ChErrors.BusyIfCompiling();
                     if (busy != null) return busy;
                     var mark = Add(p.label);
-                    return new SuccessResponse($"Undo point {mark.group} set", new { mark.group, mark.label, mark.time });
+                    return new ChSuccess($"Undo point {mark.group} set", new { mark.group, mark.label, mark.time });
                 case "undo":
                     var undone = UndoLast();
                     return undone == null
                         ? (object)ChErrors.Make(ChErrors.NotFound, "There is no undo point to go back to.", "after_fix")
-                        : new SuccessResponse($"Reverted everything since '{undone.label}' ({undone.time})", new { undone.label, undone.time });
+                        : new ChSuccess($"Reverted everything since '{undone.label}' ({undone.time})", new { undone.label, undone.time });
                 case "list":
-                    return new SuccessResponse($"{Marks.Count} undo point(s)", new { marks = Marks });
+                    return new ChSuccess($"{Marks.Count} undo point(s)", new { marks = Marks });
                 default:
                     return ChErrors.Make(ChErrors.InvalidArgs, "action must be mark, undo or list.", "after_fix");
             }

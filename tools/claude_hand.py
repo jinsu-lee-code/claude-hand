@@ -79,7 +79,8 @@ BLENDER_PACKAGE_HINTS = ("mcp-for-blender", "blender-mcp")
 DEFAULT_BLENDER_ARGS = ["mcp-for-blender"]
 DEFAULT_BLENDER_PORTS = "9876-9885"
 MCP_FOR_UNITY_PACKAGE = "com.coplaydev.unity-mcp"
-MCP_FOR_UNITY_GIT_URL = "https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#main"
+MCP_FOR_UNITY_TESTED = "v10.3.0"  # the MCP for Unity release claude-hand was tested with; new installs get this one
+MCP_FOR_UNITY_GIT_URL = f"https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#{MCP_FOR_UNITY_TESTED}"
 CLAUDE_HAND_PACKAGE = "com.claudehand.tools"
 CLAUDE_HAND_PACKAGE_DIR = REPO_ROOT / "unity" / CLAUDE_HAND_PACKAGE
 BLENDER_ADDON_FILE = "blender_mcp.py"  # what `mcp-for-blender install-addon` writes
@@ -974,9 +975,19 @@ class ManifestPlan:
     backup: str = ""
 
 
+def follows_a_branch(git_url: str) -> bool:
+    """A git package address that names no release or commit ("...git#main", or no "#" at all): Unity then takes
+    whatever is newest whenever the project's lock file is made anew."""
+    if not re.match(r"(https?|git|ssh)://|git@", git_url):
+        return False
+    ref = git_url.partition("#")[2]
+    return not re.fullmatch(r"v?\d+(\.\d+)+\S*|[0-9a-f]{7,40}", ref)
+
+
 def plan_unity_install(project: Path, mcp_for_unity: bool = True, claude_hand: bool = True,
-                       package_dir: Path = CLAUDE_HAND_PACKAGE_DIR) -> tuple[ManifestPlan, dict | None]:
-    """What unity-install would change, plus the new manifest (None when nothing changes)."""
+                       package_dir: Path = CLAUDE_HAND_PACKAGE_DIR, pin_mcp_for_unity: bool = False) -> tuple[ManifestPlan, dict | None]:
+    """What unity-install would change, plus the new manifest (None when nothing changes).
+    pin_mcp_for_unity: also move an MCP for Unity that follows a branch to the release claude-hand was tested with."""
     plan = ManifestPlan(project=str(project))
     if not is_unity_project(project):
         raise SystemExit(f"{project} is not a Unity project (needs Assets/ and ProjectSettings/).")
@@ -987,8 +998,14 @@ def plan_unity_install(project: Path, mcp_for_unity: bool = True, claude_hand: b
         raise SystemExit(f"Could not read {manifest_path}: {exc}")
     deps = manifest.setdefault("dependencies", {})
     if mcp_for_unity:
-        if MCP_FOR_UNITY_PACKAGE in deps:
-            plan.notes.append(f"MCP for Unity is already installed ({deps[MCP_FOR_UNITY_PACKAGE]}).")
+        current = deps.get(MCP_FOR_UNITY_PACKAGE)
+        if current and pin_mcp_for_unity and follows_a_branch(current):
+            deps[MCP_FOR_UNITY_PACKAGE] = MCP_FOR_UNITY_GIT_URL
+            plan.changes.append(f"change {MCP_FOR_UNITY_PACKAGE}: {current} -> {MCP_FOR_UNITY_GIT_URL}")
+        elif current:
+            plan.notes.append(f"MCP for Unity is already installed ({current})." + (
+                f" It follows a branch; `unity-install --pin-mcp-for-unity` fixes it to {MCP_FOR_UNITY_TESTED}, the release "
+                "claude-hand was tested with." if follows_a_branch(current) else ""))
         elif (project / "Assets" / "MCPForUnity").is_dir():
             plan.notes.append("MCP for Unity is already installed in Assets/MCPForUnity (Asset Store copy).")
         else:
@@ -2070,7 +2087,7 @@ def repo_unity_tools(root: Path = REPO_ROOT) -> list[str]:
     """The ch_* tools the Unity package in this checkout defines."""
     names = set()
     for source in (root / "unity" / "com.claudehand.tools" / "Editor").glob("*.cs"):
-        names.update(re.findall(r'\[McpForUnityTool\("(ch_\w+)"', source.read_text(encoding="utf-8", errors="replace")))
+        names.update(re.findall(r'\[ChTool\("(ch_\w+)"', source.read_text(encoding="utf-8", errors="replace")))
     return sorted(names)
 
 
@@ -2249,7 +2266,8 @@ def cmd_selftest(args: argparse.Namespace) -> int:
 
 def cmd_unity_install(args: argparse.Namespace) -> int:
     project = Path(args.project).expanduser().resolve()
-    plan, manifest = plan_unity_install(project, mcp_for_unity=not args.no_mcp_for_unity, claude_hand=not args.no_claude_hand)
+    plan, manifest = plan_unity_install(project, mcp_for_unity=not args.no_mcp_for_unity, claude_hand=not args.no_claude_hand,
+                                        pin_mcp_for_unity=args.pin_mcp_for_unity)
     for note in plan.notes:
         print(f"그대로: {note}")
     if manifest is None:
@@ -2464,6 +2482,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ui.add_argument("project")
     p_ui.add_argument("--no-mcp-for-unity", action="store_true", help="only add Claude Hand Tools")
     p_ui.add_argument("--no-claude-hand", action="store_true", help="only add MCP for Unity")
+    p_ui.add_argument("--pin-mcp-for-unity", action="store_true",
+                      help=f"move an MCP for Unity that follows a branch (#main) to {MCP_FOR_UNITY_TESTED}, the tested release")
     p_ui.add_argument("--dry-run", action="store_true")
     p_ui.set_defaults(func=cmd_unity_install)
 

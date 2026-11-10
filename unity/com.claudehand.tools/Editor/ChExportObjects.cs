@@ -2,8 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
@@ -13,7 +11,7 @@ using Object = UnityEngine.Object;
 
 namespace ClaudeHand.Editor
 {
-    [McpForUnityTool("ch_export_objects",
+    [ChTool("ch_export_objects",
         Description = "Pack scene GameObjects (by snapshot ref) and/or project assets, together with every asset they depend on " +
                       "(meshes, materials, textures, scripts...), into a .unitypackage in the shared exchange folder, plus a " +
                       ".claudehand.json manifest. Another Unity project imports it with ch_import_package. The source scene is not " +
@@ -24,16 +22,16 @@ namespace ClaudeHand.Editor
 
         public class Parameters
         {
-            [ToolParameter("Snapshot refs (from ch_scene_snapshot) of scene GameObjects to export. Each becomes a prefab with its children.", Required = false)]
+            [ChParameter("Snapshot refs (from ch_scene_snapshot) of scene GameObjects to export. Each becomes a prefab with its children.", Required = false)]
             public string[] refs { get; set; }
 
-            [ToolParameter("Project asset paths to export as they are, e.g. Assets/Prefabs/Enemy.prefab or Assets/Materials/Rock.mat.", Required = false)]
+            [ChParameter("Project asset paths to export as they are, e.g. Assets/Prefabs/Enemy.prefab or Assets/Materials/Rock.mat.", Required = false)]
             public string[] asset_paths { get; set; }
 
-            [ToolParameter("Short name for this transfer, e.g. player_rig (default: the first object's name).", Required = false)]
+            [ChParameter("Short name for this transfer, e.g. player_rig (default: the first object's name).", Required = false)]
             public string name { get; set; }
 
-            [ToolParameter("Include the C# scripts the objects use (default true). The target project then has to compile them.", Required = false)]
+            [ChParameter("Include the C# scripts the objects use (default true). The target project then has to compile them.", Required = false)]
             public bool? include_scripts { get; set; }
         }
 
@@ -137,7 +135,7 @@ namespace ClaudeHand.Editor
                 var manifestPath = Path.Combine(ChPaths.ExchangeDir, transferId + ".claudehand.json");
                 File.WriteAllText(manifestPath, JsonConvert.SerializeObject(manifest, Formatting.Indented));
 
-                return new SuccessResponse($"Exported {manifest.roots.Count} root(s) with {manifest.assets.Count} asset(s) as {transferId}", new
+                return new ChSuccess($"Exported {manifest.roots.Count} root(s) with {manifest.assets.Count} asset(s) as {transferId}", new
                 {
                     transfer_id = transferId,
                     manifest_path = ChPaths.ToPosix(manifestPath),

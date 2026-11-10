@@ -414,6 +414,36 @@ class SetupHelperTests(unittest.TestCase):
             self.assertEqual(manifest["dependencies"][ch.MCP_FOR_UNITY_PACKAGE], "https://example/fork.git")
             self.assertEqual(len(plan.changes), 1)
 
+    def test_new_installs_get_the_tested_mcp_for_unity_release(self):
+        """A package that follows #main changes under the project whenever its lock file is made anew."""
+        self.assertTrue(ch.MCP_FOR_UNITY_GIT_URL.endswith("#" + ch.MCP_FOR_UNITY_TESTED))
+        self.assertFalse(ch.follows_a_branch(ch.MCP_FOR_UNITY_GIT_URL))
+        self.assertFalse(ch.follows_a_branch("https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#81542a7e86292b5c"))
+        self.assertFalse(ch.follows_a_branch("file:C:/packages/unity-mcp"))  # not a git address
+        self.assertFalse(ch.follows_a_branch("10.3.0"))  # a registry version
+        main = "https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#main"
+        self.assertTrue(ch.follows_a_branch(main))
+        self.assertTrue(ch.follows_a_branch("https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity"))
+        with tempfile.TemporaryDirectory() as tmp:
+            project = make_unity_project(Path(tmp), deps={ch.MCP_FOR_UNITY_PACKAGE: main})
+            plan, manifest = ch.plan_unity_install(project, package_dir=Path(tmp) / "pkg")
+            self.assertEqual(manifest["dependencies"][ch.MCP_FOR_UNITY_PACKAGE], main)  # left alone unless asked
+            self.assertTrue(any("--pin-mcp-for-unity" in note for note in plan.notes))
+            plan, manifest = ch.plan_unity_install(project, package_dir=Path(tmp) / "pkg", pin_mcp_for_unity=True)
+            self.assertEqual(manifest["dependencies"][ch.MCP_FOR_UNITY_PACKAGE], ch.MCP_FOR_UNITY_GIT_URL)
+
+    def test_the_unity_package_does_not_need_mcp_for_unity_to_compile(self):
+        """It borrowed six of its types once; a rename there would have taken the bridge and the chat window down."""
+        package = ch.CLAUDE_HAND_PACKAGE_DIR
+        asmdef = json.loads((package / "Editor" / "ClaudeHand.Editor.asmdef").read_text(encoding="utf-8"))
+        self.assertEqual(asmdef["references"], [])
+        for source in (package / "Editor").glob("*.cs"):
+            code = "\n".join(line for line in source.read_text(encoding="utf-8").splitlines() if not line.strip().startswith("//"))
+            self.assertNotRegex(code, r"using MCPForUnity|McpForUnityTool|McpJobStateStore", source.name)
+            self.assertTrue(source.with_name(source.name + ".meta").exists(), f"{source.name} needs a .meta file")
+        manifest = json.loads((package / "package.json").read_text(encoding="utf-8"))
+        self.assertIn("com.unity.nuget.newtonsoft-json", manifest["dependencies"])  # the one package it does need
+
     def test_unity_install_detects_asset_store_copy(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = make_unity_project(Path(tmp))

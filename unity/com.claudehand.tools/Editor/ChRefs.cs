@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
-using MCPForUnity.Editor.Helpers;
 using Newtonsoft.Json;
 using UnityEditor;
 using UnityEngine;
@@ -77,7 +76,7 @@ namespace ClaudeHand.Editor
         }
 
         /// <summary>Returns the GameObject a ref points at, or null with an error the tool can return as-is.</summary>
-        public static GameObject Resolve(string reference, out ErrorResponse error)
+        public static GameObject Resolve(string reference, out ChError error)
         {
             error = null;
             var match = RefPattern.Match(reference?.Trim() ?? string.Empty);

@@ -2,7 +2,6 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
-using MCPForUnity.Editor.Helpers;
 using UnityEditor;
 using UnityEngine;
 
@@ -24,12 +23,12 @@ namespace ClaudeHand.Editor
         public const string EditorBusy = "EDITOR_BUSY";
         public const string Failed = "FAILED";
 
-        public static ErrorResponse Make(string code, string message, string retry, string hint = null, object details = null)
+        public static ChError Make(string code, string message, string retry, string hint = null, object details = null)
         {
-            return new ErrorResponse(code, new { code, message, retry, hint, details });
+            return new ChError(code, new { code, message, retry, hint, details });
         }
 
-        public static ErrorResponse BusyIfCompiling()
+        public static ChError BusyIfCompiling()
         {
             if (EditorApplication.isCompiling || EditorApplication.isUpdating)
             {

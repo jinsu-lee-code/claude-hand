@@ -2,8 +2,11 @@
   "name": "com.claudehand.tools",
   "version": "0.1.0",
   "displayName": "Claude Hand Tools",
-  "description": "Extra tools for MCP for Unity (CoplayDev): scene snapshots with refs, cross-project object export/import, and an editor status probe for background-operation tests. Requires MCP for Unity to be installed in the same project.",
+  "description": "The Unity side of claude-hand: the ch_* tools (scene snapshots with refs, cross-project object export/import, model import, undo points, scene view capture, editor status) behind claude-hand's own loopback bridge, and the chat window (Window > Claude Hand > Chat). Works next to MCP for Unity but does not need it to compile.",
   "unity": "2021.3",
+  "dependencies": {
+    "com.unity.nuget.newtonsoft-json": "3.0.2"
+  },
   "keywords": ["mcp", "claude", "multi-project"],
   "author": {
     "name": "claude-hand"

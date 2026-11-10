@@ -2,8 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
@@ -13,7 +11,7 @@ using UnityEngine.SceneManagement;
 
 namespace ClaudeHand.Editor
 {
-    [McpForUnityTool("ch_import_package",
+    [ChTool("ch_import_package",
         Description = "Import a transfer made by ch_export_objects in another project: checks it first, imports the .unitypackage, " +
                       "waits for Unity to finish importing and compiling, then (by default) places the exported prefabs in the " +
                       "active scene and returns refs to them. Run with dry_run=true first to see what would be added or overwritten.",
@@ -29,19 +27,19 @@ namespace ClaudeHand.Editor
 
         public class Parameters
         {
-            [ToolParameter("Path of the .claudehand.json manifest from ch_export_objects (the .unitypackage path next to it also works).")]
+            [ChParameter("Path of the .claudehand.json manifest from ch_export_objects (the .unitypackage path next to it also works).")]
             public string manifest { get; set; }
 
-            [ToolParameter("Only report what the import would add or overwrite; change nothing (default false).", Required = false)]
+            [ChParameter("Only report what the import would add or overwrite; change nothing (default false).", Required = false)]
             public bool? dry_run { get; set; }
 
-            [ToolParameter("Place the exported prefabs in the active scene after importing (default true).", Required = false)]
+            [ChParameter("Place the exported prefabs in the active scene after importing (default true).", Required = false)]
             public bool? place { get; set; }
 
-            [ToolParameter("Ref (from ch_scene_snapshot) of a GameObject to put the placed prefabs under. Default: scene root.", Required = false)]
+            [ChParameter("Ref (from ch_scene_snapshot) of a GameObject to put the placed prefabs under. Default: scene root.", Required = false)]
             public string parent { get; set; }
 
-            [ToolParameter("Go ahead even though some assets already exist in this project and would be replaced (default false).", Required = false)]
+            [ChParameter("Go ahead even though some assets already exist in this project and would be replaced (default false).", Required = false)]
             public bool? overwrite { get; set; }
         }
 
@@ -105,7 +103,7 @@ namespace ClaudeHand.Editor
             }
 
             var plan = MakePlan(manifest);
-            if (p.dry_run == true) return new SuccessResponse("Dry run: nothing was changed.", plan);
+            if (p.dry_run == true) return new ChSuccess("Dry run: nothing was changed.", plan);
 
             if (plan.NeedsOverwrite && p.overwrite != true)
             {
@@ -117,7 +115,7 @@ namespace ClaudeHand.Editor
             var busy = ChErrors.BusyIfCompiling();
             if (busy != null) return busy;
 
-            var running = McpJobStateStore.LoadState<State>(ToolName);
+            var running = ChJobState.Load<State>(ToolName);
             if (running != null && (running.stage == "importing" || running.stage == "placing") && SecondsSince(running.started_utc) < ImportTimeoutSeconds)
             {
                 return ChErrors.Make(ChErrors.EditorBusy, $"Another import ({running.transfer_id}) is still running.", "safe",
@@ -141,7 +139,7 @@ namespace ClaudeHand.Editor
                 parent_ref = p.parent,
                 warnings = plan.warnings.ToList(),
             };
-            McpJobStateStore.SaveState(ToolName, state);
+            ChJobState.Save(ToolName, state);
 
             if (!plan.NothingToImport)
             {
@@ -149,19 +147,19 @@ namespace ClaudeHand.Editor
                 AssetDatabase.ImportPackage(packagePath, false);
             }
 
-            return new PendingResponse($"Importing {manifest.transfer_id} ({plan.asset_count} assets)...", 1.0, new { manifest.transfer_id, stage = state.stage });
+            return new ChPending($"Importing {manifest.transfer_id} ({plan.asset_count} assets)...", 1.0, new { manifest.transfer_id, stage = state.stage });
         }
 
         private static object Status()
         {
-            var state = McpJobStateStore.LoadState<State>(ToolName);
+            var state = ChJobState.Load<State>(ToolName);
             if (state == null) return new { _mcp_status = "error", error = "No ch_import_package job found." };
             if (state.stage == "done") return Complete(state);
             if (state.stage == "error") return new { _mcp_status = "error", error = state.error, data = state };
 
             if (EditorApplication.isCompiling || EditorApplication.isUpdating)
             {
-                return new PendingResponse("Unity is importing/compiling...", 1.0, new { state.transfer_id, state.stage });
+                return new ChPending("Unity is importing/compiling...", 1.0, new { state.transfer_id, state.stage });
             }
 
             if (!TryLoadManifest(state.manifest_path, out var manifest, out _, out _))
@@ -176,7 +174,7 @@ namespace ClaudeHand.Editor
                 {
                     return Fail(state, $"Import did not finish: {missing.Count} asset(s) never appeared, e.g. {missing[0]}.");
                 }
-                return new PendingResponse($"Waiting for assets ({manifest.assets.Count - missing.Count}/{manifest.assets.Count})...", 1.0,
+                return new ChPending($"Waiting for assets ({manifest.assets.Count - missing.Count}/{manifest.assets.Count})...", 1.0,
                     new { state.transfer_id, missing = missing.Count });
             }
 
@@ -184,12 +182,12 @@ namespace ClaudeHand.Editor
             if (string.IsNullOrEmpty(state.assets_ready_utc))
             {
                 state.assets_ready_utc = DateTime.UtcNow.ToString("o");
-                McpJobStateStore.SaveState(ToolName, state);
-                return new PendingResponse("Assets imported; waiting for Unity to settle...", 1.0, new { state.transfer_id });
+                ChJobState.Save(ToolName, state);
+                return new ChPending("Assets imported; waiting for Unity to settle...", 1.0, new { state.transfer_id });
             }
             if (manifest.scripts.Count > 0 && SecondsSince(state.assets_ready_utc) < SettleSeconds)
             {
-                return new PendingResponse("Waiting for script compilation...", 1.0, new { state.transfer_id });
+                return new ChPending("Waiting for script compilation...", 1.0, new { state.transfer_id });
             }
 
             if (manifest.scripts.Count > 0 && EditorUtility.scriptCompilationFailed)
@@ -200,12 +198,12 @@ namespace ClaudeHand.Editor
             if (state.place && state.stage != "done")
             {
                 state.stage = "placing";
-                McpJobStateStore.SaveState(ToolName, state);
+                ChJobState.Save(ToolName, state);
                 PlacePrefabs(state, manifest);
             }
 
             state.stage = "done";
-            McpJobStateStore.SaveState(ToolName, state);
+            ChJobState.Save(ToolName, state);
             return Complete(state);
         }
 
@@ -266,7 +264,7 @@ namespace ClaudeHand.Editor
         {
             state.stage = "error";
             state.error = error;
-            McpJobStateStore.SaveState(ToolName, state);
+            ChJobState.Save(ToolName, state);
             return new { _mcp_status = "error", error, data = new { state.transfer_id, retry = "check_first" } };
         }
 
@@ -324,7 +322,7 @@ namespace ClaudeHand.Editor
             return plan;
         }
 
-        private static bool TryLoadManifest(string input, out ChTransferManifest manifest, out string manifestPath, out ErrorResponse error)
+        private static bool TryLoadManifest(string input, out ChTransferManifest manifest, out string manifestPath, out ChError error)
         {
             manifest = null;
             error = null;

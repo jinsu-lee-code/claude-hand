@@ -90,7 +90,7 @@ MCP for Unity 기본 도구(씬·오브젝트·스크립트)는 MCP for Unity를
   - 덮어쓸 게 있으면 `overwrite=true` 없이는 거부한다.
   - `ImportPackage(interactive:false)`를 실행하고, 폴링하면서 manifest의 GUID가 모두 나타나고 컴파일이 끝나기를 기다린다.
   - 그다음 루트 프리팹을 활성 씬에 배치하고 새 ref를 돌려준다.
-  - 상태는 `McpJobStateStore`(Library/)에 저장한다. 그래서 도메인 리로드가 일어나도 이어진다.
+  - 상태는 `Library/ClaudeHand/jobs/`에 저장한다(`ChJobState`). 그래서 도메인 리로드가 일어나도 이어진다.
 
 ### 결정 5: agent-desktop의 스냅샷과 ref 방식을 빌려 온다
 
@@ -105,7 +105,10 @@ MCP for Unity 기본 도구(씬·오브젝트·스크립트)는 MCP for Unity를
 
 Windows 시험에서 MCP for Unity 10.3.0 stdio 서버는 C# 커스텀 도구를 목록에 내보내지 않았다(`manage_tools sync`, `execute_custom_tool`도 안 됨). MCP for Unity 버전마다 달라질 수 있는 부분이라 기대지 않기로 했다.
 
-- Unity 쪽: `ChBridge.cs`가 `[InitializeOnLoad]`로 `127.0.0.1`의 빈 포트에 소켓을 연다. 한 줄 JSON 요청(`{token, tool, params}`)을 받아 메인 스레드(`EditorApplication.update`)에서 `[McpForUnityTool]` 클래스의 `HandleCommand`를 그대로 부른다. 도구 코드는 MCP for Unity로 부를 때와 같다.
+- Unity 쪽: `ChBridge.cs`가 `[InitializeOnLoad]`로 `127.0.0.1`의 빈 포트에 소켓을 연다. 한 줄 JSON 요청(`{token, tool, params}`)을 받아 메인 스레드(`EditorApplication.update`)에서 `[ChTool]` 클래스의 `HandleCommand`를 부른다.
+- **패키지는 MCP for Unity 없이 컴파일된다.** 처음에는 도구 속성(`McpForUnityTool`, `ToolParameter`), 응답 형식(`SuccessResponse`, `ErrorResponse`, `PendingResponse`), 작업 상태 저장(`McpJobStateStore`) 여섯 가지를 MCP for Unity에서 빌려 썼다. 호출 경로만 독립이고 컴파일은 묶여 있어서, 그쪽에서 이름 하나가 바뀌면 통로·채팅창·되돌리기·캡처가 한꺼번에 사라질 수 있었다(REVIEW-2026-11-10의 1번). 지금은 같은 일을 하는 자기 형식(`ChTool.cs`: `ChTool`, `ChParameter`, `ChSuccess`, `ChError`, `ChPending`, `ChJobState`)을 쓰고, asmdef는 `MCPForUnity.Editor`를 참조하지 않는다. 도구가 돌려주는 JSON 모양은 전과 같다. 패키지가 필요로 하는 것은 `com.unity.nuget.newtonsoft-json`뿐이고 `package.json`에 적혀 있다.
+  - 그래서 `ch_*` 도구는 MCP for Unity에는 등록되지 않는다. 10.3.0 stdio는 어차피 커스텀 도구를 내보내지 않아서(가정 3) 잃는 것이 없다.
+  - `unity-install`은 MCP for Unity를 시험한 버전의 태그(`v10.3.0`)로 넣는다. 전에는 `#main`이라 새로 설치하는 프로젝트마다 그날의 최신본을 받았다. 이미 `#main`으로 넣은 프로젝트는 그대로 두고 알려 주기만 하며, `unity-install --pin-mcp-for-unity`로 옮길 수 있다.
 - 등록 파일: `~/.claude-hand/unity/<hash>.json`. hash는 MCP for Unity와 같은 SHA1(Application.dataPath) 앞 8자리라 `Name@hash`가 그대로 맞는다. 포트, 토큰, 도구 목록(이름·설명·인자·폴링 여부)을 담고 30초마다 다시 쓴다. Unity를 닫으면 지운다.
 - 토큰: 처음 열 때 만들어 SessionState에 둔다. 같은 PC의 다른 프로그램이 포트만 알아서는 부를 수 없다. 파일은 사용자 폴더 안에 있다.
 - 스크립트 리로드: 리로드 직전에 소켓을 닫고 기다리던 요청에는 `EDITOR_BUSY`(retry: safe)로 답한다. 다시 열 때 같은 포트를 먼저 시도한다. `unity_bridge.py`는 연결이 안 되면 등록 파일을 다시 읽어 재시도한다.

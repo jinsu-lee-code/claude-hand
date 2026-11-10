@@ -164,7 +164,7 @@ uv run tools/claude_hand.py update     # 하위 세션·감독 스킬·채팅 �
 | `tools/guard.py` | 하위 세션의 안전장치(PreToolUse 훅)입니다. 다른 대상으로 가는 호출을 막습니다. 표준 라이브러리만 쓰는 작은 파일로 따로 두어, 다른 파일의 실수가 안전장치를 멈추지 못하게 했습니다. |
 | `tools/handlib/` | 위 스크립트들이 함께 쓰는 부분입니다. |
 | `tools/chat_channel.py` | 채팅 채널 서버입니다. Claude Code가 실행하는 MCP 서버이고, Unity·Blender 채팅창과는 로컬 HTTP로 통신합니다. |
-| `unity/com.claudehand.tools/` | Unity 패키지입니다. `ch_*` 도구 8개와 채팅창(Window > Claude Hand > Chat)을 추가합니다. `ch_*` 도구는 이 패키지가 여는 자기 통로로 불립니다(MCP for Unity 버전에 상관없이 동작). |
+| `unity/com.claudehand.tools/` | Unity 패키지입니다. `ch_*` 도구 8개와 채팅창(Window > Claude Hand > Chat)을 추가합니다. `ch_*` 도구는 이 패키지가 여는 자기 통로로 불립니다. MCP for Unity 없이도 컴파일되고, 그 버전에 상관없이 동작합니다. |
 | `tools/unity_bridge.py` | 하위 세션이 그 통로로 `ch_*` 도구를 부를 때 쓰는 MCP 서버입니다. `--list`로 통로를 연 Unity를 볼 수 있습니다. |
 | `blender/claude_hand_chat.py` | Blender 채팅 패널 애드온입니다. |
 | `start-supervisor.cmd` / `.sh` | 감독 세션을 엽니다. 바탕화면 아이콘과 채팅창 버튼이 이 파일을 실행합니다. 열 때마다 `preflight`가 하위 세션과 설정을 맞추고, 이미 켜져 있으면 알려 줍니다. |
@@ -215,6 +215,7 @@ Blender에는 MCP for Blender 말고 따로 설치할 것이 없습니다. 그 �
    ```powershell
    uv run tools/claude_hand.py unity-install "C:\경로\프로젝트"
    ```
+   MCP for Unity는 시험한 버전(v10.3.0)으로 들어갑니다. 이미 `#main`으로 넣어 둔 프로젝트는 그대로 두고 알려 주며, 옮기려면 `--pin-mcp-for-unity`를 붙입니다.
 5. MCP for Unity를 **Stdio** 방식으로 씁니다. 패키지를 넣고 처음 뜨는 MCP for Unity 설정 창은 HTTP로 등록하니, Unity의 **Window > MCP for Unity**에서 Transport를 **Stdio**로 바꾸고 Claude Code의 **Configure**를 누릅니다. 명령으로 등록해도 됩니다(아직 없을 때만). 그다음 Claude Code를 다시 시작합니다.
    ```powershell
    claude mcp add --scope user unityMCP -- uvx --from mcpforunityserver mcp-for-unity --transport stdio

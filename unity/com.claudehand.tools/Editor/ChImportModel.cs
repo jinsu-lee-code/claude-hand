@@ -2,8 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -12,7 +10,7 @@ using UnityEngine.SceneManagement;
 
 namespace ClaudeHand.Editor
 {
-    [McpForUnityTool("ch_import_model",
+    [ChTool("ch_import_model",
         Description = "Bring a 3D model file into this project, typically one a Blender session exported to the exchange folder " +
                       "(manifest format claude-hand/model@1). Copies it under Assets/ClaudeHand/Imports/<name>/, imports it, and by " +
                       "default places it in the active scene and returns its ref. Supports FBX and OBJ; GLB/glTF need the glTFast package.")]
@@ -24,16 +22,16 @@ namespace ClaudeHand.Editor
 
         public class Parameters
         {
-            [ToolParameter("Path of a .claudehand.json manifest (format claude-hand/model@1) or of the model file itself (.fbx, .obj, .glb). Relative paths are looked up in the exchange folder.")]
+            [ChParameter("Path of a .claudehand.json manifest (format claude-hand/model@1) or of the model file itself (.fbx, .obj, .glb). Relative paths are looked up in the exchange folder.")]
             public string manifest { get; set; }
 
-            [ToolParameter("Folder name under Assets/ClaudeHand/Imports (default: the transfer id or file name).", Required = false)]
+            [ChParameter("Folder name under Assets/ClaudeHand/Imports (default: the transfer id or file name).", Required = false)]
             public string name { get; set; }
 
-            [ToolParameter("Place the model in the active scene after importing (default true).", Required = false)]
+            [ChParameter("Place the model in the active scene after importing (default true).", Required = false)]
             public bool? place { get; set; }
 
-            [ToolParameter("Ref (from ch_scene_snapshot) of a GameObject to put the model under. Default: scene root.", Required = false)]
+            [ChParameter("Ref (from ch_scene_snapshot) of a GameObject to put the model under. Default: scene root.", Required = false)]
             public string parent { get; set; }
         }
 
@@ -106,13 +104,13 @@ namespace ClaudeHand.Editor
                 warnings.Add("The model has no renderers (no visible meshes). Check what was exported from Blender.");
             }
 
-            return new SuccessResponse(place
+            return new ChSuccess(place
                     ? $"Imported {assetPath} and placed it in the scene. The scene is modified but not saved."
                     : $"Imported {assetPath}.",
                 new { asset_path = assetPath, placed, warnings });
         }
 
-        private static bool TryResolveModel(string input, out string modelPath, out string defaultName, out ErrorResponse error)
+        private static bool TryResolveModel(string input, out string modelPath, out string defaultName, out ChError error)
         {
             modelPath = null;
             defaultName = null;

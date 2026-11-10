@@ -1,6 +1,4 @@
 using System.Reflection;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
@@ -14,7 +12,7 @@ namespace ClaudeHand.Editor
     /// per user and per Unity major version, so applying it once covers every project on that version.
     /// The previous values are kept so "revert" can put them back.
     /// </summary>
-    [McpForUnityTool("ch_apply_settings",
+    [ChTool("ch_apply_settings",
         Description = "Show, apply or revert the Editor setting claude-hand recommends: Preferences > General > Interaction Mode = " +
                       "No Throttling, so Unity keeps answering MCP commands while it is unfocused. It is a per-user Editor " +
                       "preference (all projects on this Unity version). action: show (default), apply, revert.")]
@@ -30,7 +28,7 @@ namespace ClaudeHand.Editor
 
         public class Parameters
         {
-            [ToolParameter("show (default), apply or revert.", Required = false)]
+            [ChParameter("show (default), apply or revert.", Required = false)]
             public string action { get; set; }
         }
 
@@ -40,15 +38,15 @@ namespace ClaudeHand.Editor
             switch (action)
             {
                 case "show":
-                    return new SuccessResponse("Current Editor settings", Describe());
+                    return new ChSuccess("Current Editor settings", Describe());
                 case "apply":
                     var applied = Apply(out bool live);
-                    return new SuccessResponse(applied
+                    return new ChSuccess(applied
                         ? "Interaction Mode set to No Throttling" + (live ? "." : "; it takes effect after restarting Unity.")
                         : "Interaction Mode was already No Throttling.", Describe(live));
                 case "revert":
                     var reverted = Revert(out bool liveRevert);
-                    return new SuccessResponse(reverted ? "Restored the Interaction Mode from before claude-hand changed it." : "Nothing to revert.",
+                    return new ChSuccess(reverted ? "Restored the Interaction Mode from before claude-hand changed it." : "Nothing to revert.",
                         Describe(liveRevert));
                 default:
                     return ChErrors.Make(ChErrors.InvalidArgs, $"Unknown action '{action}'.", "after_fix", "Use show, apply or revert.");

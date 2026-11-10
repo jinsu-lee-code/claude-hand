@@ -1,7 +1,5 @@
 using System.Collections.Generic;
 using System.Linq;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -10,7 +8,7 @@ using UnityEngine.SceneManagement;
 
 namespace ClaudeHand.Editor
 {
-    [McpForUnityTool("ch_scene_snapshot",
+    [ChTool("ch_scene_snapshot",
         Description = "Snapshot the open scene hierarchy as JSON. Every GameObject gets a ref like @s1a2b3c4:e5 that " +
                       "other ch_* tools accept; each node also carries instance_id and path for the built-in MCP for Unity tools. " +
                       "Refs belong to their snapshot: after the scene changes, take a new snapshot. Large scenes are cut off " +
@@ -19,19 +17,19 @@ namespace ClaudeHand.Editor
     {
         public class Parameters
         {
-            [ToolParameter("Ref of a GameObject to start from, taken from an earlier snapshot. Omit to cover all loaded scenes.", Required = false)]
+            [ChParameter("Ref of a GameObject to start from, taken from an earlier snapshot. Omit to cover all loaded scenes.", Required = false)]
             public string root { get; set; }
 
-            [ToolParameter("How many levels below the starting objects to include (default 3).", Required = false)]
+            [ChParameter("How many levels below the starting objects to include (default 3).", Required = false)]
             public int? depth { get; set; }
 
-            [ToolParameter("Stop after this many GameObjects (default 300).", Required = false)]
+            [ChParameter("Stop after this many GameObjects (default 300).", Required = false)]
             public int? max_nodes { get; set; }
 
-            [ToolParameter("List component type names on each node (default true).", Required = false)]
+            [ChParameter("List component type names on each node (default true).", Required = false)]
             public bool? include_components { get; set; }
 
-            [ToolParameter("Add world position, rotation (euler) and local scale to each node (default false).", Required = false)]
+            [ChParameter("Add world position, rotation (euler) and local scale to each node (default false).", Required = false)]
             public bool? include_transforms { get; set; }
         }
 
@@ -96,7 +94,7 @@ namespace ClaudeHand.Editor
 
             state.Builder.Save();
             var summary = $"Snapshot {state.Builder.SnapshotId}: {state.Count} objects" + (state.Truncated ? " (truncated)" : "");
-            return new SuccessResponse(summary, new
+            return new ChSuccess(summary, new
             {
                 snapshot_id = state.Builder.SnapshotId,
                 project = ChPaths.ProjectName,

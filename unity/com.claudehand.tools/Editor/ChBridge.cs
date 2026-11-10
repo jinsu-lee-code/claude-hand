@@ -9,7 +9,6 @@ using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
@@ -18,8 +17,9 @@ using UnityEngine;
 namespace ClaudeHand.Editor
 {
     /// <summary>
-    /// claude-hand's own way into this Editor: a loopback socket that runs the ch_* tools, so they do not
-    /// depend on whether MCP for Unity exposes custom tools (its stdio server in 10.3.0 does not).
+    /// claude-hand's own way into this Editor: a loopback socket that runs the ch_* tools ([ChTool] classes of
+    /// this assembly), so they do not depend on MCP for Unity: neither on whether it exposes custom tools (its
+    /// stdio server in 10.3.0 does not) nor on its types to compile.
     ///
     /// Protocol: one JSON object per line in, one per line out.
     ///   {"token": "...", "tool": "ch_scene_snapshot", "params": {...}}  ->  {"ok": true, "result": {...}}
@@ -247,7 +247,7 @@ namespace ClaudeHand.Editor
             var name = request.Value<string>("tool");
             if (name == "__list__") return JsonConvert.SerializeObject(new { ok = true, result = DescribeTools() });
 
-            var type = ToolTypes().FirstOrDefault(t => t.GetCustomAttribute<McpForUnityToolAttribute>().Name == name);
+            var type = ToolTypes().FirstOrDefault(t => t.GetCustomAttribute<ChToolAttribute>().Name == name);
             if (type == null) return Error("NOT_FOUND", $"No claude-hand tool named '{name}'.", "after_fix");
             var method = type.GetMethod("HandleCommand", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(JObject) }, null);
             if (method == null) return Error("FAILED", $"{type.Name} has no HandleCommand(JObject).", "after_fix");
@@ -257,7 +257,7 @@ namespace ClaudeHand.Editor
 
         private static IEnumerable<Type> ToolTypes()
         {
-            return typeof(ChBridge).Assembly.GetTypes().Where(t => t.GetCustomAttribute<McpForUnityToolAttribute>() != null);
+            return typeof(ChBridge).Assembly.GetTypes().Where(t => t.GetCustomAttribute<ChToolAttribute>() != null);
         }
 
         /// <summary>Name, description, polling and parameters of every ch_* tool, read from its attributes.</summary>
@@ -266,14 +266,14 @@ namespace ClaudeHand.Editor
             var tools = new List<object>();
             foreach (var type in ToolTypes().OrderBy(t => t.Name))
             {
-                var attribute = type.GetCustomAttribute<McpForUnityToolAttribute>();
+                var attribute = type.GetCustomAttribute<ChToolAttribute>();
                 var parameters = new List<object>();
                 var parametersType = type.GetNestedType("Parameters");
                 if (parametersType != null)
                 {
                     foreach (var property in parametersType.GetProperties(BindingFlags.Public | BindingFlags.Instance))
                     {
-                        var info = property.GetCustomAttribute<ToolParameterAttribute>();
+                        var info = property.GetCustomAttribute<ChParameterAttribute>();
                         parameters.Add(new
                         {
                             name = property.Name,
