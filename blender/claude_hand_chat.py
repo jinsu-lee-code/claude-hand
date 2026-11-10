@@ -15,7 +15,7 @@ Install: `uv run tools/claude_hand.py blender-install-chat` (or Preferences > Ad
 bl_info = {
     "name": "Claude Hand Chat",
     "author": "claude-hand",
-    "version": (0, 8, 0),
+    "version": (0, 9, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar (N) > Claude Hand",
     "description": "Chat with this Blender window's claude-hand subagent",
@@ -767,6 +767,9 @@ def apply_event(event, payload):
     elif event == "native_text":
         if not send_text(payload, bpy.context.window_manager.claude_hand_chat_context):  # the box is empty again by now
             _notice("보내지 못했습니다. 앞 메시지가 Claude Hand가 켜지기를 기다리는 중이니 잠시 뒤 다시 보내 주세요.")
+    elif event == "stop_sent":
+        if not payload.get("ok"):
+            _status[0] = "중지를 보내지 못했습니다: " + str(payload.get("error", "알 수 없는 오류"))
     elif event == "sent":
         if not payload.get("ok"):
             _status[0] = "보내지 못했습니다: " + str(payload.get("error", "알 수 없는 오류"))
@@ -937,6 +940,18 @@ class CLAUDEHAND_OT_undo(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CLAUDEHAND_OT_stop(bpy.types.Operator):
+    bl_idname = "claude_hand.chat_stop"
+    bl_label = "중지"
+    bl_description = ("Stop the work this window's request started: the next Unity/Blender action of the subagents is "
+                      "refused and Claude Hand is told. Nothing is undone")
+
+    def execute(self, context):
+        window, pin = window_identity()
+        post_in_background("/v1/stop", {"app": "blender", "window": window, "pin": pin}, "stop_sent")
+        return {"FINISHED"}
+
+
 class CLAUDEHAND_PT_chat(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -1007,7 +1022,8 @@ class CLAUDEHAND_PT_chat(bpy.types.Panel):
 def progress_view(progress, received_at, now):
     """What the subagent is doing, in one line: "작업 중 · 12초 · execute_code bpy.ops… · 3번째 동작"."""
     seconds = int(progress.get("elapsed", 0) + now - received_at)
-    parts = [f"작업 중 · {seconds}초", f"{progress.get('tool', '')} {progress.get('detail', '')}".strip()]
+    parts = [f"{'중지하는 중' if progress.get('stopping') else '작업 중'} · {seconds}초",
+             f"{progress.get('tool', '')} {progress.get('detail', '')}".strip()]
     if progress.get("actions"):
         parts.append(f"{progress['actions']}번째 동작")
     return " · ".join(part for part in parts if part)
@@ -1024,6 +1040,8 @@ def draw_progress(layout, width):
     col = layout.column(align=True)
     for i, line in enumerate(wrap(progress_view(progress, received_at, now), width)[:3]):
         col.label(text=line, icon="TIME" if i == 0 else "NONE")
+    if not progress.get("stopping"):
+        col.operator(CLAUDEHAND_OT_stop.bl_idname, text="중지", icon="CANCEL")
 
 
 def image_preview(path):
@@ -1163,7 +1181,7 @@ def visible_entries(width):
 
 
 CLASSES = (CLAUDEHAND_OT_send, CLAUDEHAND_OT_start, CLAUDEHAND_OT_permission, CLAUDEHAND_OT_copy, CLAUDEHAND_OT_undo,
-           CLAUDEHAND_OT_native_input, CLAUDEHAND_OT_open_image, CLAUDEHAND_PT_chat)
+           CLAUDEHAND_OT_native_input, CLAUDEHAND_OT_open_image, CLAUDEHAND_OT_stop, CLAUDEHAND_PT_chat)
 
 
 def register():

@@ -169,6 +169,22 @@ class BlenderChatAddonTests(unittest.TestCase):
         self.hub.reply(chat_id, "다 했어요")
         self.assertTrue(wait_for(lambda: addon._progress[0] is None, addon))
 
+    def test_stop_button_reaches_the_channel(self):
+        addon = self.addon
+        pin = next(a.pin for a in handlib.agents.installed_agents(Path(self.tmp.name) / "agents") if a.app == "blender")
+        self.assertTrue(wait_for(lambda: addon._status[0].startswith("담당"), addon))
+        addon.send_text("의자 만들어줘", include_context=False)
+        self.assertTrue(wait_for(lambda: len(self.emitted) == 1, addon))
+        self.hub.report_action("blender", pin, "execute_code", "bpy.ops.mesh.primitive_cube_add()", "aaa")
+        self.assertTrue(wait_for(lambda: addon._progress[0] is not None, addon))
+        self.assertEqual(bpy.ops.claude_hand.chat_stop(), {"FINISHED"})
+        self.assertTrue(wait_for(lambda: len(self.emitted) == 2, addon))
+        self.assertEqual(self.emitted[1]["params"]["meta"]["stop"], "requested")
+        self.assertTrue(self.hub.report_action("blender", pin, "execute_code", "more", "aaa")["stop"])  # the next call is refused
+        self.assertTrue(wait_for(lambda: (addon._progress[0] or ({}, 0))[0].get("stopping"), addon))
+        self.assertTrue(addon.progress_view(*addon._progress[0], time.time()).startswith("중지하는 중 · "))
+        self.assertTrue(wait_for(lambda: any("중지를 요청했어요" in str(e.get("text")) for e in addon._entries), addon))
+
     def test_walking_back_to_an_undo_point(self):
         """Blender's undo history as a list of the newest undo point each state comes after, including the failures."""
         history, at = [0, 1, 1, 2, 2], [4]

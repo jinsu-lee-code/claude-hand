@@ -849,8 +849,92 @@ class WorkerTests(unittest.TestCase):
         self.assertIn(rules, skill)
         self.assertNotRegex(skill, r"\{\{\w+\}\}")
         for rule in ("`reply` 도구로", "`SendMessage`로", "`agent_id`", "`run_in_background`", "`working: true`", "`current_context`",
-                     '`"desktop"`', "[claude-hand]"):
+                     '`"desktop"`', "[claude-hand]", "[중지]를 눌렀습니다"):
             self.assertIn(rule, rules)
+
+    # ------------------------------------------------------------------ 중지
+
+    def stop(self, window="MyGame"):
+        return self.hub.request_stop("unity", window)
+
+    def test_stop_refuses_the_next_call_and_tells_the_supervisor(self):
+        self.hub.post_user_message("unity", "MyGame", "큐브 백 개 만들어줘")
+        self.assertNotIn("stop", self.act("aaa"))
+        before = len(self.emitted.messages)
+        self.assertEqual(self.stop(), {"chat_id": "unity-mygame", "stopping": True})
+        note = self.emitted.messages[-1]
+        self.assertEqual(len(self.emitted.messages), before + 1)
+        self.assertTrue(note["params"]["content"].startswith("[claude-hand] 사용자가 이 채팅창에서 [중지]를 눌렀습니다"))
+        self.assertIn("큐브 백 개 만들어줘", note["params"]["content"])
+        self.assertEqual(note["params"]["meta"], {"chat_id": "unity-mygame", "app": "unity", "window": "MyGame", "agent": "unity-mygame",
+                                                  "stop": "requested", "agent_id": "aaa"})
+        self.assertTrue(all(key.isidentifier() for key in note["params"]["meta"]))
+        poll = self.hub.poll("unity-mygame", 0, 0)
+        self.assertTrue(poll["progress"]["stopping"])  # the panel says so instead of offering the button again
+        self.assertIn("중지를 요청했어요", poll["items"][-1]["text"])
+        actions = poll["progress"]["actions"]
+        refused = self.act("aaa")
+        self.assertEqual((refused["stop"], refused["by"]), (True, "unity-mygame"))
+        self.assertTrue(self.act("bbb")["stop"])  # a subagent handed the same request afterwards is refused too
+        self.assertEqual(self.hub.poll("unity-mygame", 0, 0)["progress"]["actions"], actions)  # refused calls are not work
+        self.hub.agent_stopped("unity", "MyGame@aaaa1111", "aaa")
+        self.assertTrue(self.act("aaa")["stop"])  # it holds until the request is answered
+        self.hub.reply("unity-mygame", "30개까지 만들고 멈췄어요")
+        self.assertNotIn("stop", self.act("aaa"))
+        self.assertEqual(self.hub.stops, {})
+
+    def test_stop_covers_windows_working_for_that_request_but_not_a_window_with_its_own(self):
+        self.hub.post_user_message("unity", "MyGame", "Props에 있는 의자 가져와")
+        self.act("aaa", pin="Props@bbbb2222")  # Props works for MyGame's request
+        self.stop()
+        self.assertEqual(self.act("aaa", pin="Props@bbbb2222")["by"], "unity-mygame")
+        self.hub.post_user_message("unity", "Props", "여기 바닥 색 바꿔줘")  # Props now has a request of its own
+        self.assertNotIn("stop", self.act("ccc", pin="Props@bbbb2222"))
+        self.assertTrue(self.act("bbb")["stop"])
+        self.hub.post_user_message("unity", "MyGame", "아니다, 다시 해줘")  # a new message in the panel lifts its stop
+        self.assertNotIn("stop", self.act("bbb"))
+
+    def test_stop_does_not_outlast_a_supervisor_that_never_answers(self):
+        self.hub.post_user_message("unity", "MyGame", "큐브 만들어줘")
+        self.act("aaa")
+        self.stop()
+        self.hub.stops["unity-mygame"]["ts"] -= cc.STOP_SECONDS + 1
+        self.assertNotIn("stop", self.act("aaa"))
+
+    def test_stop_with_nothing_going_on_does_nothing(self):
+        before = len(self.emitted.messages)
+        self.assertEqual(self.stop(), {"chat_id": "unity-mygame", "stopping": False})
+        self.assertEqual(self.stop("Nobody"), {"chat_id": "unity-nobody", "stopping": False})
+        self.assertEqual((len(self.emitted.messages), self.hub.stops), (before, {}))
+
+    def test_stop_on_work_asked_elsewhere_ends_when_that_subagent_stops(self):
+        self.act("aaa")  # asked in the Claude app: MyGame's panel waits on nothing, but shows the work line
+        self.assertTrue(self.stop()["stopping"])
+        self.assertNotIn("큐브", self.emitted.messages[-1]["params"]["content"])
+        self.assertTrue(self.act("aaa")["stop"])
+        self.assertNotIn("stop", self.act("ccc", pin="Props@bbbb2222"))  # only that window
+        self.hub.agent_stopped("unity", "MyGame@aaaa1111", "aaa")
+        self.assertNotIn("stop", self.act("bbb"))
+
+    def test_stop_over_http(self):
+        httpd = cc.start_http(self.hub, "t", port=18795)
+        try:
+            def post(body, token="t"):
+                req = urllib.request.Request(f"http://127.0.0.1:{httpd.server_address[1]}/v1/stop", data=json.dumps(body).encode("utf-8"),
+                                             method="POST", headers={"X-Claude-Hand-Token": token, "Content-Type": "application/json"})
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as response:
+                        return response.status, json.loads(response.read())
+                except urllib.error.HTTPError as exc:
+                    with exc:
+                        return exc.code, json.loads(exc.read())
+            self.hub.post_user_message("unity", "MyGame", "큐브 만들어줘")
+            self.assertEqual(post({"app": "unity", "window": "MyGame"}), (200, {"ok": True, "chat_id": "unity-mygame", "stopping": True}))
+            self.assertEqual(post({"app": "paint", "window": "MyGame"})[0], 400)
+            self.assertEqual(post({"app": "unity", "window": "MyGame"}, token="wrong")[0], 401)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
 
 
 if __name__ == "__main__":

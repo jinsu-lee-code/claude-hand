@@ -8,6 +8,7 @@
 - 다른 Blender 파일이나 Unity 프로젝트 일을 받으면 하지 말고, 그 담당(blender-… / unity-…)에게 넘겨야 한다고 감독에게 돌려준다.
 - .blend 저장(`bpy.ops.wm.save_mainfile()`)은 요청받았을 때만 한다.
 - 요청마다 첫 동작 직전에 되돌리기 지점이 저절로 찍힌다(채팅창의 [되돌리기], Blender 실행 취소 기록의 "Claude Hand: …"). `bpy.ops.ed.undo()`·`redo()`는 직접 부르지 않는다.
+- 호출이 "사용자가 채팅창에서 [중지]를 눌러 이 호출을 막았습니다"로 막히면 더 부르지 말고, 지금까지 한 것과 남은 것을 보고하고 끝낸다. 한 것을 되돌리지 않는다.
 - 사용자가 방금 한 일을 취소해 달라고 하면 **다른 도구보다 먼저** `execute_code`로 `import claude_hand_chat; print(claude_hand_chat.undo_last_request())`를 실행하고 출력을 그대로 보고한다. 다른 도구를 먼저 쓰면 그 자리에 새 되돌리기 지점이 찍혀 아무것도 되돌아가지 않는다. `ModuleNotFoundError`면 Claude Hand Chat 애드온이 없는 것이니 Blender에서 Ctrl+Z로 되돌려 달라고 보고한다.
 {{NOTES}}
 ## 작업 순서: 보기 → 행동 → 확인

@@ -98,6 +98,7 @@ PROGRESS_TTL = 300.0  # seconds without news after which a panel stops showing a
 LOCK_SECONDS = 90.0    # a subagent that reported a tool call this recently and has not stopped is still at work in its window
 ANSWER_GRACE = 60.0    # once the subagents stopped: how long the supervisor may take to answer the panel before it is reminded
 STALL_SECONDS = 300.0  # when no subagent work was seen at all: how long a panel request may wait before the reminder
+STOP_SECONDS = 180.0   # a panel's 중지 holds until its request is answered, but never longer than this
 
 CONTEXT_TOOL = {
     "name": "current_context",
@@ -172,6 +173,7 @@ class ChatHub:
         self.dialog_seen: dict[str, str] = {}  # chat_id -> the dialogs already told about, so each is told once
         self.workers: dict[str, dict] = {}  # chat_id -> the subagent at work in that window: {"agent_id", "last", "stopped"}
         self.reminded: dict[str, int] = {}  # chat_id -> seq of the request the supervisor was reminded of (once each)
+        self.stops: dict[str, dict] = {}  # chat_id -> its panel's 중지: {"seq": of the request it stops (0: work asked elsewhere), "ts"}
         self.started = time.time()  # requests older than this server (shown again from history) are not its to chase
         self.events = None  # callable(event, **fields): the event log (handlib/eventlog.py); None: nothing is logged
 
@@ -561,6 +563,11 @@ class ChatHub:
             return None
         with self.cond:
             now = time.time()
+            stopper = self._stop_for(agent.name, now)
+            if stopper:
+                self._log("refused", request=self._request_for(agent.name), chat_id=agent.name, pin=pin, tool=tool[:80], agent_id=agent_id,
+                          reason="사용자가 채팅창에서 중지를 누름" + ("" if stopper == agent.name else f" ({stopper})"))
+                return {"chat_id": agent.name, "stop": True, "by": stopper}
             worker = self.workers.get(agent.name)
             if agent_id and worker and worker["agent_id"] not in ("", agent_id) and not worker["stopped"] \
                     and now - worker["last"] <= LOCK_SECONDS:
@@ -594,7 +601,60 @@ class ChatHub:
             if worker and worker["agent_id"] in ("", agent_id) and not worker["stopped"]:
                 worker["stopped"] = time.time()
                 self._log("stopped", request=self._request_for(agent.name), chat_id=agent.name, pin=pin, agent_id=agent_id)
+                if self.stops.get(agent.name, {}).get("seq") == 0:  # 중지 on work asked elsewhere: it has stopped
+                    del self.stops[agent.name]
         return {"chat_id": agent.name}
+
+    def request_stop(self, app: str, window: str, pin: str = "") -> dict:
+        """중지 in a panel: stop the work its request started. Two things happen. The channel refuses the next
+        Unity/Blender call of the subagents working for it (through their guards, see _stop_for), so the work ends
+        whatever the supervisor does; and the supervisor is told, so it hands out no more of that request and tells
+        the panel how far things got. Nothing is undone: that is the panel's 되돌리기."""
+        chat_id, agent = resolve_window(installed_agents(self.agents_dir), app, window, pin)
+        with self.cond:
+            now = time.time()
+            item = self._request_item(chat_id)
+            entry = self.progress.get(chat_id)
+            working = entry is not None and now - entry["updated"] <= PROGRESS_TTL
+            if item is None and not working:
+                return {"chat_id": chat_id, "stopping": False}  # nothing is going on for this window
+            self.stops[chat_id] = {"seq": item["seq"] if item else 0, "ts": now}
+            if working:
+                entry["stopping"] = True
+                self._bump_progress(chat_id)
+            self._append(chat_id, {"kind": "notice", "text": "중지를 요청했어요. 지금 하던 동작 하나는 끝까지 갈 수 있어요."})
+            meta = {"chat_id": chat_id, "app": app, "window": window, "agent": agent or "none", "stop": "requested"}
+            worker = self.workers.get(chat_id)
+            if worker and worker["agent_id"] and not worker["stopped"]:
+                meta["agent_id"] = worker["agent_id"]
+            asked = " ".join(str((item or {}).get("text", "")).split())[:80]
+            notification = {"jsonrpc": "2.0", "method": "notifications/claude/channel", "params": {
+                "content": "[claude-hand] 사용자가 이 채팅창에서 [중지]를 눌렀습니다" + (f': "{asked}"' if asked else "") +
+                           ". 이 요청으로 일하는 하위 세션의 다음 Unity·Blender 호출은 채널이 막습니다. 이 요청의 일을 더 맡기지 말고, "
+                           "아직 돌고 있는 하위 세션이 있으면 멈춘 뒤, 어디까지 했고 무엇이 남았는지 reply로 알리세요.",
+                "meta": meta}}
+            self._log("stop", request=(item or {}).get("request", ""), chat_id=chat_id)
+            ready = self.initialized
+            if not ready:
+                self.backlog.append(notification)
+        if ready:
+            self.emit(notification)
+        return {"chat_id": chat_id, "stopping": True}
+
+    def _stop_for(self, chat_id: str, now: float) -> str | None:
+        """The chat whose 중지 covers work in this window now, or None. A stop belongs to the request it was pressed
+        on: it holds until that request is answered or its panel sends something new, and STOP_SECONDS at most, so a
+        supervisor that never answers cannot leave a window shut. It covers the panel's own window, and windows whose
+        own panels wait on nothing: what they do was asked elsewhere, here as far as the channel can tell. Called
+        with the lock held."""
+        own = self._request_item(chat_id)
+        for chat, stop in list(self.stops.items()):
+            item = self._request_item(chat)
+            if now - stop["ts"] > STOP_SECONDS or (item["seq"] if item else 0) != stop["seq"]:
+                del self.stops[chat]
+            elif chat == chat_id or (own is None and stop["seq"]):
+                return chat
+        return None
 
     def _request_item(self, chat_id: str) -> dict | None:
         """The panel message not answered yet (a "working on it" reply does not answer it)."""
@@ -793,6 +853,12 @@ class PanelHandler(BaseHTTPRequestHandler):
             result = self.hub.report_action(str(body.get("app", "")), str(body.get("pin", ""))[:200],
                                             str(body.get("tool", "")), str(body.get("detail", "")), str(body.get("agent_id", ""))[:80])
             self._json(200 if result else 404, {"ok": result is not None, **(result or {})})
+        elif path == "/v1/stop":  # 중지 in a panel
+            app = str(body.get("app", ""))
+            if app not in ("unity", "blender"):
+                self._json(400, {"ok": False, "error": "app must be unity or blender"})
+                return
+            self._json(200, {"ok": True, **self.hub.request_stop(app, str(body.get("window", ""))[:200], str(body.get("pin", ""))[:200])})
         elif path == "/v1/stopped":  # a subagent's Stop hook: it finished its turn
             result = self.hub.agent_stopped(str(body.get("app", "")), str(body.get("pin", ""))[:200], str(body.get("agent_id", ""))[:80])
             self._json(200 if result else 404, {"ok": result is not None, **(result or {})})

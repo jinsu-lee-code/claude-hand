@@ -145,6 +145,9 @@ def report_progress(event: dict, pin: str, server: str, app: str, home: Path | N
     try:
         reply = post_to_channel("/v1/progress", {"app": app, "pin": pin, "tool": short, "agent_id": str(event.get("agent_id") or ""),
                                                  "detail": action_summary(event.get("tool_input") or {})}, home, post)
+        if reply.get("stop"):
+            return ("사용자가 채팅창에서 [중지]를 눌러 이 호출을 막았습니다. 더 부르지 말고, 지금까지 한 것과 남은 것을 그대로 "
+                    "감독에게 보고하고 끝내세요. 한 것을 되돌리지는 마세요(되돌릴지는 사용자가 정합니다).")
         if reply.get("busy"):
             return (f"이 창({pin})은 지금 다른 하위 세션이 작업 중이라 이 호출을 막았습니다. 같은 대상에 둘이 동시에 일하면 서로 "
                     "덮어씁니다. 더 부르지 말고 이 내용을 그대로 감독에게 보고하세요.")

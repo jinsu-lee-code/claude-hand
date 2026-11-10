@@ -241,6 +241,16 @@ class ProgressTests(unittest.TestCase):
                 guard.run_guard(args, io.StringIO(json.dumps(event)), out)
             self.assertEqual(json.loads(out.getvalue())["hookSpecificOutput"]["permissionDecision"], "deny")
 
+    def test_a_call_after_the_panels_stop_button_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home, marks = self.home(tmp), []
+            event = {"tool_name": "mcp__unity_mygame__manage_gameobject", "tool_input": {"action": "create"}, "agent_id": "aaa"}
+            stopped = lambda req: {"ok": True, "stop": True, "by": "unity-mygame", "new_request": True}
+            reason = guard.report_progress(event, self.PIN, self.SERVER, "unity", home=home, post=stopped, mark=lambda *a: marks.append(a))
+            self.assertIn("[중지]를 눌러 이 호출을 막았습니다", reason)
+            self.assertIn("되돌리지는 마세요", reason)  # stopping is not undoing: that stays the user's call
+            self.assertEqual(marks, [])
+
     def test_undo_point_goes_through_the_bridge(self):
         calls = []
         with unittest.mock.patch.dict(sys.modules, {"unity_bridge": unittest.mock.Mock(

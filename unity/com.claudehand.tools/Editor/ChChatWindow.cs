@@ -651,11 +651,34 @@ namespace ClaudeHand.Editor
             }
             int actions = _progress.Value<int?>("actions") ?? 0;
             double elapsed = (_progress.Value<double?>("elapsed") ?? 0) + EditorApplication.timeSinceStartup - _progressReceivedAt;
-            var parts = new List<string> { $"작업 중 · {(int)elapsed}초" };
+            bool stopping = _progress.Value<bool?>("stopping") ?? false;
+            var parts = new List<string> { $"{(stopping ? "중지하는 중" : "작업 중")} · {(int)elapsed}초" };
             var tool = _progress.Value<string>("tool");
             if (!string.IsNullOrEmpty(tool)) parts.Add($"{tool} {_progress.Value<string>("detail")}".Trim());
             if (actions > 0) parts.Add($"{actions}번째 동작");
+            GUILayout.BeginHorizontal();
             EditorGUILayout.LabelField(string.Join(" · ", parts), EditorStyles.wordWrappedMiniLabel);
+            if (!stopping && GUILayout.Button("중지", EditorStyles.miniButton, GUILayout.Width(44))) RequestStop();
+            GUILayout.EndHorizontal();
+        }
+
+        /// <summary>
+        /// 중지: the channel refuses the next Unity/Blender call of the subagents working on this window's request and
+        /// tells the supervisor. Nothing is undone; 되돌리기 is there for that once the work has stopped.
+        /// </summary>
+        private async void RequestStop()
+        {
+            var server = ReadServer();
+            if (server == null) return;
+            try
+            {
+                var result = await Call(server, HttpMethod.Post, "/v1/stop", new { app = "unity", window = ChPaths.ProjectName }, CancellationToken.None);
+                if (result.Value<bool?>("ok") != true) SetStatus("중지를 보내지 못했습니다: " + (result.Value<string>("error") ?? "알 수 없는 오류"));
+            }
+            catch (Exception ex)
+            {
+                SetStatus("중지를 보내지 못했습니다: " + ex.Message);
+            }
         }
 
         /// <summary>
