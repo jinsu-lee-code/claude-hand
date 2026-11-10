@@ -23,7 +23,7 @@ Claude Hand Chat 애드온의 함수를 `execute_code`로 부르고, 출력을 �
   - 출력의 `added`가 여기서 붙은 실제 이름이다. 이름이 겹쳐 `.001`이 붙은 것은 `renamed`에 나오니 함께 보고한다.
 - **Unity로 보내기**(FBX): `import claude_hand_chat; print(claude_hand_chat.export_fbx(["오브젝트 이름"], "짧은_영문_이름"))`
   - 자식 오브젝트가 함께 가고, 선택 상태는 원래대로 돌아온다. 출력의 `manifest` 경로를 돌려준다. Unity 담당은 `ch_import_model(manifest=...)`로 받는다.
-- `ModuleNotFoundError`가 나면 Claude Hand Chat 애드온이 없는 것이다. 아무것도 바꾸지 말고, `uv run tools/claude_hand.py blender-install-chat`으로 설치한 뒤 Blender를 다시 열어야 한다고 감독에게 보고한다.
+- `ModuleNotFoundError`가 나면 Claude Hand Chat 애드온이 없는 것이고, `AttributeError`(함수가 없음)가 나면 예전 버전인 것이다. 아무것도 바꾸지 말고, `uv run tools/claude_hand.py update`를 한 뒤 Blender를 다시 열어야 한다고 감독에게 보고한다.
 
 ## 보고
 마지막 답에는 한 일, 바뀐 것(오브젝트 이름, 파일 경로, manifest 경로), 남은 문제를 짧게 적는다. 감독이 다른 세션에 그대로 넘길 값은 정확히 옮긴다.

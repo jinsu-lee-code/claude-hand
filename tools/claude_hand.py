@@ -155,6 +155,15 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     skill = Path.home() / ".claude" / "skills" / "claude-hand" / "SKILL.md"
     if not skill.exists() or skill.read_text(encoding="utf-8") != agents.rendered_skill():
         agents.install_skill(Path.home() / ".claude" / "skills")
+    # The subagent prompts just written call functions of this checkout's Blender add-on; an older installed copy
+    # does not have them. It is not replaced here: Blender has to be reopened for that, which is the user's call.
+    try:
+        behind = [str(path) for path in install.find_chat_addon_installs() if path.read_bytes() != constants.CHAT_ADDON_SOURCE.read_bytes()]
+    except OSError:
+        behind = []
+    if behind:
+        print("Blender 채팅 애드온이 이 버전과 다릅니다. Blender에서 옮기기·되돌리기가 안 될 수 있으니 "
+              "`uv run tools/claude_hand.py update`를 한 뒤 Blender를 다시 여세요.")
     config = launch.read_user_config(home)
     cleaned, freed = launch.clean_exchange(launch.exchange_keep_days(config))
     if cleaned:
