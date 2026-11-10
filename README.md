@@ -62,11 +62,10 @@ uv run tools/claude_hand.py clean-exchange --keep-days 30   # 교환 폴더의 �
 
 필요한 건 **Claude Code**와 이 저장소뿐입니다.
 
-1. 저장소를 받습니다. `git`이 없으면 GitHub 페이지에서 ZIP으로 받아 풀어도 됩니다.
+1. 저장소의 `main` 브랜치를 받습니다. `git`이 없으면 GitHub 페이지에서 `main` 브랜치를 고른 뒤 ZIP으로 받아 풀어도 됩니다.
    ```powershell
-   git clone https://github.com/jinsu-lee-code/claude-hand.git
+   git clone -b main https://github.com/jinsu-lee-code/claude-hand.git
    cd claude-hand
-   git checkout ccr-772f74ad-modcbm   # main에 합치기 전까지
    ```
 2. 그 폴더에서 Claude Code를 엽니다(`claude`). 데스크톱 앱이면 이 폴더를 엽니다.
 3. **"claude-hand 세팅해줘"**라고 말합니다.
