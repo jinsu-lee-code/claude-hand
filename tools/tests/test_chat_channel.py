@@ -274,6 +274,13 @@ class McpTests(unittest.TestCase):
         mcp.call_tool({"name": "reply", "arguments": {"chat_id": "unity-mygame", "text": "작업 중이에요", "working": True}})
         self.assertTrue(mcp.hub.logs["unity-mygame"][-1]["working"])
         self.assertIn("working", cc.REPLY_TOOL["inputSchema"]["properties"])
+        # Which other windows a request changed is asked of every reply: the supervisor knows, the channel only guesses.
+        self.assertIn("changed_windows", cc.REPLY_TOOL["inputSchema"]["required"])
+        named = mcp.call_tool({"name": "reply", "arguments": {"chat_id": "unity-mygame", "text": "done",
+                                                              "changed_windows": ["unity-mygame", "hand_test"]}})
+        self.assertIn("changed_windows names no window Claude Hand knows: hand_test.", named["content"][0]["text"])
+        none = mcp.call_tool({"name": "reply", "arguments": {"chat_id": "unity-mygame", "text": "done", "changed_windows": []}})
+        self.assertEqual(none, {"content": [{"type": "text", "text": "sent"}]})
         context = mcp.call_tool({"name": "current_context", "arguments": {}})
         self.assertEqual(json.loads(context["content"][0]["text"])["windows"], [])
 
@@ -499,6 +506,76 @@ class PreviewTests(unittest.TestCase):
         time.sleep(0.3)
         self.assertEqual(self.shots, [])
         self.assertEqual(self.images("unity-mygame", 0) + self.images("unity-level", 0), [])
+
+    def test_on_it_sent_without_working_keeps_side_by_side_projects_apart(self):
+        """The supervisor forgets `working` now and then. Its "on it" then looked like the answer, the work that
+        followed looked asked elsewhere, and each project got the other's picture."""
+        write_agents(Path(self.tmp.name) / "agents", [handlib.discovery.Instance(name="Level", hash="bbbb2222")])
+        self.hub.post_user_message("unity", "MyGame", "큐브를 빨갛게", pin="MyGame@aaaa1111")
+        self.hub.post_user_message("unity", "Level", "조명을 어둡게", pin="Level@bbbb2222")
+        self.hub.reply("unity-mygame", "빨갛게 하고 있어요. 잠시만 기다려 주세요.")
+        self.hub.reply("unity-level", "어둡게 하고 있어요. 잠시만 기다려 주세요.")
+        self.hub.report_action("unity", "MyGame@aaaa1111", "manage_material", "red")
+        self.hub.report_action("unity", "Level@bbbb2222", "manage_gameobject", "light")
+        self.hub.reply("unity-mygame", "빨갛게 했어요")
+        self.hub.report_action("unity", "Level@bbbb2222", "manage_scene", "save")
+        self.hub.reply("unity-level", "어둡게 했어요")
+        time.sleep(0.3)
+        self.assertEqual(self.shots, [])
+        self.assertEqual(self.images("unity-mygame", 0) + self.images("unity-level", 0), [])
+        self.assertEqual(self.hub.early, {})  # both were answered after their work: nothing is left open
+
+    def test_on_it_without_working_in_one_project_does_not_show_it_in_the_other(self):
+        write_agents(Path(self.tmp.name) / "agents", [handlib.discovery.Instance(name="Level", hash="bbbb2222")])
+        self.hub.post_user_message("unity", "MyGame", "큐브를 빨갛게", pin="MyGame@aaaa1111")
+        self.hub.reply("unity-mygame", "빨갛게 하고 있어요.")
+        self.hub.post_user_message("unity", "Level", "조명을 어둡게", pin="Level@bbbb2222")  # asked while MyGame works
+        self.hub.report_action("unity", "MyGame@aaaa1111", "manage_material", "red")
+        self.hub.report_action("unity", "Level@bbbb2222", "manage_gameobject", "light")
+        self.hub.reply("unity-level", "어둡게 했어요")
+        self.hub.reply("unity-mygame", "빨갛게 했어요")
+        time.sleep(0.3)
+        self.assertEqual(self.shots, [])
+
+    def test_an_answer_that_needed_no_work_stops_counting_after_a_while(self):
+        self.hub.post_user_message("unity", "MyGame", "지금 뭐가 선택돼 있지?", pin="MyGame@aaaa1111")
+        self.hub.reply("unity-mygame", "큐브예요")  # no work was seen: this may be "on it", so MyGame's request stays its own
+        self.hub.post_user_message("blender", "props", "의자를 Unity로 보내줘", pin="props@9877")
+        self.hub.report_action("unity", "MyGame@aaaa1111", "ch_import_model", "")
+        self.hub.reply("blender-props", "Unity에 놓았어요")  # unclear whose work that was: no picture
+        time.sleep(0.3)
+        self.assertEqual(self.shots, [])
+        self.hub.post_user_message("blender", "props", "하나 더 보내줘", pin="props@9877")
+        self.hub.early["unity-mygame"]["ts"] -= cc.PROGRESS_TTL + 1  # MyGame's panel got no result: it was the answer after all
+        self.hub.report_action("unity", "MyGame@aaaa1111", "ch_import_model", "")
+        self.hub.reply("blender-props", "하나 더 놓았어요")
+        [image] = self.images("blender-props")
+        self.assertEqual(image["window"], "MyGame")
+
+    def test_with_two_panels_waiting_a_third_window_is_shown_only_where_the_supervisor_says(self):
+        write_agents(Path(self.tmp.name) / "agents", [handlib.discovery.Instance(name="Level", hash="bbbb2222")])
+        self.hub.post_user_message("unity", "MyGame", "큐브를 빨갛게", pin="MyGame@aaaa1111")
+        self.hub.post_user_message("blender", "props", "의자를 Level로 보내줘", pin="props@9877")
+        self.hub.report_action("unity", "MyGame@aaaa1111", "manage_material", "red")
+        self.hub.report_action("unity", "Level@bbbb2222", "ch_import_model", "")  # for which of the two? the channel cannot tell
+        self.hub.reply("unity-mygame", "빨갛게 했어요")
+        time.sleep(0.3)
+        self.assertEqual(self.shots, [])
+        self.hub.reply("blender-props", "Level에 놓았어요", changed=["unity-level"])
+        [image] = self.images("blender-props")
+        self.assertEqual((image["window"], self.shots), ("Level", [("unity", "Level@bbbb2222")]))
+        self.assertEqual(self.images("unity-mygame", 0), [])
+
+    def test_what_the_supervisor_names_goes_before_what_the_channel_saw(self):
+        self.hub.post_user_message("blender", "props", "의자를 Unity로 보내줘", pin="props@9877")
+        self.hub.report_action("unity", "MyGame@aaaa1111", "ch_import_model", "")
+        self.hub.reply("blender-props", "Unity는 그대로 뒀어요", changed=[])  # it says no other window changed
+        time.sleep(0.3)
+        self.assertEqual(self.shots, [])
+        self.hub.post_user_message("blender", "props", "다시 보내줘", pin="props@9877")
+        self.hub.reply("blender-props", "보냈어요", changed=["blender-props", "unity-nobody", "unity-mygame", "unity-mygame"])
+        [image] = self.images("blender-props")  # not itself, not a window nobody has, and each window once
+        self.assertEqual((image["window"], self.shots), ("MyGame", [("unity", "MyGame@aaaa1111")]))
 
     def test_a_working_on_it_reply_gets_no_picture_but_the_result_does(self):
         self.hub.post_user_message("blender", "props", "의자를 Unity로 보내줘", pin="props@9877")
@@ -849,7 +926,7 @@ class WorkerTests(unittest.TestCase):
         self.assertIn(rules, skill)
         self.assertNotRegex(skill, r"\{\{\w+\}\}")
         for rule in ("`reply` 도구로", "`SendMessage`로", "`agent_id`", "`run_in_background`", "`working: true`", "`current_context`",
-                     '`"desktop"`', "[claude-hand]", "[중지]를 눌렀습니다"):
+                     '`"desktop"`', "[claude-hand]", "[중지]를 눌렀습니다", "`changed_windows`"):
             self.assertIn(rule, rules)
 
     # ------------------------------------------------------------------ 중지
@@ -893,6 +970,29 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(self.act("bbb")["stop"])
         self.hub.post_user_message("unity", "MyGame", "아니다, 다시 해줘")  # a new message in the panel lifts its stop
         self.assertNotIn("stop", self.act("bbb"))
+
+    def test_stop_leaves_a_side_by_side_project_alone_even_after_on_it_without_working(self):
+        self.hub.post_user_message("unity", "MyGame", "큐브 백 개 만들어줘")
+        self.hub.post_user_message("unity", "Props", "바닥 색 바꿔줘")
+        self.hub.reply("unity-props", "바꾸고 있어요. 잠시만 기다려 주세요.")  # "on it", sent without working
+        self.act("aaa")
+        self.stop()
+        self.assertNotIn("stop", self.act("ccc", pin="Props@bbbb2222"))  # Props still works on its own panel's request
+        self.assertTrue(self.act("aaa")["stop"])
+
+    def test_work_after_on_it_without_working_is_logged_under_its_own_request(self):
+        events = []
+        self.hub.events = lambda event, **fields: events.append({"event": event, **fields})
+        self.hub.post_user_message("unity", "MyGame", "큐브 만들어줘")
+        self.hub.post_user_message("unity", "Props", "바닥 색 바꿔줘")
+        mine, props = (e["request"] for e in events if e["event"] == "message")
+        self.hub.reply("unity-mygame", "만들고 있어요.")
+        action = self.act("aaa")
+        self.assertEqual((action["new_request"], action["label"]), (True, "큐브 만들어줘"))  # the undo point still names the request
+        self.hub.agent_stopped("unity", "MyGame@aaaa1111", "aaa")
+        self.hub.reply("unity-mygame", "만들었어요")
+        self.assertEqual([e["request"] for e in events if e["event"] in ("action", "stopped", "reply")], [mine] * 4)
+        self.assertNotEqual(mine, props)
 
     def test_stop_does_not_outlast_a_supervisor_that_never_answers(self):
         self.hub.post_user_message("unity", "MyGame", "큐브 만들어줘")
