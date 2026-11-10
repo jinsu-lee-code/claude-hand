@@ -107,6 +107,7 @@ Blender 패널 ─┼─ 채널 ─ 감독 ┼─ blender-props
 - 메시지에는 지금 선택한 오브젝트와 씬 정보가 함께 붙습니다. 그래서 "이거 복제해줘"처럼 말해도 됩니다. 끄는 체크박스가 있습니다.
 - 다른 창이 필요한 일도 그 창에서 말하면 됩니다. 예를 들어 Unity 창에서 "Blender props.blend의 Rock 가져와"라고 하면, 감독이 Blender 담당과 Unity 담당을 함께 써서 처리하고 결과를 그 Unity 창에 알려줍니다.
 - Claude가 도구를 실행하려고 허락을 구하면 채팅창에 **허용/거부** 버튼이 뜹니다.
+- 일이 끝났는데 답이 오지 않으면 채널이 1분 뒤 Claude Hand에 한 번 다시 알리고, 채팅창에 그렇게 했다고 보여 줍니다.
 - 한 창에서 시킨 일이 다른 창을 바꾸면(Blender 창에서 "Unity로 보내줘"), 답과 함께 바뀐 창의 **지금 모습**이 그림으로 붙습니다. Claude를 거치지 않고 채널이 직접 찍어서 토큰이 들지 않습니다.
 - 다른 프로그램을 보는 동안 답이나 허락 요청이 오면 Unity·Blender의 작업 표시줄 단추가 깜빡이고, Unity 채팅 탭 이름에 안 읽은 수가 붙습니다.
 - Unity가 "씬을 저장할까요?" 같은 대화상자에서 멈추면(Windows) 시간 초과를 기다리지 않고 바로 알아채, 대화상자의 글과 버튼을 감독과 채팅창에 알립니다. 무엇을 누를지는 사용자가 정합니다.
@@ -163,7 +164,7 @@ uv run tools/claude_hand.py update     # 하위 세션·감독 스킬·채팅 �
 | `tools/claude_hand.py` | 하위 세션 생성(`list`, `sync`), 세팅 도우미(`doctor`, `selftest`, `update`, `mode`, `unity-install`, `unity-open`, `blender-open`, `chat-setup`, `blender-install-chat`, `chat-status`, `shortcut`, `remote-control`)가 들어 있습니다. |
 | `tools/guard.py` | 하위 세션의 안전장치(PreToolUse 훅)입니다. 다른 대상으로 가는 호출을 막습니다. 표준 라이브러리만 쓰는 작은 파일로 따로 두어, 다른 파일의 실수가 안전장치를 멈추지 못하게 했습니다. |
 | `tools/handlib/` | 위 스크립트들을 이루는 모듈입니다: 열린 창 찾기(`discovery`), 하위 세션 정의 만들기(`agents`), 채팅 설정(`chatsetup`), 시작 준비(`launch`), 진단(`checks`) 등. 목록은 `tools/handlib/__init__.py`에 있습니다. |
-| `prompts/` | 하위 세션에게 주는 지침의 원문입니다(`unity-subagent.md`, `blender-subagent.md`). `{{이름}}` 자리에 창마다의 값이 들어갑니다. 고친 뒤에는 `update`로 다시 설치합니다. |
+| `prompts/` | Claude에게 주는 지침의 원문입니다. 하위 세션용(`unity-subagent.md`, `blender-subagent.md`)에는 `{{이름}}` 자리에 창마다의 값이 들어갑니다. `chat-rules.md`는 감독이 채팅창을 다루는 규칙으로, 채널 서버와 감독 스킬이 같은 글을 씁니다. 고친 뒤에는 `update`로 다시 설치하고 Claude Hand를 다시 켭니다. |
 | `tools/chat_channel.py` | 채팅 채널 서버입니다. Claude Code가 실행하는 MCP 서버이고, Unity·Blender 채팅창과는 로컬 HTTP로 통신합니다. |
 | `unity/com.claudehand.tools/` | Unity 패키지입니다. `ch_*` 도구 8개와 채팅창(Window > Claude Hand > Chat)을 추가합니다. `ch_*` 도구는 이 패키지가 여는 자기 통로로 불립니다. MCP for Unity 없이도 컴파일되고, 그 버전에 상관없이 동작합니다. |
 | `tools/unity_bridge.py` | 하위 세션이 그 통로로 `ch_*` 도구를 부를 때 쓰는 MCP 서버입니다. `--list`로 통로를 연 Unity를 볼 수 있습니다. |
@@ -278,7 +279,7 @@ Blender에는 MCP for Blender 말고 따로 설치할 것이 없습니다. 그 �
   - `blender-open`의 포트 지정
 - 내보내는 스크립트가 asmdef에 속해 있어도 asmdef는 같이 가지 않습니다. 받는 쪽에서는 기본 어셈블리로 컴파일됩니다.
 - `Packages/` 안의 에셋(URP 셰이더 등)은 `.unitypackage`에 들어가지 않습니다. 받는 프로젝트에 같은 패키지가 있어야 하고, dry run의 `missing_packages`에 표시됩니다.
-- 같은 프로젝트나 같은 Blender 창에 하위 세션 둘을 동시에 붙이면 안 됩니다. 명령이 하나씩 처리되기 때문이고, 감독 스킬에도 이 규칙이 들어 있습니다.
+- 같은 프로젝트나 같은 Blender 창에 하위 세션 둘을 동시에 붙이면 안 됩니다. 명령이 하나씩 처리되기 때문입니다. 감독 스킬에 이 규칙이 들어 있고, Claude Hand가 켜져 있는 동안에는 안전장치가 나중에 온 하위 세션의 호출을 막습니다.
 - Blender → Unity는 FBX라서 Blender 셰이더 노드가 그대로 옮겨지지 않습니다. 기본 색과 텍스처 정도만 옮겨지고, 복잡한 재질은 Unity에서 다시 손봐야 합니다.
 - Blender 하위 세션이 처음 연결을 확인할 때와 `sync`·`doctor`가 파일 이름을 읽을 때, Blender 안에서 읽기 전용 Python(`print(bpy.data.filepath)`)이 실행됩니다.
 

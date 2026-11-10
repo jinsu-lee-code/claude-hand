@@ -73,6 +73,8 @@ def hook_command(runner: str, pin: str, key: str, transport: str, app: str = "un
 
 
 def hook_block(command: str) -> list[str]:
+    """PreToolUse: the guard decides on every Unity/Blender call. Stop: the same script tells the chat channel the
+    subagent finished its turn (Claude Code runs a subagent's Stop hook when that subagent stops)."""
     return [
         "hooks:",
         "  PreToolUse:",
@@ -80,6 +82,10 @@ def hook_block(command: str) -> list[str]:
         "      hooks:",
         "        - type: command",
         "          command: " + q(command),
+        "  Stop:",
+        "    - hooks:",
+        "        - type: command",
+        "          command: " + q(command + " --stop"),
     ]
 
 
@@ -289,9 +295,11 @@ def sync_agents(instances: list[discovery.Instance], agents_dir: Path, server: d
 
 
 def rendered_skill(root: Path = constants.REPO_ROOT) -> str:
-    """The supervisor skill as installed: {{CLAUDE_HAND}} becomes this checkout's folder, so the skill can run
-    claude_hand.py itself from any working folder (the Desktop app's Code tab has no start script)."""
-    return constants.SKILL_SOURCE.read_text(encoding="utf-8").replace("{{CLAUDE_HAND}}", root.as_posix())
+    """The supervisor skill as installed. {{CLAUDE_HAND}} becomes this checkout's folder, so the skill can run
+    claude_hand.py itself from any working folder (the Desktop app's Code tab has no start script). {{CHAT_RULES}}
+    becomes prompts/chat-rules.md, the same text the chat channel gives the supervisor as its instructions."""
+    return fill(constants.SKILL_SOURCE.read_text(encoding="utf-8"), CLAUDE_HAND=root.as_posix(),
+                CHAT_RULES=prompt_template("chat-rules"))
 
 
 def install_skill(skills_dir: Path, dry_run: bool = False) -> Path:

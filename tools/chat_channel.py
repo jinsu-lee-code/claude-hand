@@ -51,7 +51,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from handlib.agents import AgentInfo, installed_agents, refresh_agents, slug  # noqa: E402
+from handlib.agents import AgentInfo, installed_agents, prompt_template, refresh_agents, slug  # noqa: E402
 from handlib.capture import capture_window  # noqa: E402
 from handlib.link import claude_hand_home, supervisor_running  # noqa: E402
 from unity_bridge import describe_dialogs, find_project, waiting_dialogs  # noqa: E402
@@ -67,30 +67,9 @@ MAX_CONTEXT_ITEMS = 20  # selected objects / assets kept per window
 LOG_LIMIT = 100  # items kept per chat: panels show recent history; the conversation itself lives in Claude Code
 AUTO_SYNC_INTERVAL = 20.0  # seconds between automatic subagent refreshes for the same window
 
-INSTRUCTIONS = (
-    "This channel connects chat panels inside Unity and Blender windows to you. A message arrives as "
-    '<channel source="claude-hand-chat" chat_id="..." app="unity|blender" window="..." agent="...">. '
-    "The text is from the user, who is sitting in that window and cannot see your terminal output, so always "
-    "answer with the reply tool, passing the chat_id from the tag; reply in the user's language. "
-    "Routing: the agent attribute names the claude-hand subagent that owns that window (unity-* / blender-*). "
-    "Hand the request to that subagent. For the same chat_id keep resuming the same subagent with SendMessage "
-    "instead of starting a new one, so each window keeps its own conversation. Run subagents in the background so you "
-    "keep receiving other windows' messages (and the Claude app shows them under Remote Control); reply when they finish. When a request involves other "
-    "windows (moving objects between projects, Blender to Unity), coordinate the other subagents as the claude-hand "
-    "skill describes, and report back in the chat_id the request came from. If agent is \"none\", the window's subagent could "
-    "not be made automatically: reply that MCP for Unity should show Connected (Window > MCP for Unity) or the "
-    "MCP for Blender server should be on, then ask them to send the message again. For work that takes "
-    "more than a few seconds, send a short reply first saying what you are doing, with working set to true, then the "
-    "result without it: only a reply without working counts as the answer (the panel's alert and pictures of other "
-    "windows come with it). "
-    "Messages without a <channel> tag come from the terminal or the Claude app (Remote Control). When such a request "
-    "is about a Unity or Blender window and says 'this', 'the selected one' or 'here' without naming it, call "
-    "current_context to see what is selected where and which window was used last. After work requested that way "
-    "finishes, also call reply for each window it changed, with that window's chat_id from current_context, "
-    "origin \"desktop\" and request set to a one-line summary of what was asked, so the window's chat panel keeps its whole history. "
-    "Claude Hand resumes this same conversation when it is restarted, but subagents started before a restart may be gone: "
-    "if SendMessage to one fails, hand the window's request to its subagent anew."
-)
+# What the supervisor is told about the panels. The same text goes into the supervisor skill when it is installed,
+# so the two cannot drift apart (prompts/chat-rules.md).
+INSTRUCTIONS = prompt_template("chat-rules")
 HISTORY_KINDS = ("user", "reply", "image")  # what a panel shows again after a restart; permission prompts do not outlive it
 PREVIEW_SIZE = 640  # longest side of a result preview, in pixels
 IMAGES_KEPT = 60    # preview files kept on disk; older ones are deleted
@@ -114,6 +93,9 @@ REPLY_TOOL = {
 }
 
 PROGRESS_TTL = 300.0  # seconds without news after which a panel stops showing a bar (a long import is one action)
+LOCK_SECONDS = 90.0    # a subagent that reported a tool call this recently and has not stopped is still at work in its window
+ANSWER_GRACE = 60.0    # once the subagents stopped: how long the supervisor may take to answer the panel before it is reminded
+STALL_SECONDS = 300.0  # when no subagent work was seen at all: how long a panel request may wait before the reminder
 
 CONTEXT_TOOL = {
     "name": "current_context",
@@ -184,6 +166,9 @@ class ChatHub:
         self.images_dir: Path | None = None  # where result previews are kept (None: no previews)
         self.find_dialogs = None  # callable(app, pin) -> the dialogs that stop that window now ([] for none)
         self.dialog_seen: dict[str, str] = {}  # chat_id -> the dialogs already told about, so each is told once
+        self.workers: dict[str, dict] = {}  # chat_id -> the subagent at work in that window: {"agent_id", "last", "stopped"}
+        self.reminded: dict[str, int] = {}  # chat_id -> seq of the request the supervisor was reminded of (once each)
+        self.started = time.time()  # requests older than this server (shown again from history) are not its to chase
 
     def use_history(self, directory: Path) -> None:
         """Keep each chat's recent messages in `directory` and show the saved ones again, so a panel still has its
@@ -247,6 +232,9 @@ class ChatHub:
         content = text if not context else f"{text}\n\n[{app} 창 정보: {window}]\n{context}"
         meta = {"chat_id": chat_id, "app": app, "window": window, "agent": agent or "none"}
         with self.cond:
+            worker = self.workers.get(chat_id)
+            if agent and worker and worker["agent_id"]:
+                meta["agent_id"] = worker["agent_id"]  # to resume with SendMessage, whatever the supervisor still remembers
             self.windows[chat_id] = {"app": app, "window": window, "agent": agent, "last_seen": time.time()}
             self._append(chat_id, {"kind": "user", "text": text})
             for pending in self.permissions.values():  # a window that joins late still sees open prompts
@@ -331,7 +319,7 @@ class ChatHub:
 
     def check_dialogs(self) -> None:
         """While a window's subagent works, look for a dialog that stopped that window ("Save the scene?") and tell the
-        chats whose request waits on it: their user may be looking at another window. One pass (watch_dialogs repeats)."""
+        chats whose request waits on it: their user may be looking at another window. One pass (watch repeats)."""
         if self.find_dialogs is None:
             return
         now = time.time()
@@ -356,12 +344,48 @@ class ChatHub:
                 for target in [c for c in self.logs if c != chat and self._open_request(c)]:
                     self._append(target, {"kind": "notice", "text": text, "alert": True})
 
-    def watch_dialogs(self, interval: float = 2.0) -> None:
+    def check_unanswered(self, now: float | None = None) -> list[str]:
+        """Remind the supervisor of a panel request that got no answer. Answering with the reply tool is a rule the
+        supervisor follows, not something that happens by itself; when it writes its answer to the terminal instead,
+        the user in that window waits for nothing. Once per request: a minute after the subagents stopped, or five
+        minutes after the request when no subagent work was seen at all. One pass (watch repeats). Returns the chats
+        reminded."""
+        now = now or time.time()
+        reminders = []
+        with self.cond:
+            if not self.initialized:
+                return []
+            if any(not w["stopped"] and now - w["last"] <= PROGRESS_TTL for w in self.workers.values()):
+                return []  # someone is still at work
+            last_work = max((w["stopped"] or w["last"] for w in self.workers.values()), default=0.0)
+            for chat_id in list(self.logs):
+                request = self._request_item(chat_id)
+                if request is None or request["ts"] < self.started or self.reminded.get(chat_id) == request["seq"]:
+                    continue
+                heard = max(i["ts"] for i in self.logs[chat_id] if i["seq"] >= request["seq"] and i.get("kind") in ("user", "reply"))
+                worked = last_work > request["ts"]
+                if now - max(heard, last_work if worked else 0.0) < (ANSWER_GRACE if worked else STALL_SECONDS):
+                    continue
+                self.reminded[chat_id] = request["seq"]
+                window = self.windows.get(chat_id) or {}
+                asked = " ".join(str(request.get("text", "")).split())[:80]
+                reminders.append({"jsonrpc": "2.0", "method": "notifications/claude/channel", "params": {
+                    "content": f'[claude-hand] 이 채팅창의 요청이 아직 답을 받지 못했습니다: "{asked}". 일이 끝났으면 reply로 결과를, '
+                               "아직 하는 중이면 reply에 working: true로 지금 상황을 한 줄 보내세요.",
+                    "meta": {"chat_id": chat_id, "app": str(window.get("app", "")), "window": str(window.get("window", "")),
+                             "agent": window.get("agent") or "none", "reminder": "unanswered"}}})
+                self._append(chat_id, {"kind": "notice", "text": "답이 늦어져 Claude Hand에 다시 알렸어요."})
+        for notification in reminders:
+            self.emit(notification)
+        return [n["params"]["meta"]["chat_id"] for n in reminders]
+
+    def watch(self, interval: float = 2.0) -> None:
         while True:
-            try:
-                self.check_dialogs()
-            except Exception as exc:  # never let the watcher die
-                log("dialog check failed:", exc)
+            for check in (self.check_dialogs, self.check_unanswered):
+                try:
+                    check()
+                except Exception as exc:  # never let the watcher die
+                    log(f"{check.__name__} failed:", exc)
             time.sleep(interval)
 
     def _prune_images(self) -> None:
@@ -491,33 +515,60 @@ class ChatHub:
         self.progress_rev[chat_id] = self.progress_rev.get(chat_id, 0) + 1
         self.cond.notify_all()
 
-    def report_action(self, app: str, pin: str, tool: str, detail: str) -> dict | None:
+    def report_action(self, app: str, pin: str, tool: str, detail: str, agent_id: str = "") -> dict | None:
         """A window's subagent is about to run a Unity/Blender tool (its guard hook says so): show it in that
         window's panel. new_request is true for the first action of a request (the guard sets an undo point then),
-        with label: the panel message it answers, if any. None for a pin no generated subagent has."""
+        with label: the panel message it answers, if any. busy is true when another subagent is still at work in
+        that window: two at once overwrite each other, so the guard refuses the call. None for a pin no generated
+        subagent has."""
         agent = next((a for a in installed_agents(self.agents_dir) if a.app == app and a.pin == pin), None)
         if agent is None:
             return None
         with self.cond:
+            now = time.time()
+            worker = self.workers.get(agent.name)
+            if agent_id and worker and worker["agent_id"] not in ("", agent_id) and not worker["stopped"] \
+                    and now - worker["last"] <= LOCK_SECONDS:
+                return {"chat_id": agent.name, "busy": True, "other": worker["agent_id"]}
+            if agent_id or worker is None:
+                self.workers[agent.name] = {"agent_id": agent_id, "last": now, "stopped": 0.0}
+            else:  # a guard from before agent ids were reported: the same window, whoever it is
+                worker.update(last=now, stopped=0.0)
             own = self._open_request(agent.name)
             if not own:  # its own panel waits on nothing: the work was asked in another window, whose reply may show it
-                self.acted[agent.name] = time.time()
-            entry = self._progress_entry(agent.name, time.time())
+                self.acted[agent.name] = now
+            entry = self._progress_entry(agent.name, now)
             first = not entry.get("marked")
-            entry.update(tool=tool[:80], detail=detail[:120], actions=entry["actions"] + 1, updated=time.time(), marked=True)
+            entry.update(tool=tool[:80], detail=detail[:120], actions=entry["actions"] + 1, updated=now, marked=True)
             self._bump_progress(agent.name)
             label = own if first else ""
         return {"chat_id": agent.name, "new_request": first, "label": label}
 
-    def _open_request(self, chat_id: str) -> str:
-        """The panel message not answered yet, in a few words ("" when the request came from elsewhere). A "working on
-        it" reply does not answer it."""
+    def agent_stopped(self, app: str, pin: str, agent_id: str = "") -> dict | None:
+        """A window's subagent finished its turn (its Stop hook says so): the window is free for another, and the
+        supervisor now owes the panel an answer. None for a pin no generated subagent has."""
+        agent = next((a for a in installed_agents(self.agents_dir) if a.app == app and a.pin == pin), None)
+        if agent is None:
+            return None
+        with self.cond:
+            worker = self.workers.get(agent.name)
+            if worker and worker["agent_id"] in ("", agent_id) and not worker["stopped"]:
+                worker["stopped"] = time.time()
+        return {"chat_id": agent.name}
+
+    def _request_item(self, chat_id: str) -> dict | None:
+        """The panel message not answered yet (a "working on it" reply does not answer it)."""
         for item in reversed(self.logs.get(chat_id, [])):
             if item.get("kind") == "reply" and not item.get("working"):
-                return ""
+                return None
             if item.get("kind") == "user":
-                return " ".join(str(item.get("text", "")).split())[:40]
-        return ""
+                return item
+        return None
+
+    def _open_request(self, chat_id: str) -> str:
+        """The panel message not answered yet, in a few words ("" when the request came from elsewhere)."""
+        item = self._request_item(chat_id)
+        return " ".join(str(item.get("text", "")).split())[:40] if item else ""
 
     def _current_progress(self, chat_id: str) -> dict | None:
         entry = self.progress.get(chat_id)
@@ -700,7 +751,10 @@ class PanelHandler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True, "chat_id": chat_id})
         elif path == "/v1/progress":  # a subagent's guard hook, just before each Unity/Blender tool call
             result = self.hub.report_action(str(body.get("app", "")), str(body.get("pin", ""))[:200],
-                                            str(body.get("tool", "")), str(body.get("detail", "")))
+                                            str(body.get("tool", "")), str(body.get("detail", "")), str(body.get("agent_id", ""))[:80])
+            self._json(200 if result else 404, {"ok": result is not None, **(result or {})})
+        elif path == "/v1/stopped":  # a subagent's Stop hook: it finished its turn
+            result = self.hub.agent_stopped(str(body.get("app", "")), str(body.get("pin", ""))[:200], str(body.get("agent_id", ""))[:80])
             self._json(200 if result else 404, {"ok": result is not None, **(result or {})})
         else:
             self._json(404, {"ok": False, "error": "not found"})
@@ -979,7 +1033,7 @@ def main(argv: list[str] | None = None) -> int:
     mcp.hub.capture = lambda app, pin, path: capture_window(app, pin, path, PREVIEW_SIZE)
     mcp.hub.images_dir = home / "chat" / "images"
     mcp.hub.find_dialogs = lambda app, pin: waiting_dialogs(find_project(hash_=pin.rpartition("@")[2])) if app == "unity" else []
-    threading.Thread(target=mcp.hub.watch_dialogs, name="dialog-watch", daemon=True).start()
+    threading.Thread(target=mcp.hub.watch, name="watch", daemon=True).start()
     if sys.platform == "win32" and minimize_after_start(home):
         # Not at start: Claude Code may still be showing its development-channel confirmation in that window.
         # The first tool call or permission request means the session is past it.

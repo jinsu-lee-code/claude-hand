@@ -176,7 +176,13 @@ Blender N 패널 애드온 (urllib)  ─┼──▶ chat_channel.py ──stdio
   - Unity는 프로젝트 이름으로 찾는다. 같은 이름이 둘이면 추측하지 않고 `none`으로 둔다.
   - Blender는 `<파일>@<포트>`가 정확히 같아야 한다.
   - `chat_id`는 담당 하위 세션 이름이라 창마다 하나다.
-- **대화 맥락:** 감독은 같은 `chat_id`에 같은 하위 세션을 `SendMessage`로 이어서 맡긴다. 문서상 이어 쓴 하위 세션은 전체 대화 기록을 유지한다. 규칙은 채널의 `instructions`와 감독 스킬 두 곳에 적었다.
+- **대화 맥락:** 감독은 같은 `chat_id`에 같은 하위 세션을 `SendMessage`로 이어서 맡긴다. 문서상 이어 쓴 하위 세션은 전체 대화 기록을 유지한다. 채널 서버는 그 창에서 마지막으로 일한 하위 세션의 ID를 기억해 태그에 `agent_id`로 붙인다. 감독이 긴 대화를 압축하다 잊어도 이어 맡길 수 있다(가정 15의 대안).
+- **감독이 지킬 규칙의 원문은 한 곳에 둔다**(`prompts/chat-rules.md`). 채널 서버는 이 글을 `instructions`로 주고, 감독 스킬은 설치될 때 `{{CHAT_RULES}}` 자리에 같은 글을 넣는다. 전에는 같은 규칙을 채널(영문)과 스킬(한국어)에 따로 적어서, 한쪽에만 있는 규칙이 지켜지지 않은 적이 있다(15단계).
+- **지침에만 있던 규칙 가운데 채널 서버가 알 수 있는 것은 코드가 받친다**(REVIEW-2026-11-10의 4번). 근거가 되는 사실 두 가지를 실제 Claude Code 2.1.321에서 확인했다: 하위 세션의 PreToolUse 훅 입력에는 `agent_id`가 들어 있고, 하위 세션 정의의 `Stop` 훅은 그 하위 세션이 차례를 마칠 때 `SubagentStop`으로 불린다.
+  - 가드는 동작을 보고할 때 `agent_id`를 같이 보낸다. 정의 파일의 `Stop` 훅은 같은 `guard.py`를 `--stop`으로 불러 "차례를 마쳤다"를 알린다(`/v1/stopped`). 이 훅은 무슨 일이 있어도 종료 코드 0으로 끝난다. 2로 끝나면 하위 세션이 멈추지 못한다.
+  - **같은 창에 하위 세션 둘:** 그 창에서 다른 하위 세션이 90초 안에 동작을 보고했고 아직 마치지 않았으면, 채널 서버가 `busy`로 답하고 가드가 그 호출을 막는다. 하위 세션은 막힌 이유를 감독에게 보고한다. 먼저 일하던 쪽이 마쳤다고 알리면 바로 풀린다. 마쳤다는 알림 없이 조용해진 경우(강제 중지)에는 90초 뒤 풀린다. Claude Hand가 꺼져 있으면 채널 서버가 없으니 이 확인도 없다.
+  - **답 누락:** 요청이 열려 있는데 하위 세션들이 모두 마친 지 1분이 지났거나, 하위 세션의 일이 한 번도 보이지 않은 채 5분이 지나면, 채널 서버가 감독에게 `[claude-hand]`로 시작하는 알림을 한 번 보낸다. 채팅창에는 "답이 늦어져 Claude Hand에 다시 알렸어요"가 뜬다. 감독이 답을 `reply` 대신 터미널에 쓰면 그 창의 사용자는 끝없이 기다리게 되는데, 이 경우를 잡는다. 다시 켠 뒤 기록에서 다시 보이는 예전 요청은 건드리지 않는다.
+  - `working: true`를 빼먹는 것과 데스크톱 앱 요청을 채팅창에 남기는 것은 여전히 감독에게 달려 있다. 글 내용으로는 가려낼 수 없다.
 - **권한 요청 중계:** `claude/channel/permission`을 선언한다. Claude Code가 보낸 `permission_request`를 열린 모든 채팅창에 보여주고, 처음 들어온 답 하나만 `notifications/claude/channel/permission`으로 돌려준다. 그래서 Unity 창에 앉은 채로 허락할 수 있다.
 - **보안:** 채널 문서는 "인증 없는 채널은 프롬프트 주입 통로"라고 경고한다.
   - HTTP는 127.0.0.1에만 연다.
@@ -331,7 +337,7 @@ Windows에서 며칠 써 보며 더한 것들이다. 공통 원칙은 **토큰�
 | 12 | `UpdateInteractionModeSettings` 리플렉션 호출이 Unity 6.3에서 바로 적용된다 | Unity를 다시 시작하면 적용된다(도구가 `applied_live`로 알려준다) |
 | 13 | Unity가 열려 있을 때 `manifest.json`을 고치면 창이 앞에 올 때 패키지를 다시 받는다 | Unity를 다시 연다 |
 | 14 | `.mcp.json`으로 등록한 서버를 `--dangerously-load-development-channels server:claude-hand-chat`이 채널로 불러온다(문서 예시와 같음). `.mcp.json`의 절대 경로 인자가 그대로 쓰인다 | `chat-setup --register-local`로 등록한다 |
-| 15 | 감독이 같은 `chat_id`에 같은 하위 세션을 계속 이어 쓴다(지침을 따르는지) | 지침을 고치거나, 채널 서버가 agent id를 기억해 메타로 넘긴다 |
+| 15 | 감독이 같은 `chat_id`에 같은 하위 세션을 계속 이어 쓴다(지침을 따르는지). 이제 채널 서버가 그 창에서 마지막으로 일한 하위 세션의 ID를 태그의 `agent_id`로 넘긴다. 남은 가정: 훅이 받는 `agent_id`가 `SendMessage`가 받는 ID와 같다 | 지침을 고친다 |
 | 16 | Unity 에디터가 비활성일 때도 `async` 이어 받기가 늦지 않게 돈다 | 폴링을 `EditorApplication.update`로 옮긴다 |
 | 17 | Windows에서 PowerShell `Get-CimInstance Win32_Process`가 채널 서버 시작 중에 30초 안에 끝난다(보통 1~2초) | 환경변수 경로만 쓴다 |
 | 18 | `settings.local.json`의 `enabledMcpjsonServers`가 `.mcp.json` 승인 질문을 없앤다(문서는 local 파일의 승인이 믿는 폴더에서 적용된다고만 함) | 처음 한 번 질문에 답한다(안내 문구가 있음) |
@@ -341,6 +347,8 @@ Windows에서 며칠 써 보며 더한 것들이다. 공통 원칙은 **토큰�
 | 22 | **확인됨(Windows)** 개발용 채널 경고는 Claude Code가 시작할 때 묻고, Claude의 첫 도구 호출은 그 뒤에만 온다. 그래서 그때 최소화하면 질문을 가리지 않는다. **경고는 켤 때마다 뜬다**(Windows에서 확인). 문서상으로도 그렇다: 직접 만든 채널은 Anthropic 허용 목록에 없어서 `--dangerously-load-development-channels`가 필요하고, 경고를 끄는 설정은 없다. 피하는 길은 Team·Enterprise 관리자의 `allowedChannelPlugins`(플러그인으로 묶어 조직 허용 목록에 넣기)나 공식 마켓플레이스 등록뿐이고, Pro·Max 개인 계정에는 없다. 문서의 예시는 "경고를 수락한 뒤 채널 서버를 띄운다"고 적고 있다 | `minimize off` |
 | 23 | ~~창 없는 Python에서 `AttachConsole(<claude pid>)`로 Claude Hand 콘솔 창을 찾아 최소화할 수 있다~~ **틀림**: Claude Code 아래에서 멈췄다. 지금은 Claude Code 위 두 단계 프로세스의 보이는 콘솔 창을 `EnumWindows`로 찾아 `ShowWindowAsync`한다(Windows 10 conhost에서 확인). 남은 가정: Windows Terminal이 기본 터미널이면 콘솔 창을 찾지 못한다 | 최소화가 안 될 뿐 동작에는 지장이 없다. 사용자가 직접 최소화한다 |
 | 24 | Remote Control로 들어온 데스크톱 앱 입력이 채널 태그 없는 일반 사용자 메시지로 보인다(그래서 감독이 "데스크톱에서 온 요청"으로 구분한다) | 지침을 "채널 태그가 없으면"에서 다른 표시로 바꾼다 |
+| 25 | **확인됨(Claude Code 2.1.321)** 하위 세션의 PreToolUse 훅 입력에 `agent_id`·`agent_type`이 있다. 하위 세션 정의의 `Stop` 훅은 `SubagentStop`으로 불리고 같은 `agent_id`를 받는다. 채널 서버가 `busy`로 답하면 가드의 거부가 하위 세션의 MCP 호출을 막는다 | `agent_id`가 없으면 같은 창 잠금과 태그의 `agent_id`는 동작하지 않고, 나머지는 전과 같다 |
+| 26 | 사용자가 데스크톱 앱에서 하위 세션을 강제로 멈춰도 `Stop` 훅이 불린다 | 안 불리면 그 창은 90초 동안 다른 하위 세션을 막는다 |
 
 ## 정한 방향: "데스크톱 앱 + 채팅창" 하나로
 

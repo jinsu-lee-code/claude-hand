@@ -118,6 +118,7 @@ class HookTests(unittest.TestCase):
         self.assertEqual(guard.exit_code(lambda: 1), 2)
         self.assertEqual(guard.exit_code(lambda: sys.exit(1)), 2)
         self.assertEqual(guard.exit_code(lambda: sys.exit(2)), 2)  # argparse: bad arguments
+        self.assertEqual(guard.exit_code(lambda: sys.exit(2), stop_hook=True), 0)  # a Stop hook never keeps a subagent going
         with unittest.mock.patch("sys.stderr", io.StringIO()):
             self.assertEqual(guard.exit_code(lambda: 1 / 0), 2)
             self.assertEqual(guard.exit_code(lambda: (_ for _ in ()).throw(KeyboardInterrupt())), 2)
@@ -148,6 +149,11 @@ class ProcessTests(unittest.TestCase):
         proc = self.run_hook(b"\xff\xfe not utf-8", "--pin", "MyGame@aaaa1111", "--server", "unity_mygame")
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_as_the_stop_hook_it_never_refuses_anything(self):
+        for args in (["--pin", "MyGame@aaaa1111", "--server", "unity_mygame", "--stop"], ["--stop"], ["--stop", "--app", "nope"]):
+            proc = self.run_hook(b"\xff not json", *args)
+            self.assertEqual((proc.returncode, proc.stdout), (0, b""), args)
 
     def test_deciding_loads_nothing_but_the_standard_library(self):
         """A mistake in claude_hand.py, the bridge or handlib must not be able to stop the guard from deciding."""
@@ -181,7 +187,8 @@ class ProgressTests(unittest.TestCase):
             guard.report_progress({"tool_name": "Read", "tool_input": {}}, self.PIN, self.SERVER, "unity", home=home, post=post)
             guard.report_progress(event, self.PIN, self.SERVER, "unity", home=home, post=lambda req: 1 / 0)  # never raises
         self.assertEqual(sent[0], ("http://127.0.0.1:8765/v1/progress", "t",
-                                   {"app": "unity", "pin": self.PIN, "tool": "manage_gameobject", "detail": "create Cube"}))
+                                   {"app": "unity", "pin": self.PIN, "tool": "manage_gameobject", "agent_id": "",
+                                    "detail": "create Cube"}))
         self.assertEqual(sent[1][2]["tool"], "ch_scene_snapshot")
         self.assertEqual(len(sent), 2)  # not for tools outside the subagent's own servers
 
@@ -204,6 +211,33 @@ class ProgressTests(unittest.TestCase):
                                    "tool_input": {"code": "import claude_hand_chat; print(claude_hand_chat.undo_last_request())"}},
                                   "props@9876", "blender_props", "blender", home=home, post=new, mark=lambda *a: marks.append(a))
         self.assertEqual(marks, [("unity", self.PIN, "큐브 만들어줘"), ("blender", "props@9876", "의자")])  # once per request
+
+    def test_the_report_says_which_subagent_it_is(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home, sent = self.home(tmp), []
+            post = lambda req: sent.append((req.full_url, json.loads(req.data)))
+            event = {"tool_name": "mcp__unity_mygame__manage_gameobject", "tool_input": {"action": "create"}, "agent_id": "a6183685"}
+            guard.report_progress(event, self.PIN, self.SERVER, "unity", home=home, post=post)
+            guard.report_stop({"hook_event_name": "SubagentStop", "agent_id": "a6183685"}, self.PIN, "unity", home=home, post=post)
+            guard.report_stop({}, self.PIN, "unity", home=home, post=lambda req: 1 / 0)  # never raises
+        self.assertEqual(sent[0][1]["agent_id"], "a6183685")
+        self.assertEqual(sent[1], ("http://127.0.0.1:8765/v1/stopped", {"app": "unity", "pin": self.PIN, "agent_id": "a6183685"}))
+
+    def test_a_window_where_another_subagent_works_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home, marks = self.home(tmp), []
+            event = {"tool_name": "mcp__unity_mygame__manage_gameobject", "tool_input": {"action": "create"}, "agent_id": "bbb"}
+            busy = lambda req: {"ok": True, "busy": True, "other": "aaa", "new_request": True}
+            reason = guard.report_progress(event, self.PIN, self.SERVER, "unity", home=home, post=busy, mark=lambda *a: marks.append(a))
+            self.assertIn("다른 하위 세션이 작업 중", reason)
+            self.assertEqual(marks, [])  # no undo point for a call that does not happen
+            self.assertIsNone(guard.report_progress(event, self.PIN, self.SERVER, "unity", home=home, post=lambda req: {"ok": True}))
+            out = io.StringIO()
+            args = guard.build_parser().parse_args(["--pin", self.PIN, "--server", self.SERVER])
+            with unittest.mock.patch.object(guard, "report_progress", lambda *a, **kw: reason), \
+                    unittest.mock.patch.object(guard, "dialog_block", lambda *a, **kw: None):
+                guard.run_guard(args, io.StringIO(json.dumps(event)), out)
+            self.assertEqual(json.loads(out.getvalue())["hookSpecificOutput"]["permissionDecision"], "deny")
 
     def test_undo_point_goes_through_the_bridge(self):
         calls = []

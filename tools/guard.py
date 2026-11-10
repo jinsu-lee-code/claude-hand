@@ -7,16 +7,21 @@
 
   guard.py --pin "MyGame@aaaa1111" --server unity_mygame --transport stdio --app unity     (hook input on stdin)
 
-It refuses any call that would reach a project or Blender other than the subagent's own, and any Unity call
-while a dialog stops that editor. For a call it lets through it also tells the chat channel what the subagent is
-about to do (the panel's work line) and, on the first action of a request, sets an undo point in that window.
+It refuses any call that would reach a project or Blender other than the subagent's own, any Unity call while a
+dialog stops that editor, and any call while another subagent is still at work in the same window. For a call it
+lets through it also tells the chat channel what the subagent is about to do (the panel's work line) and, on the
+first action of a request, sets an undo point in that window.
+
+  guard.py --pin ... --server ... --app ... --stop       the same subagents' Stop hook: tells the chat channel the
+                                                         subagent finished its turn. Never refuses anything.
 
 Whatever goes wrong, the call is refused. Claude Code reads a hook's result like this:
   exit 0 with a "deny" decision on stdout   the call is refused, with the reason
   exit 0 with nothing on stdout             the call goes ahead
   exit 2                                    the call is refused
   any other exit code                       a hook error that does NOT stop the call
-So this process only ever ends with 0 or 2: bad arguments and any error while deciding refuse the call. That is
+So as the PreToolUse hook this process only ever ends with 0 or 2: bad arguments and any error while deciding
+refuse the call. (As the Stop hook it always ends with 0: there, 2 would keep the subagent from stopping.) That is
 also why the guard lives in a small file of its own with nothing but the standard library at import time: a
 mistake elsewhere in claude-hand cannot make it end with another code. What comes after the decision (work line,
 undo point) is best effort and loads its helpers only then.
@@ -117,28 +122,47 @@ def action_summary(tool_input: dict) -> str:
     return " ".join(parts)[:120]
 
 
-def report_progress(event: dict, pin: str, server: str, app: str, home: Path | None = None, post=None, mark=None) -> None:
+def post_to_channel(path: str, body: dict, home: Path | None = None, post=None) -> dict:
+    """POST to the chat channel of the running supervisor; {} when there is none. Waits half a second at most."""
+    from handlib import link
+    info, _ = link.read_chat_files((home or link.claude_hand_home()) / "chat")
+    if not info:
+        return {}
+    req = urllib.request.Request(f"http://127.0.0.1:{info['port']}{path}", data=json.dumps(body).encode("utf-8"), method="POST",
+                                 headers={"X-Claude-Hand-Token": info.get("token", ""), "Content-Type": "application/json"})
+    return (post or (lambda r: json.loads(urllib.request.urlopen(r, timeout=0.5).read() or b"{}")))(req) or {}
+
+
+def report_progress(event: dict, pin: str, server: str, app: str, home: Path | None = None, post=None, mark=None) -> str | None:
     """Tell the chat channel what this subagent is about to do, so its window's panel can show it, and on the first
     action of a request set an undo point in that window (the chat panel's "되돌리기"). Best effort: no Claude Hand,
-    a slow server or any error just skips it; the tool call itself never waits more than a moment."""
+    a slow server or any error just skips it; the tool call itself never waits more than a moment.
+    Returns a denial reason when the channel says another subagent is still at work in this window."""
     tool = str(event.get("tool_name", ""))
     short = next((tool[len(prefix):] for prefix in (f"mcp__{server}_ch__", f"mcp__{server}__") if tool.startswith(prefix)), "")
     if not short:
-        return
+        return None
     try:
-        from handlib import link
-        info, _ = link.read_chat_files((home or link.claude_hand_home()) / "chat")
-        if not info:
-            return
-        body = json.dumps({"app": app, "pin": pin, "tool": short, "detail": action_summary(event.get("tool_input") or {})})
-        req = urllib.request.Request(f"http://127.0.0.1:{info['port']}/v1/progress", data=body.encode("utf-8"), method="POST",
-                                     headers={"X-Claude-Hand-Token": info.get("token", ""), "Content-Type": "application/json"})
-        reply = (post or (lambda r: json.loads(urllib.request.urlopen(r, timeout=0.5).read() or b"{}")))(req) or {}
+        reply = post_to_channel("/v1/progress", {"app": app, "pin": pin, "tool": short, "agent_id": str(event.get("agent_id") or ""),
+                                                 "detail": action_summary(event.get("tool_input") or {})}, home, post)
+        if reply.get("busy"):
+            return (f"이 창({pin})은 지금 다른 하위 세션이 작업 중이라 이 호출을 막았습니다. 같은 대상에 둘이 동시에 일하면 서로 "
+                    "덮어씁니다. 더 부르지 말고 이 내용을 그대로 감독에게 보고하세요.")
         # A "cancel that" request starts with the undo itself: a fresh point there would leave nothing to undo.
         undoing = short == "ch_checkpoint" or "undo_last_request" in str((event.get("tool_input") or {}).get("code", ""))
         if reply.get("new_request") and not undoing:
             (mark or mark_checkpoint)(app, pin, str(reply.get("label") or ""))
     except Exception:  # progress is a nicety; the guard's answer must not depend on it
+        pass
+    return None
+
+
+def report_stop(event: dict, pin: str, app: str, home: Path | None = None, post=None) -> None:
+    """The subagent finished its turn: its window is free for another subagent, and the chat channel can tell when
+    the supervisor owes the panel an answer. Best effort."""
+    try:
+        post_to_channel("/v1/stopped", {"app": app, "pin": pin, "agent_id": str(event.get("agent_id") or "")}, home, post)
+    except Exception:
         pass
 
 
@@ -170,6 +194,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--server", required=True)
     parser.add_argument("--transport", choices=["stdio", "http"], default="stdio")
     parser.add_argument("--app", choices=["unity", "blender"], default="unity")
+    parser.add_argument("--stop", action="store_true", help="run as the subagent's Stop hook")
 
 
 def read_event(stdin=None) -> dict:
@@ -194,7 +219,7 @@ def run_guard(args: argparse.Namespace, stdin=None, stdout=None) -> int:
     if not reason and args.app == "unity":
         reason = dialog_block(event, args.pin, args.server)
     if not reason:
-        report_progress(event, args.pin, args.server, args.app)
+        reason = report_progress(event, args.pin, args.server, args.app)
     if reason:
         json.dump({
             "hookSpecificOutput": {
@@ -207,20 +232,25 @@ def run_guard(args: argparse.Namespace, stdin=None, stdout=None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    return run_guard(build_parser().parse_args(argv))  # bad arguments: argparse exits with 2, which refuses the call
+    args = build_parser().parse_args(argv)  # bad arguments: argparse exits with 2, which refuses the call
+    if args.stop:
+        report_stop(read_event(), args.pin, args.app)
+        return 0
+    return run_guard(args)
 
 
-def exit_code(run=main) -> int:
-    """What this process ends with: `run`'s 0, or 2 for anything else at all (see the top of this file)."""
+def exit_code(run=main, stop_hook: bool = False) -> int:
+    """What this process ends with: `run`'s 0, or 2 for anything else at all (see the top of this file). As the
+    Stop hook, always 0: nothing that goes wrong here may keep a subagent from stopping."""
     try:
         code = run()
     except SystemExit as exc:
         code = exc.code
     except BaseException as exc:
-        print(f"claude-hand guard failed, so the call is refused: {exc!r}", file=sys.stderr)
-        return 2
-    return 0 if code in (0, None) else 2
+        print(f"claude-hand guard failed{'' if stop_hook else ', so the call is refused'}: {exc!r}", file=sys.stderr)
+        code = 2
+    return 0 if stop_hook or code in (0, None) else 2
 
 
 if __name__ == "__main__":
-    raise SystemExit(exit_code())
+    raise SystemExit(exit_code(stop_hook="--stop" in sys.argv[1:]))

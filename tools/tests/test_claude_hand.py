@@ -179,6 +179,8 @@ class GenerationTests(unittest.TestCase):
         self.assertIn('UNITY_MCP_DISABLE_FOCUS_NUDGE: "1"', front)
         self.assertIn('matcher: "mcp__.*"', front)
         self.assertIn("guard.py\\\" --pin \\\"MyGame@aaaa1111\\\" --server unity_mygame --transport stdio --app unity", front)
+        self.assertIn("  Stop:\n    - hooks:\n        - type: command\n", front)
+        self.assertIn('--transport stdio --app unity --stop"', front)  # the same script tells the channel the subagent stopped
         self.assertIn(handlib.constants.GENERATED_MARKER, text)
         self.assertNotIn("set_active_instance(instance=", text)
 
@@ -1147,7 +1149,7 @@ class RemoteControlTests(unittest.TestCase):
 class DesktopModeTests(unittest.TestCase):
     def test_installed_skill_knows_where_claude_hand_is(self):
         text = handlib.agents.rendered_skill(Path("/opt/claude-hand"))
-        self.assertNotIn("{{CLAUDE_HAND}}", text)
+        self.assertNotRegex(text, r"\{\{\w+\}\}")
         self.assertIn('uv run "/opt/claude-hand/tools/claude_hand.py" sync', text)
         self.assertIn("{{CLAUDE_HAND}}", handlib.constants.SKILL_SOURCE.read_text(encoding="utf-8"))
         with tempfile.TemporaryDirectory() as tmp:

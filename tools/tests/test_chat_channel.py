@@ -253,7 +253,7 @@ class McpTests(unittest.TestCase):
         init = replies[0]["result"]
         self.assertEqual(init["protocolVersion"], "2025-06-18")
         self.assertEqual(init["capabilities"]["experimental"], {"claude/channel": {}, "claude/channel/permission": {}})
-        self.assertIn("reply tool", init["instructions"])
+        self.assertIn("`reply` 도구로 같은 `chat_id`에", init["instructions"])
         self.assertEqual([t["name"] for t in replies[1]["result"]["tools"]], ["reply", "current_context"])
         self.assertEqual(replies[2], {"jsonrpc": "2.0", "id": 3, "result": {}})
         self.assertEqual(replies[3]["error"]["code"], -32601)
@@ -748,6 +748,108 @@ class AncestorTests(unittest.TestCase):
         self.assertEqual(cc.supervisor_decision(env=supervisor_env, table_fn=lambda: table, pid=20),
                          (False, cc.HEALTH_CHECK_REASON))
         self.assertTrue(cc.supervisor_decision(env=supervisor_env, table_fn=lambda: table, pid=10)[0])
+
+
+class WorkerTests(unittest.TestCase):
+    """Who is at work in which window: rules the supervisor is told, backed by the channel where it can tell."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        write_agents(Path(self.tmp.name), more_unity=[handlib.discovery.Instance(name="Props", hash="bbbb2222")])
+        self.emitted = Recorder()
+        self.hub = cc.ChatHub(self.emitted, Path(self.tmp.name))
+        self.hub.initialized = True
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def act(self, agent_id="", pin="MyGame@aaaa1111"):
+        return self.hub.report_action("unity", pin, "manage_gameobject", "create Cube", agent_id)
+
+    def test_a_second_subagent_in_the_same_window_is_refused(self):
+        self.assertNotIn("busy", self.act("aaa"))
+        self.assertNotIn("busy", self.act("aaa"))  # the same one goes on
+        second = self.act("bbb")
+        self.assertEqual((second["busy"], second["other"]), (True, "aaa"))
+        self.assertNotIn("busy", self.act("bbb", pin="Props@bbbb2222"))  # another window is another matter
+        self.hub.agent_stopped("unity", "MyGame@aaaa1111", "aaa")
+        self.assertNotIn("busy", self.act("bbb"))  # the first finished its turn: the window is free
+        self.hub.workers["unity-mygame"]["last"] -= cc.LOCK_SECONDS + 1
+        self.assertNotIn("busy", self.act("ccc"))  # a subagent that went quiet without stopping does not hold it forever
+
+    def test_guards_that_report_no_agent_id_are_never_refused(self):
+        self.assertNotIn("busy", self.act(""))
+        self.assertNotIn("busy", self.act("aaa"))
+        self.assertNotIn("busy", self.act(""))
+        self.assertIsNone(self.hub.report_action("unity", "Ghost@ffffffff", "x", "", "aaa"))
+        self.assertIsNone(self.hub.agent_stopped("unity", "Ghost@ffffffff", "aaa"))
+
+    def test_the_tag_names_the_subagent_that_last_worked_in_the_window(self):
+        self.hub.post_user_message("unity", "MyGame", "큐브 만들어줘")
+        self.assertNotIn("agent_id", self.emitted.messages[-1]["params"]["meta"])
+        self.act("aaa")
+        self.hub.agent_stopped("unity", "MyGame@aaaa1111", "aaa")
+        self.hub.reply("unity-mygame", "만들었어요")
+        self.hub.post_user_message("unity", "MyGame", "하나 더")
+        meta = self.emitted.messages[-1]["params"]["meta"]
+        self.assertEqual(meta["agent_id"], "aaa")  # the supervisor resumes it with SendMessage, whatever it still remembers
+        self.assertTrue(all(key.isidentifier() for key in meta))
+
+    def reminded(self, after):
+        return self.hub.check_unanswered(time.time() + after)
+
+    def test_the_supervisor_is_reminded_of_a_request_left_unanswered(self):
+        self.hub.post_user_message("unity", "MyGame", "큐브 만들어줘")
+        self.act("aaa")
+        self.assertEqual(self.reminded(cc.ANSWER_GRACE + 5), [])  # the subagent is still at work
+        self.hub.agent_stopped("unity", "MyGame@aaaa1111", "aaa")
+        self.assertEqual(self.reminded(cc.ANSWER_GRACE - 5), [])  # the supervisor gets a moment to answer
+        before = len(self.emitted.messages)
+        self.assertEqual(self.reminded(cc.ANSWER_GRACE + 5), ["unity-mygame"])
+        note = self.emitted.messages[-1]
+        self.assertEqual(len(self.emitted.messages), before + 1)
+        self.assertEqual(note["method"], "notifications/claude/channel")
+        self.assertTrue(note["params"]["content"].startswith("[claude-hand] "))
+        self.assertIn("큐브 만들어줘", note["params"]["content"])
+        self.assertEqual(note["params"]["meta"], {"chat_id": "unity-mygame", "app": "unity", "window": "MyGame",
+                                                  "agent": "unity-mygame", "reminder": "unanswered"})
+        self.assertEqual(self.hub.updates("unity-mygame", 0, 0)[-1]["kind"], "notice")  # the user sees it was chased
+        self.assertEqual(self.reminded(cc.STALL_SECONDS * 3), [])  # once per request
+
+    def test_an_answered_request_is_not_chased(self):
+        self.hub.post_user_message("unity", "MyGame", "큐브 만들어줘")
+        self.act("aaa")
+        self.hub.agent_stopped("unity", "MyGame@aaaa1111", "aaa")
+        self.hub.reply("unity-mygame", "작업 중이에요", working=True)
+        self.assertEqual(self.reminded(cc.ANSWER_GRACE + 5), ["unity-mygame"])  # "working on it" is not the answer
+        self.hub.post_user_message("unity", "MyGame", "하나 더")
+        self.act("aaa")
+        self.hub.agent_stopped("unity", "MyGame@aaaa1111", "aaa")
+        self.hub.reply("unity-mygame", "만들었어요")
+        self.assertEqual(self.reminded(cc.STALL_SECONDS * 3), [])
+
+    def test_without_any_subagent_work_the_wait_is_longer(self):
+        self.hub.post_user_message("unity", "MyGame", "안녕")
+        self.assertEqual(self.reminded(cc.ANSWER_GRACE + 5), [])
+        self.assertEqual(self.reminded(cc.STALL_SECONDS + 5), ["unity-mygame"])
+
+    def test_requests_from_before_this_start_and_a_supervisor_still_starting_are_left_alone(self):
+        self.hub.post_user_message("unity", "MyGame", "어제 한 말")
+        self.hub.started = time.time() + 1  # as if shown again from history
+        self.assertEqual(self.reminded(cc.STALL_SECONDS + 5), [])
+        self.hub.started = 0.0
+        self.hub.initialized = False
+        self.assertEqual(self.reminded(cc.STALL_SECONDS + 5), [])
+
+    def test_the_supervisor_gets_the_same_rules_from_the_channel_and_from_the_skill(self):
+        rules = handlib.agents.prompt_template("chat-rules")
+        self.assertEqual(cc.INSTRUCTIONS, rules)
+        skill = handlib.agents.rendered_skill()
+        self.assertIn(rules, skill)
+        self.assertNotRegex(skill, r"\{\{\w+\}\}")
+        for rule in ("`reply` 도구로", "`SendMessage`로", "`agent_id`", "`run_in_background`", "`working: true`", "`current_context`",
+                     '`"desktop"`', "[claude-hand]"):
+            self.assertIn(rule, rules)
 
 
 if __name__ == "__main__":
