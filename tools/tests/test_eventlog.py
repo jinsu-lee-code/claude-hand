@@ -99,7 +99,7 @@ class TraceTests(unittest.TestCase):
         request = listed[0]
         self.assertRegex(request["request"], r"^\d{4}-\d{6}-\d+$")
         self.assertEqual((request["chat_id"], request["text"], request["actions"], request["refused"]),
-                         ("unity-mygame", "Props에 있는 의자 가져와", 2, 1))
+                         ("unity-mygame", "Props에 있는 의자 가져와", 2, 2))  # refused: once by the guard itself, once by the channel
         self.assertIsNotNone(request["answered"])
         lines = eventlog.trace(events, request["request"])
         self.assertEqual([e["event"] for e in lines],

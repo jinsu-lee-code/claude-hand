@@ -87,21 +87,15 @@ def clean(home: Path | None = None, keep_days: int = KEEP_DAYS, now: float | Non
 def requests(events: list[dict]) -> list[dict]:
     """One entry per panel message, oldest first: {"request", "chat_id", "ts", "text", "actions", "refused",
     "answered": when its answer came, or None}."""
-    found: dict[str, dict] = {}
+    found = []
     for event in events:
-        request = event.get("request")
-        if event["event"] == "message" and request:
-            found[request] = {"request": request, "chat_id": event.get("chat_id", ""), "ts": event["ts"], "text": event.get("text", ""),
-                              "actions": 0, "refused": 0, "answered": None}
-        elif request in found:
-            entry = found[request]
-            if event["event"] == "action":
-                entry["actions"] += 1
-            elif event["event"] == "refused":
-                entry["refused"] += 1
-            elif event["event"] == "reply" and not event.get("working") and entry["answered"] is None:
-                entry["answered"] = event["ts"]
-    return sorted(found.values(), key=lambda r: r["ts"])
+        if event["event"] != "message" or not event.get("request"):
+            continue
+        lines = trace(events, event["request"])  # counted as `trace` shows them, so the list and the detail agree
+        found.append({"request": event["request"], "chat_id": event.get("chat_id", ""), "ts": event["ts"], "text": event.get("text", ""),
+                      "actions": sum(e["event"] == "action" for e in lines), "refused": sum(e["event"] == "refused" for e in lines),
+                      "answered": next((e["ts"] for e in lines if e["event"] == "reply" and not e.get("working")), None)})
+    return sorted(found, key=lambda r: r["ts"])
 
 
 def trace(events: list[dict], request: str) -> list[dict]:

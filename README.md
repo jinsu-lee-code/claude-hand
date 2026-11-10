@@ -1,7 +1,7 @@
 # claude-hand
 
 Unity 에디터와 Blender 창을 여러 개 동시에 띄워 두고, **창마다 전담 Claude 하위 세션**을 붙여서 일을 나눠 맡기는 도구 모음입니다.
-한 곳의 오브젝트를 다른 곳으로 옮길 수도 있습니다: Unity → Unity, Blender → Blender, Blender → Unity.
+한 곳의 오브젝트를 다른 곳으로 옮길 수도 있습니다: Unity → Unity, Blender → Blender, Blender → Unity, Unity → Blender.
 기존 MCP를 대체하지 않고, 그 위에 덧붙입니다.
 - Unity: [MCP for Unity (CoplayDev)](https://github.com/CoplayDev/unity-mcp)
 - Blender: [MCP for Blender (ahujasid/blender-mcp)](https://github.com/ahujasid/blender-mcp)
@@ -17,8 +17,8 @@ Unity·Blender 안의 채팅창 ──(claude-hand-chat 채널)──┐
  └─ 교환 폴더 %USERPROFILE%\.claude-hand\exchange  (.unitypackage / .blend / .fbx + manifest, 30일 지나면 켤 때 정리)
 ```
 
-> 상태: **0.8.0.** Windows의 실제 Unity 6.3과 Blender 5.2에서 써 가며 확인했습니다([12단계](docs/TEST-RESULTS-12-WINDOWS.md), [13~21단계](docs/TEST-RESULTS-13-WINDOWS.md)). macOS·Linux에서는 자동 테스트만 돌렸습니다.
-> 2026-11-10의 구조 개편([점검](docs/REVIEW-2026-11-10.md)) 뒤로는 자동 테스트와 Unity 컴파일까지 확인했고, 열린 Unity·Blender 창에서의 확인은 [TEST-PLAN](docs/TEST-PLAN.md) 22단계에 있습니다.
+> 상태: **0.9.0.** Windows의 실제 Unity 6.3과 Blender 5.2에서 써 가며 확인했습니다([12단계](docs/TEST-RESULTS-12-WINDOWS.md), [13~21단계](docs/TEST-RESULTS-13-WINDOWS.md)). macOS·Linux에서는 자동 테스트만 돌렸습니다.
+> 2026-11-10의 구조 개편([점검](docs/REVIEW-2026-11-10.md))과 그 뒤에 더한 기능(다시 보낸 모델을 제자리에서 바꾸기, Unity → Blender, 요청 기록, 중지 버튼)은 자동 테스트와, 창 없이 연 Unity·Blender에서 실제로 돌려 확인했습니다. 열린 창과 감독 세션이 있어야 볼 수 있는 것은 [TEST-PLAN](docs/TEST-PLAN.md) 22·23단계에 있습니다.
 
 ## 매일 쓰는 법
 
@@ -113,6 +113,7 @@ Blender 패널 ─┼─ 채널 ─ 감독 ┼─ blender-props
 - 다른 프로그램을 보는 동안 답이나 허락 요청이 오면 Unity·Blender의 작업 표시줄 단추가 깜빡이고, Unity 채팅 탭 이름에 안 읽은 수가 붙습니다.
 - Unity가 "씬을 저장할까요?" 같은 대화상자에서 멈추면(Windows) 시간 초과를 기다리지 않고 바로 알아채, 대화상자의 글과 버튼을 감독과 채팅창에 알립니다. 무엇을 누를지는 사용자가 정합니다.
 - 일이 끝나면 입력칸 위에 **되돌리기** 버튼이 뜹니다. 그 요청이 시작되기 직전으로 Unity Undo나 Blender 실행 취소 기록을 되돌립니다. "방금 거 취소해줘"라고 해도 됩니다.
+- 일하는 동안에는 "작업 중" 줄 옆에 **중지** 버튼이 있습니다. 누르면 그 요청으로 일하던 하위 세션의 다음 동작부터 막히고(하던 동작 하나는 끝까지 갑니다), 감독이 어디까지 했는지 알려 줍니다. 한 것은 되돌리지 않습니다. 되돌리려면 그다음에 **되돌리기**를 누릅니다.
 
 준비(세팅 스킬이 대신 해 줍니다):
 ```powershell
@@ -146,6 +147,15 @@ uv run tools/claude_hand.py chat-status
 - `start-supervisor`가 넘긴 표시(`CLAUDE_HAND_SUPERVISOR=1`, `.mcp.json`의 `env`로 전달)가 있을 때
 - 자기를 띄운 Claude Code가 이 서버를 채널로 불러왔을 때(`--dangerously-load-development-channels server:claude-hand-chat`)
 
+### 한 요청에 무슨 일이 있었는지 보기
+
+```powershell
+uv run tools/claude_hand.py trace                   # 최근 이틀의 채팅창 요청 목록
+uv run tools/claude_hand.py trace unity-mygame      # 그 창의 마지막 요청을 한 줄씩
+uv run tools/claude_hand.py trace --request <번호>  # 목록에 나온 번호의 요청
+```
+채팅창에서 보낸 요청마다 번호가 붙고, 그 뒤의 일이 `%USERPROFILE%\.claude-hand\logs\<날짜>.jsonl`에 한 줄씩 남습니다: 하위 세션의 도구 호출, 안전장치가 막은 호출과 이유, `ch_*` 호출의 성공 여부와 걸린 시간, 하위 세션이 멈춘 때, 답. "왜 답이 늦었지", "어디서 막혔지"를 뒤에서 볼 때 씁니다. 메시지와 답은 앞 200자만 남고, 2주가 지난 파일은 켤 때 지워집니다. 데스크톱 앱에서 시킨 일은 요청 번호 없이 남아 `trace` 목록에는 나오지 않습니다.
+
 ## 새 버전 받기 (이미 설치한 경우)
 
 ```powershell
@@ -162,12 +172,12 @@ uv run tools/claude_hand.py update     # 하위 세션·감독 스킬·채팅 �
 |---|---|
 | `.claude/skills/claude-hand-setup/` | 처음 세팅 스킬입니다. 이 폴더에서 Claude Code를 열면 바로 쓸 수 있습니다. |
 | `skills/orchestrator/` | 평소에 감독 세션이 따르는 규칙(스킬)입니다. `sync`가 `~/.claude/skills/claude-hand/`에 설치합니다. |
-| `tools/claude_hand.py` | 하위 세션 생성(`list`, `sync`), 세팅 도우미(`doctor`, `selftest`, `update`, `mode`, `unity-install`, `unity-open`, `blender-open`, `chat-setup`, `blender-install-chat`, `chat-status`, `shortcut`, `remote-control`)가 들어 있습니다. |
+| `tools/claude_hand.py` | 하위 세션 생성(`list`, `sync`), 세팅 도우미(`doctor`, `selftest`, `update`, `mode`, `unity-install`, `unity-open`, `blender-open`, `chat-setup`, `blender-install-chat`, `chat-status`, `shortcut`, `remote-control`), 요청 기록 보기(`trace`), 교환 폴더 정리(`clean-exchange`)가 들어 있습니다. |
 | `tools/guard.py` | 하위 세션의 안전장치(PreToolUse 훅)입니다. 다른 대상으로 가는 호출을 막습니다. 표준 라이브러리만 쓰는 작은 파일로 따로 두어, 다른 파일의 실수가 안전장치를 멈추지 못하게 했습니다. |
-| `tools/handlib/` | 위 스크립트들을 이루는 모듈입니다: 열린 창 찾기(`discovery`), 하위 세션 정의 만들기(`agents`), 채팅 설정(`chatsetup`), 시작 준비(`launch`), 진단(`checks`) 등. 목록은 `tools/handlib/__init__.py`에 있습니다. |
+| `tools/handlib/` | 위 스크립트들을 이루는 모듈입니다: 열린 창 찾기(`discovery`), 하위 세션 정의 만들기(`agents`), 채팅 설정(`chatsetup`), 시작 준비(`launch`), 진단(`checks`), 요청 기록(`eventlog`) 등. 목록은 `tools/handlib/__init__.py`에 있습니다. |
 | `prompts/` | Claude에게 주는 지침의 원문입니다. 하위 세션용(`unity-subagent.md`, `blender-subagent.md`)에는 `{{이름}}` 자리에 창마다의 값이 들어갑니다. `chat-rules.md`는 감독이 채팅창을 다루는 규칙으로, 채널 서버와 감독 스킬이 같은 글을 씁니다. 고친 뒤에는 `update`로 다시 설치하고 Claude Hand를 다시 켭니다. |
 | `tools/chat_channel.py` | 채팅 채널 서버입니다. Claude Code가 실행하는 MCP 서버이고, Unity·Blender 채팅창과는 로컬 HTTP로 통신합니다. |
-| `unity/com.claudehand.tools/` | Unity 패키지입니다. `ch_*` 도구 8개와 채팅창(Window > Claude Hand > Chat)을 추가합니다. `ch_*` 도구는 이 패키지가 여는 자기 통로로 불립니다. MCP for Unity 없이도 컴파일되고, 그 버전에 상관없이 동작합니다. |
+| `unity/com.claudehand.tools/` | Unity 패키지입니다. `ch_*` 도구 9개와 채팅창(Window > Claude Hand > Chat)을 추가합니다. `ch_*` 도구는 이 패키지가 여는 자기 통로로 불립니다. MCP for Unity 없이도 컴파일되고, 그 버전에 상관없이 동작합니다. |
 | `tools/unity_bridge.py` | 하위 세션이 그 통로로 `ch_*` 도구를 부를 때 쓰는 MCP 서버입니다. `--list`로 통로를 연 Unity를 볼 수 있습니다. |
 | `blender/claude_hand_chat.py` | Blender 채팅 패널 애드온입니다. |
 | `start-supervisor.cmd` / `.sh` | 감독 세션을 엽니다. 바탕화면 아이콘과 채팅창 버튼이 이 파일을 실행합니다. 열 때마다 `preflight`가 하위 세션과 설정을 맞추고, 이미 켜져 있으면 알려 줍니다. |
@@ -181,7 +191,8 @@ uv run tools/claude_hand.py update     # 하위 세션·감독 스킬·채팅 �
 | `ch_scene_snapshot` | 씬 구조를 JSON으로 돌려주고, 오브젝트마다 `@s1a2b3c4:e5` 형태의 ref를 붙입니다. 씬이 바뀐 뒤 옛 ref를 쓰면 `STALE_REF`가 납니다. |
 | `ch_export_objects` | 씬 오브젝트(ref)나 에셋을 의존 에셋과 함께 `.unitypackage`로 묶어 교환 폴더에 둡니다. 원본 씬은 바뀌지 않습니다. |
 | `ch_import_package` | 위 패키지를 가져와 씬에 배치합니다. `dry_run=true`로 덮어쓸 에셋을 먼저 보여주고, 덮어쓸 게 있으면 허락 없이는 진행하지 않습니다. |
-| `ch_import_model` | Blender가 내보낸 FBX(또는 OBJ, GLB)를 `Assets/ClaudeHand/Imports/` 아래로 가져와 씬에 배치합니다. |
+| `ch_import_model` | Blender가 내보낸 FBX(또는 OBJ, GLB)를 `Assets/ClaudeHand/Imports/<이름>/` 아래로 가져와 씬에 배치합니다. **같은 .blend의 같은 오브젝트가 다시 오면 새로 넣지 않고 있던 모델 파일을 제자리에서 바꿉니다.** 씬과 프리팹에 놓인 것이 그 자리에서 새 모양이 됩니다. 바꾸기 전 파일은 `Library/ClaudeHand/replaced/`에 남습니다. `dry_run=true`로 어느 쪽이 될지 먼저 볼 수 있고, `new_copy=true`면 따로 한 벌을 넣습니다. `materials="project"`면 프로젝트에 같은 이름의 머티리얼이 하나 있을 때 그것으로 연결합니다. |
+| `ch_export_model` | 씬 오브젝트(ref)나 모델 에셋을 Blender(또는 다른 Unity 프로젝트)가 받을 모델 파일로 교환 폴더에 둡니다. 모델 파일(FBX, OBJ, GLB)에서 온 오브젝트는 그 파일을 가져올 때 모습 그대로 보냅니다. Unity에서 만든 메시는 프로젝트에 FBX Exporter 패키지(`com.unity.formats.fbx`)가 있을 때 FBX로 씁니다. 프로젝트는 바뀌지 않습니다. |
 | `ch_apply_settings` | Interaction Mode를 **No Throttling**으로 바꿉니다. Unity가 뒤에 있어도 명령을 처리하게 하는 설정입니다. 보기(`show`), 적용(`apply`), 되돌리기(`revert`)를 할 수 있습니다. 메뉴 **Tools > Claude Hand**에도 있습니다. |
 | `ch_checkpoint` | 요청마다 되돌리기 지점을 둡니다. 하위 세션이 그 요청의 첫 동작을 하기 직전에 저절로 찍히고, 채팅창의 **되돌리기** 버튼이나 `action=undo`로 그 지점 이후의 변경을 Unity Undo로 되돌립니다. Undo에 남는 변경만 되돌아갑니다. |
 | `ch_capture` | 씬 뷰를 지금 모습 그대로 PNG로 저장합니다(기즈모 없이). 씬은 바꾸지 않습니다. 채팅창의 결과 미리보기에 씁니다. |
@@ -198,7 +209,8 @@ uv run tools/claude_hand.py update     # 하위 세션·감독 스킬·채팅 �
 Blender 쪽 일은 MCP for Blender의 Python 실행 도구(`execute_code`)로 합니다. 옮기기와 되돌리기는 Claude Hand Chat 애드온(`blender-install-chat`으로 설치)의 함수이고, 하위 세션은 그것을 한 줄로 부릅니다.
 - `export_blend`: 다른 Blender로 보낼 `.blend`를 씁니다
 - `import_blend`: 다른 Blender가 보낸 것을 Append로 가져옵니다
-- `export_fbx`: Unity로 보낼 FBX를 씁니다
+- `export_fbx`: Unity로 보낼 FBX를 씁니다. 저장된 .blend의 같은 오브젝트를 다시 보내면 Unity가 있던 모델을 제자리에서 바꿉니다
+- `import_model`: Unity가 `ch_export_model`로 보낸 모델(FBX, OBJ, GLB)을 가져옵니다
 - `mark_undo_point`, `undo_last_request`: 요청 단위 되돌리기
 
 ### agent-desktop은 어디에 쓰나
@@ -238,6 +250,11 @@ Blender 쪽 일은 MCP for Blender의 Python 실행 도구(`execute_code`)로 �
 
 `uv run tools/claude_hand.py doctor`를 실행하면 언제든 빠진 항목과 고치는 명령을 볼 수 있습니다.
 설치가 아니라 **실제로 동작하는지**는 `uv run tools/claude_hand.py selftest`로 봅니다. 테스트(Python, Blender 안 애드온)를 돌리고, 열린 Unity·Blender와 채팅 채널이 이 버전으로 응답하는지 확인합니다(1분쯤, 아무것도 바꾸지 않음). 테스트를 빼려면 `--no-tests`.
+모델을 옮기는 Unity 도구까지 실제로 돌려 보려면 **닫혀 있는** 프로젝트를 알려 줍니다.
+```powershell
+uv run tools/claude_hand.py selftest --unity-project "C:\경로\프로젝트"
+```
+Unity를 창 없이 열어, Blender가 실제로 내보낸 모델을 받고, 같은 모델이 다시 왔을 때 제자리에서 바꾸고, 프로젝트 머티리얼에 연결하고, 다시 Blender로 보내는 것까지 확인합니다(2~3분). 저장하지 않는 새 씬에서 하고, 만든 에셋은 끝나면 지웁니다. 바꾸기 전 파일 사본이 `Library/ClaudeHand/replaced/`에 하나 남습니다.
 
 `sync`에 대해 알아둘 것:
 - 지금 쓰는 MCP 설정(`.mcp.json`, `~/.claude.json`, Claude Desktop 설정)을 찾아서 같은 방식으로 서버를 띄웁니다. Unity는 stdio와 HTTP 둘 다 됩니다.
@@ -261,6 +278,10 @@ Blender 쪽 일은 MCP for Blender의 Python 실행 도구(`execute_code`)로 �
   2. unity-mygame과 unity-props가 동시에 `ch_import_model`로 가져옵니다.
 - "props.blend의 Rock 세트를 character.blend로 가져와"
   - blender-props가 .blend로 내보내고, blender-character가 Append합니다.
+- (Blender에서 Hero를 고친 뒤) "Hero 다시 보내줘"
+  - blender-character가 다시 내보내고, unity-mygame이 `ch_import_model`로 받습니다. 같은 .blend의 같은 오브젝트라 새로 넣지 않고 있던 모델을 바꿉니다. 씬에 놓아 둔 Hero들이 그 자리에서 새 모양이 됩니다.
+- "MyGame 씬의 Rock_A를 character.blend로 보내줘"
+  - unity-mygame이 `ch_export_model`로 내보내고, blender-character가 `import_model`로 가져옵니다.
 
 ## 안전장치
 
@@ -275,11 +296,14 @@ Blender 쪽 일은 MCP for Blender의 Python 실행 도구(`execute_code`)로 �
 ## 알려진 한계
 
 - 작업 표시줄 알림, 한글 입력창, 대화상자 감지, Claude Hand 창 자동 최소화는 Windows에서만 됩니다. macOS·Linux에서는 실제 창으로 확인하지 않았습니다.
-- 개발 중인 체크아웃에서 `unity-install`을 하면 Claude Hand Tools가 이 PC의 폴더 경로(`file:`)로 들어가서, 그 프로젝트는 다른 PC에서 열리지 않습니다. 릴리스 태그(`v0.8.0`)를 받은 체크아웃에서는 GitHub 주소로 들어갑니다. `unity-install --dry-run`이 어느 쪽인지 알려 줍니다.
+- 개발 중인 체크아웃에서 `unity-install`을 하면 Claude Hand Tools가 이 PC의 폴더 경로(`file:`)로 들어가서, 그 프로젝트는 다른 PC에서 열리지 않습니다. 릴리스 태그(`v0.9.0`)를 받은 체크아웃에서는 GitHub 주소로 들어갑니다. `unity-install --dry-run`이 어느 쪽인지 알려 줍니다.
 - 내보내는 스크립트가 asmdef에 속해 있어도 asmdef는 같이 가지 않습니다. 받는 쪽에서는 기본 어셈블리로 컴파일됩니다.
 - `Packages/` 안의 에셋(URP 셰이더 등)은 `.unitypackage`에 들어가지 않습니다. 받는 프로젝트에 같은 패키지가 있어야 하고, dry run의 `missing_packages`에 표시됩니다.
 - 같은 프로젝트나 같은 Blender 창에 하위 세션 둘을 동시에 붙이면 안 됩니다. 명령이 하나씩 처리되기 때문입니다. 감독 스킬에 이 규칙이 들어 있고, Claude Hand가 켜져 있는 동안에는 안전장치가 나중에 온 하위 세션의 호출을 막습니다.
-- Blender → Unity는 FBX라서 Blender 셰이더 노드가 그대로 옮겨지지 않습니다. 기본 색과 텍스처 정도만 옮겨지고, 복잡한 재질은 Unity에서 다시 손봐야 합니다.
+- Blender → Unity는 FBX라서 Blender 셰이더 노드가 그대로 옮겨지지 않습니다. 기본 색과 텍스처 정도만 옮겨지고, 복잡한 재질은 Unity에서 다시 손봐야 합니다. 프로젝트에 같은 이름의 머티리얼을 만들어 두고 `materials="project"`로 받으면, 다시 보낼 때마다 손볼 필요가 없습니다.
+- 다시 보낸 모델을 제자리에서 바꾸는 것은 **저장된 .blend**에서 **같은 오브젝트 이름**으로 보냈을 때만 됩니다. .blend를 다른 이름으로 저장했거나 옮겼거나 오브젝트 이름을 바꿨으면 새 모델로 들어옵니다. 모델 파일을 바꾼 것은 Unity Undo에 남지 않아 **되돌리기** 버튼으로 돌아가지 않습니다. 바꾸기 전 파일이 `Library/ClaudeHand/replaced/`에 최근 10개까지 있습니다.
+- Unity → Blender에서 모델 파일에서 온 오브젝트는 그 파일이 그대로 갑니다. 씬에서 바꾼 것(머티리얼 교체, 덧붙인 오브젝트, 위치)은 가지 않습니다. Unity에서 만든 메시는 FBX Exporter 패키지가 있어야 하고, 이 경로는 그 패키지의 소스를 보고 만들었을 뿐 실제로 돌려 보지는 않았습니다.
+- **중지** 버튼은 하위 세션의 다음 Unity·Blender 호출부터 막습니다. 이미 시작한 동작 하나(긴 가져오기 등)는 끝까지 갑니다. 중지는 그 요청에 답이 오면 풀리고, 답이 없어도 3분 뒤에는 풀립니다. 그 사이에 데스크톱 앱에서 다른 창에 시킨 일이 있으면 그 일도 함께 막힐 수 있습니다.
 - Blender 하위 세션이 처음 연결을 확인할 때와 `sync`·`doctor`가 파일 이름을 읽을 때, Blender 안에서 읽기 전용 Python(`print(bpy.data.filepath)`)이 실행됩니다.
 
 ## 개발
@@ -288,4 +312,5 @@ Blender 쪽 일은 MCP for Blender의 Python 실행 도구(`execute_code`)로 �
 python -m unittest discover -s tools/tests -v     # Python 3.10 이상, 따로 설치할 것 없음
 ```
 GitHub에 올리면 같은 테스트가 Windows와 Linux, Python 3.10과 3.13에서 돕니다(`.github/workflows/tests.yml`). 버전은 저장소 루트의 `VERSION` 한 곳에서 정하고, Unity 패키지와 Blender 애드온에 적힌 번호가 같은지 테스트가 확인합니다.
-`tools/tests/test_blender_chat_addon.py`는 Blender 애드온(채팅, 되돌리기, .blend 보내기·받기, FBX 내보내기)을 실제 Blender 안에서 실행합니다. 위 명령으로는 건너뛰고(Python에 `bpy`가 없으므로), `uv run tools/claude_hand.py selftest`가 설치된 Blender를 화면 없이 띄워 돌립니다.
+`tools/tests/test_blender_chat_addon.py`는 Blender 애드온(채팅, 되돌리기, 중지, .blend 보내기·받기, FBX 내보내기, 모델 받기)을 실제 Blender 안에서 실행합니다. 위 명령으로는 건너뛰고(Python에 `bpy`가 없으므로), `uv run tools/claude_hand.py selftest`가 설치된 Blender를 화면 없이 띄워 돌립니다.
+Unity 쪽은 패키지 안의 `ChSelfTest.cs`가 모델 도구를 실제 Unity에서 돌립니다. `selftest --unity-project <닫힌 프로젝트>`가 Unity를 창 없이 열어 실행합니다. 테스트는 진짜 이벤트 기록을 건드리지 않게 `CLAUDE_HAND_LOG=off`로 돕니다.

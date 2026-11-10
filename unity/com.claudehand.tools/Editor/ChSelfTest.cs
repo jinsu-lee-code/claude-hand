@@ -95,6 +95,10 @@ namespace ClaudeHand.Editor
                     var third = Call(ChImportModel.HandleCommand, new { manifest = manifestB });
                     Check("materials: a later re-send keeps the choice", Ok(third) && third["data"]["materials"].HasValues &&
                           AssetDatabase.GetAssetPath(instance.GetComponentInChildren<Renderer>().sharedMaterial) == projectMaterial, Describe(third));
+                    var back = Call(ChImportModel.HandleCommand, new { manifest = manifestB, materials = "embedded" });
+                    Check("materials=embedded: back to the model's own material", Ok(back) &&
+                          AssetDatabase.GetAssetPath(instance.GetComponentInChildren<Renderer>().sharedMaterial) == assetPath,
+                        AssetDatabase.GetAssetPath(instance.GetComponentInChildren<Renderer>().sharedMaterial));
                 }
                 else
                 {

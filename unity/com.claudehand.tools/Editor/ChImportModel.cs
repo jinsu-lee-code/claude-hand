@@ -157,6 +157,14 @@ namespace ClaudeHand.Editor
             var mode = materials.Length > 0 ? materials : record?.materials ?? "embedded";
             bool dirty = false;
             var materialReport = mode == "project" ? UseProjectMaterials(importer as ModelImporter, model, assetPath, warnings, ref dirty) : null;
+            if (mode == "embedded" && record?.materials == "project" && importer is ModelImporter linked)
+            {
+                // Asked to go back to the model's own materials: drop the links an earlier materials=project made.
+                foreach (var id in linked.GetExternalObjectMap().Keys.Where(k => k.type == typeof(Material)).ToList())
+                {
+                    dirty |= linked.RemoveRemap(id);
+                }
+            }
             if (incoming.Source != null && p.new_copy != true)
             {
                 dirty |= WriteRecord(importer, model, new Record { source = incoming.Source, roots = incoming.Roots, materials = mode }, warnings);
