@@ -28,6 +28,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from handlib.link import claude_hand_home  # noqa: E402
+
 SERVER_VERSION = "0.1.0"
 REGISTRY_FORMAT = "claude-hand/unity-bridge@1"
 DIALOG_POLL_SECONDS = 1.5  # while a call waits, how often to look for a dialog that stopped the editor
@@ -35,10 +38,6 @@ DIALOG_POLL_SECONDS = 1.5  # while a call waits, how often to look for a dialog 
 
 def log(*parts) -> None:
     print("[claude-hand-unity]", *parts, file=sys.stderr, flush=True)
-
-
-def claude_hand_home(env=os.environ) -> Path:
-    return Path(env.get("CLAUDE_HAND_HOME") or Path.home() / ".claude-hand")
 
 
 def registry_dir(env=os.environ) -> Path:

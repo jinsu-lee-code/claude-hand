@@ -16,17 +16,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import chat_channel as cc  # noqa: E402
-import claude_hand as ch  # noqa: E402
+import handlib.agents  # noqa: E402
+import handlib.discovery  # noqa: E402
 
 TOOL = Path(__file__).resolve().parents[1] / "chat_channel.py"
 
 
 def write_agents(directory: Path, more_unity=()) -> None:
     """Agent files exactly as `claude_hand.py sync` writes them."""
-    unity = [ch.Instance(name="MyGame", hash="aaaa1111"), *more_unity]
-    blender = ch.BlenderInstance(port=9877, filepath="C:/Art/props.blend")
-    files = ch.build_agent_files(unity, ch.ServerConfig(transport="stdio"), [blender], None, "uv run")
-    ch.write_agent_files(files, directory)
+    unity = [handlib.discovery.Instance(name="MyGame", hash="aaaa1111"), *more_unity]
+    blender = handlib.discovery.BlenderInstance(port=9877, filepath="C:/Art/props.blend")
+    files = handlib.agents.build_agent_files(unity, handlib.discovery.ServerConfig(transport="stdio"), [blender], None, "uv run")
+    handlib.agents.write_agent_files(files, directory)
 
 
 class Recorder:
@@ -116,8 +117,8 @@ class HubTests(unittest.TestCase):
         calls = []
         def fake_sync(agents_dir):
             calls.append(agents_dir)
-            files = ch.build_agent_files([ch.Instance(name="NewGame", hash="bbbb2222")], ch.ServerConfig(transport="stdio"), [], None, "uv run")
-            ch.write_agent_files(files, agents_dir)
+            files = handlib.agents.build_agent_files([handlib.discovery.Instance(name="NewGame", hash="bbbb2222")], handlib.discovery.ServerConfig(transport="stdio"), [], None, "uv run")
+            handlib.agents.write_agent_files(files, agents_dir)
         self.hub.auto_sync = fake_sync
         self.assertEqual(self.hub.resolve("unity", "NewGame"), ("unity-newgame", "unity-newgame"))
         self.assertEqual(len(calls), 1)
@@ -465,7 +466,7 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(len(self.shots), 1)
 
     def test_two_projects_worked_on_side_by_side_get_no_pictures_of_each_other(self):
-        write_agents(Path(self.tmp.name) / "agents", [ch.Instance(name="Level", hash="bbbb2222")])
+        write_agents(Path(self.tmp.name) / "agents", [handlib.discovery.Instance(name="Level", hash="bbbb2222")])
         self.hub.post_user_message("unity", "MyGame", "큐브를 빨갛게", pin="MyGame@aaaa1111")
         self.hub.post_user_message("unity", "Level", "조명을 어둡게", pin="Level@bbbb2222")
         self.hub.report_action("unity", "MyGame@aaaa1111", "manage_material", "red")
@@ -484,7 +485,7 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(self.images("unity-level", 0), [])
 
     def test_working_on_it_replies_keep_side_by_side_projects_apart(self):
-        write_agents(Path(self.tmp.name) / "agents", [ch.Instance(name="Level", hash="bbbb2222")])
+        write_agents(Path(self.tmp.name) / "agents", [handlib.discovery.Instance(name="Level", hash="bbbb2222")])
         self.hub.post_user_message("unity", "MyGame", "큐브를 빨갛게", pin="MyGame@aaaa1111")
         self.hub.post_user_message("unity", "Level", "조명을 어둡게", pin="Level@bbbb2222")
         self.hub.reply("unity-mygame", "작업 중이에요", working=True)

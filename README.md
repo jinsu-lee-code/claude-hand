@@ -162,7 +162,8 @@ uv run tools/claude_hand.py update     # 하위 세션·감독 스킬·채팅 �
 | `skills/orchestrator/` | 평소에 감독 세션이 따르는 규칙(스킬)입니다. `sync`가 `~/.claude/skills/claude-hand/`에 설치합니다. |
 | `tools/claude_hand.py` | 하위 세션 생성(`list`, `sync`), 세팅 도우미(`doctor`, `selftest`, `update`, `mode`, `unity-install`, `unity-open`, `blender-open`, `chat-setup`, `blender-install-chat`, `chat-status`, `shortcut`, `remote-control`)가 들어 있습니다. |
 | `tools/guard.py` | 하위 세션의 안전장치(PreToolUse 훅)입니다. 다른 대상으로 가는 호출을 막습니다. 표준 라이브러리만 쓰는 작은 파일로 따로 두어, 다른 파일의 실수가 안전장치를 멈추지 못하게 했습니다. |
-| `tools/handlib/` | 위 스크립트들이 함께 쓰는 부분입니다. |
+| `tools/handlib/` | 위 스크립트들을 이루는 모듈입니다: 열린 창 찾기(`discovery`), 하위 세션 정의 만들기(`agents`), 채팅 설정(`chatsetup`), 시작 준비(`launch`), 진단(`checks`) 등. 목록은 `tools/handlib/__init__.py`에 있습니다. |
+| `prompts/` | 하위 세션에게 주는 지침의 원문입니다(`unity-subagent.md`, `blender-subagent.md`). `{{이름}}` 자리에 창마다의 값이 들어갑니다. 고친 뒤에는 `update`로 다시 설치합니다. |
 | `tools/chat_channel.py` | 채팅 채널 서버입니다. Claude Code가 실행하는 MCP 서버이고, Unity·Blender 채팅창과는 로컬 HTTP로 통신합니다. |
 | `unity/com.claudehand.tools/` | Unity 패키지입니다. `ch_*` 도구 8개와 채팅창(Window > Claude Hand > Chat)을 추가합니다. `ch_*` 도구는 이 패키지가 여는 자기 통로로 불립니다. MCP for Unity 없이도 컴파일되고, 그 버전에 상관없이 동작합니다. |
 | `tools/unity_bridge.py` | 하위 세션이 그 통로로 `ch_*` 도구를 부를 때 쓰는 MCP 서버입니다. `--list`로 통로를 연 Unity를 볼 수 있습니다. |

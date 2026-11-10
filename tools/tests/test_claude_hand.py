@@ -15,6 +15,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import claude_hand as ch  # noqa: E402
+import handlib.agents  # noqa: E402
+import handlib.capture  # noqa: E402
+import handlib.chatsetup  # noqa: E402
+import handlib.checks  # noqa: E402
+import handlib.constants  # noqa: E402
+import handlib.discovery  # noqa: E402
+import handlib.install  # noqa: E402
+import handlib.launch  # noqa: E402
+import handlib.link  # noqa: E402
+import handlib.settings  # noqa: E402
 
 
 def write_status(directory: Path, hash_: str, project_path: str, port: int, **extra):
@@ -25,9 +35,9 @@ def write_status(directory: Path, hash_: str, project_path: str, port: int, **ex
 
 class DiscoveryTests(unittest.TestCase):
     def test_project_name_matches_mcp_for_unity_rule(self):
-        self.assertEqual(ch.project_name_from_assets_path("C:/Projects/MyGame/Assets"), "MyGame")
-        self.assertEqual(ch.project_name_from_assets_path("C:\\Projects\\Tool Kit\\Assets\\"), "Tool Kit")
-        self.assertEqual(ch.project_name_from_assets_path(""), "Unknown")
+        self.assertEqual(handlib.discovery.project_name_from_assets_path("C:/Projects/MyGame/Assets"), "MyGame")
+        self.assertEqual(handlib.discovery.project_name_from_assets_path("C:\\Projects\\Tool Kit\\Assets\\"), "Tool Kit")
+        self.assertEqual(handlib.discovery.project_name_from_assets_path(""), "Unknown")
 
     def test_stdio_status_files_become_instances(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -35,7 +45,7 @@ class DiscoveryTests(unittest.TestCase):
             write_status(d, "aaaa1111", "C:/Projects/MyGame/Assets", 6401)
             write_status(d, "bbbb2222", "C:/Projects/Props/Assets", 6402)
             (d / "unity-mcp-status-broken.json").write_text("{not json", encoding="utf-8")
-            found = ch.discover_stdio(d, probe=lambda port: port == 6401)
+            found = handlib.discovery.discover_stdio(d, probe=lambda port: port == 6401)
         self.assertEqual([i.id for i in found], ["MyGame@aaaa1111", "Props@bbbb2222"])
         self.assertEqual(found[0].path, "C:/Projects/MyGame")
         self.assertTrue(found[0].alive)
@@ -45,7 +55,7 @@ class DiscoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
             write_status(d, "cccc3333", "C:/P/Reload/Assets", 6403, reloading=True)
-            found = ch.discover_stdio(d, probe=lambda port: False)
+            found = handlib.discovery.discover_stdio(d, probe=lambda port: False)
         self.assertTrue(found[0].alive)
 
     def test_http_discovery(self):
@@ -56,7 +66,7 @@ class DiscoveryTests(unittest.TestCase):
             seen.append(url)
             return payload
 
-        found = ch.discover_http("http://localhost:8080/mcp", fetch=fake_fetch)
+        found = handlib.discovery.discover_http("http://localhost:8080/mcp", fetch=fake_fetch)
         self.assertEqual(seen, ["http://localhost:8080/api/instances"])
         self.assertEqual([i.id for i in found], ["MyGame@aaaa1111"])
 
@@ -64,7 +74,7 @@ class DiscoveryTests(unittest.TestCase):
         def down(url):
             raise OSError("connection refused")
 
-        self.assertEqual(ch.discover_http("http://localhost:8080/mcp", fetch=down), [])
+        self.assertEqual(handlib.discovery.discover_http("http://localhost:8080/mcp", fetch=down), [])
 
 
 class ConfigDetectionTests(unittest.TestCase):
@@ -72,7 +82,7 @@ class ConfigDetectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             f = Path(tmp) / "config.json"
             f.write_text(json.dumps(data), encoding="utf-8")
-            return ch.detect_server_config([f])
+            return handlib.discovery.detect_server_config([f])
 
     def test_stdio_entry_is_copied(self):
         cfg = self.detect({"mcpServers": {"unityMCP": {
@@ -106,43 +116,60 @@ class ConfigDetectionTests(unittest.TestCase):
         self.assertEqual(cfg.origin, "default")
 
     def test_missing_files_fall_back_to_default(self):
-        cfg = ch.detect_server_config([Path("/nonexistent/config.json")])
-        self.assertEqual((cfg.transport, cfg.command, cfg.args), ("stdio", "uvx", ch.DEFAULT_STDIO_ARGS))
+        cfg = handlib.discovery.detect_server_config([Path("/nonexistent/config.json")])
+        self.assertEqual((cfg.transport, cfg.command, cfg.args), ("stdio", "uvx", handlib.constants.DEFAULT_STDIO_ARGS))
 
 
 class GenerationTests(unittest.TestCase):
     def setUp(self):
-        self.a = ch.Instance(name="MyGame", hash="aaaa1111", path="C:/Projects/MyGame")
-        self.b = ch.Instance(name="Props Lib", hash="bbbb2222")
+        self.a = handlib.discovery.Instance(name="MyGame", hash="aaaa1111", path="C:/Projects/MyGame")
+        self.b = handlib.discovery.Instance(name="Props Lib", hash="bbbb2222")
 
     def test_names_and_server_keys(self):
-        names = ch.agent_names([self.a, self.b])
+        names = handlib.agents.agent_names([self.a, self.b])
         self.assertEqual(names, {"MyGame@aaaa1111": "unity-mygame", "Props Lib@bbbb2222": "unity-props-lib"})
-        self.assertEqual(ch.server_key("unity-props-lib"), "unity_props_lib")
+        self.assertEqual(handlib.agents.server_key("unity-props-lib"), "unity_props_lib")
 
     def test_same_folder_name_gets_hash_suffix(self):
-        twin = ch.Instance(name="MyGame", hash="cccc3333")
-        names = ch.agent_names([self.a, twin])
+        twin = handlib.discovery.Instance(name="MyGame", hash="cccc3333")
+        names = handlib.agents.agent_names([self.a, twin])
         self.assertEqual(sorted(names.values()), ["unity-mygame-aaaa", "unity-mygame-cccc"])
 
     def test_pinned_args_replace_existing_default(self):
         args = ["--from", "x", "--default-instance", "Old@1", "--transport", "stdio", "--default-instance=Old@2"]
-        self.assertEqual(ch.pinned_args(args, "MyGame@aaaa1111"),
+        self.assertEqual(handlib.agents.pinned_args(args, "MyGame@aaaa1111"),
                          ["--from", "x", "--transport", "stdio", "--default-instance", "MyGame@aaaa1111"])
 
     def test_agents_point_at_their_notes(self):
-        unity = ch.render_agent(self.a, "unity-mygame", ch.ServerConfig(transport="stdio"), "uv run", allowlist=True, focus_nudge=False)
+        unity = handlib.agents.render_agent(self.a, "unity-mygame", handlib.discovery.ServerConfig(transport="stdio"), "uv run", allowlist=True, focus_nudge=False)
         self.assertIn("`C:/Projects/MyGame/ClaudeHand/NOTES.md`", unity)
-        self.assertNotIn("메모", ch.render_agent(self.b, "unity-props-lib", ch.ServerConfig(transport="stdio"), "uv run",
+        self.assertNotIn("메모", handlib.agents.render_agent(self.b, "unity-props-lib", handlib.discovery.ServerConfig(transport="stdio"), "uv run",
                                                  allowlist=True, focus_nudge=False))  # no known path: nothing to point at
-        blender = ch.render_blender_prompt(ch.BlenderInstance(port=9877, filepath="C:/Art/character.blend"), "blender_character")
+        blender = handlib.agents.render_blender_prompt(handlib.discovery.BlenderInstance(port=9877, filepath="C:/Art/character.blend"), "blender_character")
         self.assertIn("`C:/Art/character.claude-hand.md`", blender)
-        self.assertNotIn("__NOTES__", ch.render_blender_prompt(ch.BlenderInstance(port=9877, filepath=""), "blender_x"))
-        self.assertEqual(ch.unity_notes_path("C:\\Projects\\MyGame\\"), "C:\\Projects\\MyGame/ClaudeHand/NOTES.md")
+        self.assertNotIn("메모", handlib.agents.render_blender_prompt(handlib.discovery.BlenderInstance(port=9877, filepath=""), "blender_x"))
+        self.assertEqual(handlib.agents.unity_notes_path("C:\\Projects\\MyGame\\"), "C:\\Projects\\MyGame/ClaudeHand/NOTES.md")
+
+    def test_prompts_come_from_the_template_files(self):
+        fill = handlib.agents.fill
+        self.assertEqual(fill("a {{X}} b\n{{?ON}}- kept {{X}}\n{{?OFF}}- dropped\nend", flags={"ON": True}, X="C:\\x"),
+                         "a C:\\x b\n- kept C:\\x\nend")
+        self.assertEqual(fill("{{A}}", A="{{B}}"), "{{B}}")  # a value is put in as it is, never filled again
+        with self.assertRaises(KeyError):
+            fill("{{MISSING}}")
+        http = handlib.agents.render_agent_prompt(self.a, "unity_mygame", "http")
+        stdio = handlib.agents.render_agent_prompt(self.b, "unity_props_lib", "stdio")
+        blender = handlib.agents.render_blender_prompt(handlib.discovery.BlenderInstance(port=9877, filepath="C:/Art/character.blend"), "blender_character")
+        for text in (http, stdio, blender):
+            self.assertNotRegex(text, r"\{\{\??\w+\}\}")  # nothing left unfilled
+        self.assertIn('set_active_instance(instance="MyGame@aaaa1111")', http)
+        self.assertNotIn("set_active_instance", stdio)
+        self.assertIn("**MyGame** (경로: `C:/Projects/MyGame`) 하나만", http)
+        self.assertIn("**Props Lib** 하나만", stdio)
 
     def test_stdio_agent_file(self):
-        server = ch.ServerConfig(transport="stdio")
-        text = ch.render_agent(self.a, "unity-mygame", server, "uv run -q --no-project", allowlist=True, focus_nudge=False)
+        server = handlib.discovery.ServerConfig(transport="stdio")
+        text = handlib.agents.render_agent(self.a, "unity-mygame", server, "uv run -q --no-project", allowlist=True, focus_nudge=False)
         front = text.split("---")[1]
         self.assertIn("name: unity-mygame", front)
         self.assertIn('tools: "mcp__unity_mygame__*, mcp__unity_mygame_ch__*, Read, Glob, Grep"', front)
@@ -152,54 +179,54 @@ class GenerationTests(unittest.TestCase):
         self.assertIn('UNITY_MCP_DISABLE_FOCUS_NUDGE: "1"', front)
         self.assertIn('matcher: "mcp__.*"', front)
         self.assertIn("guard.py\\\" --pin \\\"MyGame@aaaa1111\\\" --server unity_mygame --transport stdio --app unity", front)
-        self.assertIn(ch.GENERATED_MARKER, text)
+        self.assertIn(handlib.constants.GENERATED_MARKER, text)
         self.assertNotIn("set_active_instance(instance=", text)
 
     def test_hook_starts_the_guard_by_full_path(self):
         """A hook that cannot start does not stop the call, so it must not depend on the hook shell's PATH."""
         found = {"uv": "C:\\Users\\me\\.local\\bin\\uv.EXE", "py": "C:\\Program Files\\Python\\py.exe"}
         which = lambda name: found.get(name)
-        self.assertEqual(ch.resolved_runner("uv run -q --no-project", which), "C:/Users/me/.local/bin/uv.EXE run -q --no-project")
-        self.assertEqual(ch.resolved_runner("py -3", which), "py -3")  # a path with spaces cannot be quoted for both shells
-        self.assertEqual(ch.resolved_runner("python3", which), "python3")  # not found: left for the shell to find
-        self.assertEqual(ch.resolved_runner("/opt/uv/uv run", lambda name: 1 / 0), "/opt/uv/uv run")  # already a path
-        command = ch.hook_command("no-such-runner -x", "MyGame@aaaa1111", "unity_mygame", "stdio")
-        self.assertEqual(command, f'no-such-runner -x "{ch.GUARD_SCRIPT.as_posix()}" --pin "MyGame@aaaa1111" '
+        self.assertEqual(handlib.agents.resolved_runner("uv run -q --no-project", which), "C:/Users/me/.local/bin/uv.EXE run -q --no-project")
+        self.assertEqual(handlib.agents.resolved_runner("py -3", which), "py -3")  # a path with spaces cannot be quoted for both shells
+        self.assertEqual(handlib.agents.resolved_runner("python3", which), "python3")  # not found: left for the shell to find
+        self.assertEqual(handlib.agents.resolved_runner("/opt/uv/uv run", lambda name: 1 / 0), "/opt/uv/uv run")  # already a path
+        command = handlib.agents.hook_command("no-such-runner -x", "MyGame@aaaa1111", "unity_mygame", "stdio")
+        self.assertEqual(command, f'no-such-runner -x "{handlib.constants.GUARD_SCRIPT.as_posix()}" --pin "MyGame@aaaa1111" '
                                   "--server unity_mygame --transport stdio --app unity")
-        self.assertTrue(ch.GUARD_SCRIPT.exists())
+        self.assertTrue(handlib.constants.GUARD_SCRIPT.exists())
 
     def test_http_agent_file_pins_with_set_active_instance(self):
-        server = ch.ServerConfig(transport="http", url="http://localhost:8080/mcp")
-        text = ch.render_agent(self.a, "unity-mygame", server, "uv run", allowlist=True, focus_nudge=False)
+        server = handlib.discovery.ServerConfig(transport="http", url="http://localhost:8080/mcp")
+        text = handlib.agents.render_agent(self.a, "unity-mygame", server, "uv run", allowlist=True, focus_nudge=False)
         self.assertIn("type: http", text)
         self.assertIn('url: "http://localhost:8080/mcp"', text)
         self.assertIn('set_active_instance(instance="MyGame@aaaa1111")', text)
         self.assertNotIn("--default-instance", text)
 
     def test_disallow_mode_blocks_parent_server(self):
-        server = ch.ServerConfig(transport="stdio", key="unityMCP")
-        text = ch.render_agent(self.a, "unity-mygame", server, "uv run", allowlist=False, focus_nudge=True)
+        server = handlib.discovery.ServerConfig(transport="stdio", key="unityMCP")
+        text = handlib.agents.render_agent(self.a, "unity-mygame", server, "uv run", allowlist=False, focus_nudge=True)
         self.assertIn('disallowedTools: "mcp__unityMCP__*"', text)
         self.assertNotIn("tools: ", text.split("disallowedTools")[0])
         self.assertNotIn("UNITY_MCP_DISABLE_FOCUS_NUDGE", text)
 
     def test_frontmatter_values_are_valid_json_strings(self):
         # Every quoted scalar we emit must round-trip, or YAML parsing would break.
-        server = ch.ServerConfig(transport="stdio", env={"PATH_HINT": 'C:\\Program Files\\"uv"'})
-        text = ch.render_agent(self.b, "unity-props-lib", server, "uv run", allowlist=True, focus_nudge=False)
+        server = handlib.discovery.ServerConfig(transport="stdio", env={"PATH_HINT": 'C:\\Program Files\\"uv"'})
+        text = handlib.agents.render_agent(self.b, "unity-props-lib", server, "uv run", allowlist=True, focus_nudge=False)
         for line in text.split("---")[1].splitlines():
             if ': "' in line:
                 json.loads(line.split(": ", 1)[1])
 
     def test_sync_writes_skips_and_prunes(self):
-        server = ch.ServerConfig(transport="stdio")
+        server = handlib.discovery.ServerConfig(transport="stdio")
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
-            first = ch.sync_agents([self.a, self.b], d, server, "uv run")
+            first = handlib.agents.sync_agents([self.a, self.b], d, server, "uv run")
             self.assertEqual(len(first.written), 2)
-            second = ch.sync_agents([self.a, self.b], d, server, "uv run")
+            second = handlib.agents.sync_agents([self.a, self.b], d, server, "uv run")
             self.assertEqual((len(second.written), len(second.unchanged)), (0, 2))
-            third = ch.sync_agents([self.a], d, server, "uv run", prune=True)
+            third = handlib.agents.sync_agents([self.a], d, server, "uv run", prune=True)
             self.assertEqual([p.name for p in third.removed], ["unity-props-lib.md"])
             self.assertEqual(sorted(p.name for p in d.iterdir()), ["unity-mygame.md"])
 
@@ -208,18 +235,18 @@ class GenerationTests(unittest.TestCase):
             d = Path(tmp)
             (d / "unity-mygame.md").write_text("---\nname: unity-mygame\n---\nmine\n", encoding="utf-8")
             with self.assertRaises(SystemExit):
-                ch.sync_agents([self.a], d, ch.ServerConfig(transport="stdio"), "uv run")
+                handlib.agents.sync_agents([self.a], d, handlib.discovery.ServerConfig(transport="stdio"), "uv run")
 
     def test_dry_run_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp) / "agents"
-            result = ch.sync_agents([self.a], d, ch.ServerConfig(transport="stdio"), "uv run", dry_run=True)
+            result = handlib.agents.sync_agents([self.a], d, handlib.discovery.ServerConfig(transport="stdio"), "uv run", dry_run=True)
             self.assertEqual(len(result.written), 1)
             self.assertFalse(d.exists())
 
     def test_skill_source_exists(self):
-        self.assertTrue(ch.SKILL_SOURCE.exists())
-        self.assertIn("name: claude-hand", ch.SKILL_SOURCE.read_text(encoding="utf-8"))
+        self.assertTrue(handlib.constants.SKILL_SOURCE.exists())
+        self.assertIn("name: claude-hand", handlib.constants.SKILL_SOURCE.read_text(encoding="utf-8"))
 
 
 class PreviewCaptureTests(unittest.TestCase):
@@ -234,19 +261,19 @@ class PreviewCaptureTests(unittest.TestCase):
                 return {"success": True, "data": {"path": params["path"]}}
             with unittest.mock.patch.dict(sys.modules, {"unity_bridge": unittest.mock.Mock(
                     find_project=lambda hash_: {"hash": hash_} if hash_ == "aaaa1111" else None)}):
-                self.assertEqual(ch.capture_window("unity", self.PIN, path, unity_request=fake_unity), path)
-                self.assertIsNone(ch.capture_window("unity", "Other@ffff0000", path, unity_request=fake_unity))  # not open
+                self.assertEqual(handlib.capture.capture_window("unity", self.PIN, path, unity_request=fake_unity), path)
+                self.assertIsNone(handlib.capture.capture_window("unity", "Other@ffff0000", path, unity_request=fake_unity))  # not open
             sent = []
 
             def fake_blender(port, command, timeout):
                 sent.append((port, command["params"]["code"]))
                 return {"status": "success", "result": {"result": json.dumps({"path": path, "width": 640, "height": 480})}}
-            self.assertEqual(ch.capture_window("blender", "props@9876", path, blender=fake_blender), path)
+            self.assertEqual(handlib.capture.capture_window("blender", "props@9876", path, blender=fake_blender), path)
             self.assertEqual(sent[0][0], 9876)
             self.assertIn(f"path = area.spaces.active, {path!r}", sent[0][1])
             no_view = lambda *a: {"status": "success", "result": {"result": '{"error": "no 3D viewport is open"}'}}
-            self.assertIsNone(ch.capture_window("blender", "props@9876", path + "x", blender=no_view))
-            self.assertIsNone(ch.capture_window("blender", "props@9876", path, blender=lambda *a: 1 / 0))  # Blender closed
+            self.assertIsNone(handlib.capture.capture_window("blender", "props@9876", path + "x", blender=no_view))
+            self.assertIsNone(handlib.capture.capture_window("blender", "props@9876", path, blender=lambda *a: 1 / 0))  # Blender closed
 
 
 
@@ -286,13 +313,13 @@ class FakeBlenderAddon:
 
 class BlenderTests(unittest.TestCase):
     def test_parse_ports(self):
-        self.assertEqual(ch.parse_ports("9876-9878,9900,9877"), [9876, 9877, 9878, 9900])
-        self.assertEqual(ch.parse_ports("80,70000"), [])
+        self.assertEqual(handlib.discovery.parse_ports("9876-9878,9900,9877"), [9876, 9877, 9878, 9900])
+        self.assertEqual(handlib.discovery.parse_ports("80,70000"), [])
 
     def test_instance_names(self):
-        self.assertEqual(ch.BlenderInstance(port=9876, filepath="C:\\Art\\Hero Rig.blend").name, "Hero Rig")
-        self.assertEqual(ch.BlenderInstance(port=9877).name, "untitled-9877")
-        self.assertEqual(ch.BlenderInstance(port=9877).id, "untitled-9877@9877")
+        self.assertEqual(handlib.discovery.BlenderInstance(port=9876, filepath="C:\\Art\\Hero Rig.blend").name, "Hero Rig")
+        self.assertEqual(handlib.discovery.BlenderInstance(port=9877).name, "untitled-9877")
+        self.assertEqual(handlib.discovery.BlenderInstance(port=9877).id, "untitled-9877@9877")
 
     def test_discovery_against_fake_addon(self):
         addon = FakeBlenderAddon()
@@ -301,7 +328,7 @@ class BlenderTests(unittest.TestCase):
             closed.bind(("127.0.0.1", 0))
             unused_port = closed.getsockname()[1]
             closed.close()
-            found = ch.discover_blender([unused_port, addon.port])
+            found = handlib.discovery.discover_blender([unused_port, addon.port])
         finally:
             addon.close()
         self.assertEqual(len(found), 1)
@@ -312,13 +339,13 @@ class BlenderTests(unittest.TestCase):
         def not_mcp_for_blender(port, command, timeout):
             return {"jsonrpc": "2.0", "error": "unknown"}
 
-        self.assertEqual(ch.discover_blender([9876], request=not_mcp_for_blender), [])
+        self.assertEqual(handlib.discovery.discover_blender([9876], request=not_mcp_for_blender), [])
 
     def detect(self, servers):
         with tempfile.TemporaryDirectory() as tmp:
             f = Path(tmp) / "config.json"
             f.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
-            return ch.detect_blender_config([f])
+            return handlib.discovery.detect_blender_config([f])
 
     def test_detect_github_addon_server(self):
         cfg = self.detect({"unityMCP": {"command": "uvx", "args": ["mcp-for-unity"]},
@@ -327,21 +354,21 @@ class BlenderTests(unittest.TestCase):
 
     def test_other_blender_server_falls_back_with_warning(self):
         cfg = self.detect({"blender-lab": {"command": "python", "args": ["C:/lab/blmcp/server.py"]}})
-        self.assertEqual((cfg.command, cfg.args), ("uvx", ch.DEFAULT_BLENDER_ARGS))
+        self.assertEqual((cfg.command, cfg.args), ("uvx", handlib.constants.DEFAULT_BLENDER_ARGS))
         self.assertIn("blender-lab", cfg.warning)
 
     def test_no_blender_entry_uses_default(self):
         cfg = self.detect({"github": {"command": "npx", "args": ["x"]}})
-        self.assertEqual((cfg.command, cfg.args, cfg.warning), ("uvx", ch.DEFAULT_BLENDER_ARGS, ""))
+        self.assertEqual((cfg.command, cfg.args, cfg.warning), ("uvx", handlib.constants.DEFAULT_BLENDER_ARGS, ""))
 
     def test_with_port_replaces_existing(self):
-        self.assertEqual(ch.with_port(["mcp-for-blender", "--port", "1111", "--port=2222", "--host", "h"], 9877),
+        self.assertEqual(handlib.agents.with_port(["mcp-for-blender", "--port", "1111", "--port=2222", "--host", "h"], 9877),
                          ["mcp-for-blender", "--host", "h", "--port", "9877"])
 
     def test_agent_file(self):
-        inst = ch.BlenderInstance(port=9877, filepath="C:/Art/character.blend")
-        server = ch.ServerConfig(transport="stdio", command="uvx", args=["mcp-for-blender"], key="blender")
-        text = ch.render_blender_agent(inst, "blender-character", server, "uv run -q --no-project", allowlist=True)
+        inst = handlib.discovery.BlenderInstance(port=9877, filepath="C:/Art/character.blend")
+        server = handlib.discovery.ServerConfig(transport="stdio", command="uvx", args=["mcp-for-blender"], key="blender")
+        text = handlib.agents.render_blender_agent(inst, "blender-character", server, "uv run -q --no-project", allowlist=True)
         front = text.split("---")[1]
         self.assertIn("name: blender-character", front)
         self.assertIn('tools: "mcp__blender_character__*, Read, Glob, Grep"', front)
@@ -351,28 +378,28 @@ class BlenderTests(unittest.TestCase):
         for line in front.splitlines():
             if ': "' in line:
                 json.loads(line.split(": ", 1)[1])
-        self.assertNotIn("__", re.sub(r"mcp__\w+__|__\w+__\*", "", text.split(ch.GENERATED_MARKER)[1]).replace("__init__", ""))
+        self.assertNotIn("__", re.sub(r"mcp__\w+__|__\w+__\*", "", text.split(handlib.constants.GENERATED_MARKER)[1]).replace("__init__", ""))
 
     def test_recipes_are_valid_python(self):
-        blocks = re.findall(r"```python\n(.*?)```", ch.BLENDER_PROMPT, re.S)
+        blocks = re.findall(r"```python\n(.*?)```", handlib.agents.prompt_template("blender-subagent"), re.S)
         self.assertEqual(len(blocks), 3)
         for code in blocks:
             ast.parse(code)
 
     def test_names_for_duplicate_files(self):
-        a = ch.BlenderInstance(port=9876, filepath="C:/a/scene.blend")
-        b = ch.BlenderInstance(port=9877, filepath="C:/b/scene.blend")
-        self.assertEqual(sorted(ch.blender_agent_names([a, b]).values()), ["blender-scene-9876", "blender-scene-9877"])
+        a = handlib.discovery.BlenderInstance(port=9876, filepath="C:/a/scene.blend")
+        b = handlib.discovery.BlenderInstance(port=9877, filepath="C:/b/scene.blend")
+        self.assertEqual(sorted(handlib.agents.blender_agent_names([a, b]).values()), ["blender-scene-9876", "blender-scene-9877"])
 
     def test_sync_writes_and_prunes_both_apps(self):
-        unity = ch.Instance(name="MyGame", hash="aaaa1111")
-        blender = ch.BlenderInstance(port=9876, filepath="C:/Art/character.blend")
-        server = ch.ServerConfig(transport="stdio")
+        unity = handlib.discovery.Instance(name="MyGame", hash="aaaa1111")
+        blender = handlib.discovery.BlenderInstance(port=9876, filepath="C:/Art/character.blend")
+        server = handlib.discovery.ServerConfig(transport="stdio")
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
-            first = ch.sync_agents([unity], d, server, "uv run", blender=[blender])
+            first = handlib.agents.sync_agents([unity], d, server, "uv run", blender=[blender])
             self.assertEqual(sorted(p.name for p in first.written), ["blender-character.md", "unity-mygame.md"])
-            later = ch.sync_agents([unity], d, server, "uv run", blender=[], prune=True)
+            later = handlib.agents.sync_agents([unity], d, server, "uv run", blender=[], prune=True)
             self.assertEqual([p.name for p in later.removed], ["blender-character.md"])
 
 
@@ -393,48 +420,48 @@ class SetupHelperTests(unittest.TestCase):
     def test_unity_install_adds_both_and_keeps_other_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = make_unity_project(Path(tmp))
-            plan, manifest = ch.plan_unity_install(project, package_dir=Path(tmp) / "pkg")
+            plan, manifest = handlib.install.plan_unity_install(project, package_dir=Path(tmp) / "pkg")
             self.assertEqual(len(plan.changes), 2)
-            ch.apply_unity_install(project, manifest, plan)
+            handlib.install.apply_unity_install(project, manifest, plan)
             written = json.loads((project / "Packages" / "manifest.json").read_text(encoding="utf-8"))
             deps = written["dependencies"]
             self.assertEqual(deps["com.unity.ugui"], "2.0.0")
-            self.assertEqual(deps[ch.MCP_FOR_UNITY_PACKAGE], ch.MCP_FOR_UNITY_GIT_URL)
-            self.assertTrue(deps[ch.CLAUDE_HAND_PACKAGE].startswith("file:") and deps[ch.CLAUDE_HAND_PACKAGE].endswith("/pkg"))
+            self.assertEqual(deps[handlib.constants.MCP_FOR_UNITY_PACKAGE], handlib.constants.MCP_FOR_UNITY_GIT_URL)
+            self.assertTrue(deps[handlib.constants.CLAUDE_HAND_PACKAGE].startswith("file:") and deps[handlib.constants.CLAUDE_HAND_PACKAGE].endswith("/pkg"))
             self.assertEqual(written["scopedRegistries"], [])
             backup = json.loads(Path(plan.backup).read_text(encoding="utf-8"))
-            self.assertNotIn(ch.MCP_FOR_UNITY_PACKAGE, backup["dependencies"])
-            again, manifest_again = ch.plan_unity_install(project, package_dir=Path(tmp) / "pkg")
+            self.assertNotIn(handlib.constants.MCP_FOR_UNITY_PACKAGE, backup["dependencies"])
+            again, manifest_again = handlib.install.plan_unity_install(project, package_dir=Path(tmp) / "pkg")
             self.assertEqual((again.changes, manifest_again), ([], None))
 
     def test_unity_install_respects_existing_mcp_for_unity(self):
         with tempfile.TemporaryDirectory() as tmp:
-            project = make_unity_project(Path(tmp), deps={ch.MCP_FOR_UNITY_PACKAGE: "https://example/fork.git"})
-            plan, manifest = ch.plan_unity_install(project, package_dir=Path(tmp) / "pkg")
-            self.assertEqual(manifest["dependencies"][ch.MCP_FOR_UNITY_PACKAGE], "https://example/fork.git")
+            project = make_unity_project(Path(tmp), deps={handlib.constants.MCP_FOR_UNITY_PACKAGE: "https://example/fork.git"})
+            plan, manifest = handlib.install.plan_unity_install(project, package_dir=Path(tmp) / "pkg")
+            self.assertEqual(manifest["dependencies"][handlib.constants.MCP_FOR_UNITY_PACKAGE], "https://example/fork.git")
             self.assertEqual(len(plan.changes), 1)
 
     def test_new_installs_get_the_tested_mcp_for_unity_release(self):
         """A package that follows #main changes under the project whenever its lock file is made anew."""
-        self.assertTrue(ch.MCP_FOR_UNITY_GIT_URL.endswith("#" + ch.MCP_FOR_UNITY_TESTED))
-        self.assertFalse(ch.follows_a_branch(ch.MCP_FOR_UNITY_GIT_URL))
-        self.assertFalse(ch.follows_a_branch("https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#81542a7e86292b5c"))
-        self.assertFalse(ch.follows_a_branch("file:C:/packages/unity-mcp"))  # not a git address
-        self.assertFalse(ch.follows_a_branch("10.3.0"))  # a registry version
+        self.assertTrue(handlib.constants.MCP_FOR_UNITY_GIT_URL.endswith("#" + handlib.constants.MCP_FOR_UNITY_TESTED))
+        self.assertFalse(handlib.install.follows_a_branch(handlib.constants.MCP_FOR_UNITY_GIT_URL))
+        self.assertFalse(handlib.install.follows_a_branch("https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#81542a7e86292b5c"))
+        self.assertFalse(handlib.install.follows_a_branch("file:C:/packages/unity-mcp"))  # not a git address
+        self.assertFalse(handlib.install.follows_a_branch("10.3.0"))  # a registry version
         main = "https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#main"
-        self.assertTrue(ch.follows_a_branch(main))
-        self.assertTrue(ch.follows_a_branch("https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity"))
+        self.assertTrue(handlib.install.follows_a_branch(main))
+        self.assertTrue(handlib.install.follows_a_branch("https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity"))
         with tempfile.TemporaryDirectory() as tmp:
-            project = make_unity_project(Path(tmp), deps={ch.MCP_FOR_UNITY_PACKAGE: main})
-            plan, manifest = ch.plan_unity_install(project, package_dir=Path(tmp) / "pkg")
-            self.assertEqual(manifest["dependencies"][ch.MCP_FOR_UNITY_PACKAGE], main)  # left alone unless asked
+            project = make_unity_project(Path(tmp), deps={handlib.constants.MCP_FOR_UNITY_PACKAGE: main})
+            plan, manifest = handlib.install.plan_unity_install(project, package_dir=Path(tmp) / "pkg")
+            self.assertEqual(manifest["dependencies"][handlib.constants.MCP_FOR_UNITY_PACKAGE], main)  # left alone unless asked
             self.assertTrue(any("--pin-mcp-for-unity" in note for note in plan.notes))
-            plan, manifest = ch.plan_unity_install(project, package_dir=Path(tmp) / "pkg", pin_mcp_for_unity=True)
-            self.assertEqual(manifest["dependencies"][ch.MCP_FOR_UNITY_PACKAGE], ch.MCP_FOR_UNITY_GIT_URL)
+            plan, manifest = handlib.install.plan_unity_install(project, package_dir=Path(tmp) / "pkg", pin_mcp_for_unity=True)
+            self.assertEqual(manifest["dependencies"][handlib.constants.MCP_FOR_UNITY_PACKAGE], handlib.constants.MCP_FOR_UNITY_GIT_URL)
 
     def test_the_unity_package_does_not_need_mcp_for_unity_to_compile(self):
         """It borrowed six of its types once; a rename there would have taken the bridge and the chat window down."""
-        package = ch.CLAUDE_HAND_PACKAGE_DIR
+        package = handlib.constants.CLAUDE_HAND_PACKAGE_DIR
         asmdef = json.loads((package / "Editor" / "ClaudeHand.Editor.asmdef").read_text(encoding="utf-8"))
         self.assertEqual(asmdef["references"], [])
         for source in (package / "Editor").glob("*.cs"):
@@ -448,14 +475,14 @@ class SetupHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             project = make_unity_project(Path(tmp))
             (project / "Assets" / "MCPForUnity").mkdir()
-            plan, manifest = ch.plan_unity_install(project, package_dir=Path(tmp) / "pkg")
-            self.assertNotIn(ch.MCP_FOR_UNITY_PACKAGE, manifest["dependencies"])
+            plan, manifest = handlib.install.plan_unity_install(project, package_dir=Path(tmp) / "pkg")
+            self.assertNotIn(handlib.constants.MCP_FOR_UNITY_PACKAGE, manifest["dependencies"])
             self.assertTrue(any("Asset Store" in n for n in plan.notes))
 
     def test_unity_install_rejects_non_projects(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(SystemExit):
-                ch.plan_unity_install(Path(tmp))
+                handlib.install.plan_unity_install(Path(tmp))
 
     def test_unity_install_cli_dry_run_changes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -470,13 +497,13 @@ class SetupHelperTests(unittest.TestCase):
     def test_project_version_and_editor_lookup(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = make_unity_project(Path(tmp), version="6000.3.2f1")
-            self.assertEqual(ch.read_project_version(project), "6000.3.2f1")
+            self.assertEqual(handlib.install.read_project_version(project), "6000.3.2f1")
             hub = Path(tmp) / "Hub" / "Editor"
             exe = hub / "6000.3.2f1" / "Editor" / "Unity.exe"
             exe.parent.mkdir(parents=True)
             exe.write_text("", encoding="utf-8")
-            self.assertEqual(ch.find_unity_editor("6000.3.2f1", [hub], platform="win32"), exe)
-            self.assertIsNone(ch.find_unity_editor("2022.3.1f1", [hub], platform="win32"))
+            self.assertEqual(handlib.install.find_unity_editor("6000.3.2f1", [hub], platform="win32"), exe)
+            self.assertIsNone(handlib.install.find_unity_editor("2022.3.1f1", [hub], platform="win32"))
 
     def test_blender_lookup_on_windows(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -485,30 +512,30 @@ class SetupHelperTests(unittest.TestCase):
                 exe = pf / "Blender Foundation" / f"Blender {version}" / "blender.exe"
                 exe.parent.mkdir(parents=True)
                 exe.write_text("", encoding="utf-8")
-            found = ch.find_blender_executables(env={"ProgramFiles": str(pf)}, platform="win32", which=lambda _: None)
+            found = handlib.install.find_blender_executables(env={"ProgramFiles": str(pf)}, platform="win32", which=lambda _: None)
             self.assertEqual([p.parent.name for p in found], ["Blender 5.0", "Blender 4.2"])
 
     def test_blender_addon_lookup(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp) / "Blender"
-            legacy = base / "4.1" / "scripts" / "addons" / ch.BLENDER_ADDON_FILE
-            extension = base / "4.2" / "extensions" / "user_default" / ch.BLENDER_ADDON_FILE
+            legacy = base / "4.1" / "scripts" / "addons" / handlib.constants.BLENDER_ADDON_FILE
+            extension = base / "4.2" / "extensions" / "user_default" / handlib.constants.BLENDER_ADDON_FILE
             for f in (legacy, extension):
                 f.parent.mkdir(parents=True)
                 f.write_text("", encoding="utf-8")
             (base / "config").mkdir()
-            self.assertEqual(ch.find_blender_addon_installs(base), [extension, legacy])
+            self.assertEqual(handlib.install.find_blender_addon_installs(base), [extension, legacy])
 
     def test_blender_open_command(self):
-        cmd = ch.blender_open_command(Path("C:/B/blender.exe"), Path("C:/Art/props.blend"), 9877)
+        cmd = handlib.install.blender_open_command(Path("C:/B/blender.exe"), Path("C:/Art/props.blend"), 9877)
         self.assertEqual(cmd[:3], [str(Path("C:/B/blender.exe")), str(Path("C:/Art/props.blend")), "--python-expr"])
         ast.parse(cmd[3])
         self.assertIn("blendermcp_port = 9877", cmd[3])
-        self.assertEqual(ch.blender_open_command(Path("blender"), None, 9876)[1], "--python-expr")
+        self.assertEqual(handlib.install.blender_open_command(Path("blender"), None, 9876)[1], "--python-expr")
 
     def test_node_major(self):
-        self.assertEqual(ch.node_major("v22.3.0"), 22)
-        self.assertIsNone(ch.node_major(None))
+        self.assertEqual(handlib.install.node_major("v22.3.0"), 22)
+        self.assertIsNone(handlib.install.node_major(None))
 
     def test_doctor_reports_gaps_with_fixes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -517,13 +544,13 @@ class SetupHelperTests(unittest.TestCase):
             project = make_unity_project(Path(tmp))
             versions = {"claude": "2.1.0", "uv": "uv 0.9", "git": None, "node": "v16.0.0", "agent-desktop": None}
             with unittest.mock.patch.dict("os.environ", {"HOME": str(home), "USERPROFILE": str(home), "APPDATA": str(home)}), \
-                 unittest.mock.patch.object(ch.Path, "home", lambda: home), \
-                 unittest.mock.patch.object(ch, "candidate_config_files", lambda cwd=None: []), \
-                 unittest.mock.patch.object(ch, "discover_blender", lambda ports, request=None: []), \
-                 unittest.mock.patch.object(ch, "find_blender_executables", lambda **kw: []), \
-                 unittest.mock.patch.object(ch, "chat_server_registered", lambda **kw: False), \
-                 unittest.mock.patch.object(ch, "plan_chat_config", lambda root, runner="", direct_servers=None: {root / ".mcp.json": {}}):
-                checks = ch.doctor_checks([project], [9876], version=lambda *cmd: versions[cmd[0]])
+                 unittest.mock.patch.object(Path, "home", lambda: home), \
+                 unittest.mock.patch.object(handlib.discovery, "candidate_config_files", lambda cwd=None: []), \
+                 unittest.mock.patch.object(handlib.discovery, "discover_blender", lambda ports, request=None: []), \
+                 unittest.mock.patch.object(handlib.install, "find_blender_executables", lambda **kw: []), \
+                 unittest.mock.patch.object(handlib.chatsetup, "chat_server_registered", lambda **kw: False), \
+                 unittest.mock.patch.object(handlib.chatsetup, "plan_chat_config", lambda root, runner="", direct_servers=None: {root / ".mcp.json": {}}):
+                checks = handlib.checks.doctor_checks([project], [9876], version=lambda *cmd: versions[cmd[0]])
         by_item = {c.item: c for c in checks}
         self.assertTrue(by_item["Claude Code CLI (claude 명령)"].ok)
         self.assertFalse(by_item["git (Unity가 MCP for Unity를 받을 때 필요)"].ok)
@@ -542,16 +569,16 @@ class SetupHelperTests(unittest.TestCase):
 
 class ChatSetupTests(unittest.TestCase):
     def test_channel_is_registered_for_this_folder_only(self):
-        cmd = ch.chat_add_command("uv run -q --no-project")
-        self.assertEqual(cmd[:7], ["claude", "mcp", "add", "--scope", "local", ch.CHAT_SERVER_NAME, "--"])
-        self.assertEqual(cmd[7:], ["uv", "run", "-q", "--no-project", str(ch.CHAT_CHANNEL_SCRIPT)])
-        self.assertTrue(ch.CHAT_CHANNEL_SCRIPT.exists() and ch.CHAT_ADDON_SOURCE.exists())
-        self.assertIn(f"server:{ch.CHAT_SERVER_NAME}", ch.SUPERVISOR_COMMAND)
+        cmd = handlib.chatsetup.chat_add_command("uv run -q --no-project")
+        self.assertEqual(cmd[:7], ["claude", "mcp", "add", "--scope", "local", handlib.constants.CHAT_SERVER_NAME, "--"])
+        self.assertEqual(cmd[7:], ["uv", "run", "-q", "--no-project", str(handlib.constants.CHAT_CHANNEL_SCRIPT)])
+        self.assertTrue(handlib.constants.CHAT_CHANNEL_SCRIPT.exists() and handlib.constants.CHAT_ADDON_SOURCE.exists())
+        self.assertIn(f"server:{handlib.constants.CHAT_SERVER_NAME}", handlib.constants.SUPERVISOR_COMMAND)
 
     def test_supervisor_scripts_use_the_same_command(self):
         for name in ("start-supervisor.cmd", "start-supervisor.sh"):
-            script = (ch.REPO_ROOT / name).read_text(encoding="utf-8")
-            self.assertIn(ch.SUPERVISOR_COMMAND, script)
+            script = (handlib.constants.REPO_ROOT / name).read_text(encoding="utf-8")
+            self.assertIn(handlib.constants.SUPERVISOR_COMMAND, script)
             self.assertIn("CLAUDE_HAND_SUPERVISOR=1", script)
             self.assertIn("MCP_TIMEOUT", script)
 
@@ -562,61 +589,61 @@ class ChatSetupTests(unittest.TestCase):
             (root / ".mcp.json").write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}}), encoding="utf-8")
             (root / ".claude" / "settings.local.json").write_text(
                 json.dumps({"permissions": {"allow": ["Bash(git status)"]}, "model": "keep-me"}), encoding="utf-8")
-            plan = ch.plan_chat_config(root, "uv run -q --no-project", direct_servers=[])
+            plan = handlib.chatsetup.plan_chat_config(root, "uv run -q --no-project", direct_servers=[])
             self.assertEqual(sorted(p.name for p in plan), [".mcp.json", "settings.local.json"])
-            ch.write_json_files(plan)
+            handlib.settings.write_json_files(plan)
             mcp = json.loads((root / ".mcp.json").read_text(encoding="utf-8"))
             self.assertEqual(mcp["mcpServers"]["other"], {"command": "x"})
-            entry = mcp["mcpServers"][ch.CHAT_SERVER_NAME]
+            entry = mcp["mcpServers"][handlib.constants.CHAT_SERVER_NAME]
             self.assertEqual(entry["command"], "uv")
             self.assertEqual(entry["env"], {"CLAUDE_HAND_SUPERVISOR": "${CLAUDE_HAND_SUPERVISOR:-0}"})
             self.assertEqual(entry["args"][:3], ["run", "-q", "--no-project"])
             self.assertTrue(entry["args"][-1].endswith("/tools/chat_channel.py") and Path(entry["args"][-1]).is_absolute())
             settings = json.loads((root / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
             self.assertEqual(settings["permissions"]["allow"],
-                             ["Bash(git status)", ch.CHAT_REPLY_RULE, ch.CHAT_CONTEXT_RULE])
-            self.assertEqual(settings["enabledMcpjsonServers"], [ch.CHAT_SERVER_NAME])
+                             ["Bash(git status)", handlib.constants.CHAT_REPLY_RULE, handlib.constants.CHAT_CONTEXT_RULE])
+            self.assertEqual(settings["enabledMcpjsonServers"], [handlib.constants.CHAT_SERVER_NAME])
             self.assertEqual(settings["model"], "keep-me")
-            self.assertEqual(ch.plan_chat_config(root, "uv run -q --no-project", direct_servers=[]), {})  # second run changes nothing
+            self.assertEqual(handlib.chatsetup.plan_chat_config(root, "uv run -q --no-project", direct_servers=[]), {})  # second run changes nothing
 
     def test_chat_config_refuses_broken_json(self):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / ".mcp.json").write_text("{oops", encoding="utf-8")
             with self.assertRaises(SystemExit):
-                ch.plan_chat_config(Path(tmp))
+                handlib.chatsetup.plan_chat_config(Path(tmp))
 
     def test_tool_allow_rules(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            ch.write_json_files(ch.plan_tool_allow(root, ["unity_mygame", "blender_props"]))
+            handlib.settings.write_json_files(handlib.settings.plan_tool_allow(root, ["unity_mygame", "blender_props"]))
             path = root / ".claude" / "settings.local.json"
             rules = json.loads(path.read_text(encoding="utf-8"))["permissions"]["allow"]
             self.assertEqual(rules, ["mcp__unity_mygame__*", "mcp__blender_props__*"])
-            self.assertEqual(ch.plan_tool_allow(root, ["unity_mygame", "blender_props"]), {})
-            ch.write_json_files(ch.plan_tool_allow(root, ["unity_mygame"], prune=True))
+            self.assertEqual(handlib.settings.plan_tool_allow(root, ["unity_mygame", "blender_props"]), {})
+            handlib.settings.write_json_files(handlib.settings.plan_tool_allow(root, ["unity_mygame"], prune=True))
             self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["permissions"]["allow"], ["mcp__unity_mygame__*"])
 
     def test_notes_allow_rules(self):
         # Windows paths as Claude Code matches them (checked with claude -p 2.1.319: //c/... allows Read, Edit and Write).
-        self.assertEqual(ch.permission_path("C:\\Projects\\MyGame/ClaudeHand/NOTES.md"), "//c/Projects/MyGame/ClaudeHand/NOTES.md")
-        self.assertEqual(ch.permission_path("/home/me/art/a.claude-hand.md"), "//home/me/art/a.claude-hand.md")
+        self.assertEqual(handlib.settings.permission_path("C:\\Projects\\MyGame/ClaudeHand/NOTES.md"), "//c/Projects/MyGame/ClaudeHand/NOTES.md")
+        self.assertEqual(handlib.settings.permission_path("/home/me/art/a.claude-hand.md"), "//home/me/art/a.claude-hand.md")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            notes = [ch.unity_notes_path("C:/Projects/MyGame"), ch.blender_notes_path(""), ch.blender_notes_path("D:/Art/prop.blend")]
-            ch.write_json_files(ch.plan_notes_allow(root, notes))
+            notes = [handlib.agents.unity_notes_path("C:/Projects/MyGame"), handlib.agents.blender_notes_path(""), handlib.agents.blender_notes_path("D:/Art/prop.blend")]
+            handlib.settings.write_json_files(handlib.settings.plan_notes_allow(root, notes))
             rules = json.loads((root / ".claude" / "settings.local.json").read_text(encoding="utf-8"))["permissions"]["allow"]
             self.assertEqual(rules, ["Read(//c/Projects/MyGame/ClaudeHand/NOTES.md)", "Edit(//c/Projects/MyGame/ClaudeHand/NOTES.md)",
                                      "Read(//d/Art/prop.claude-hand.md)", "Edit(//d/Art/prop.claude-hand.md)"])
-            self.assertEqual(ch.plan_notes_allow(root, notes), {})  # unsaved .blend: no rule; second run changes nothing
+            self.assertEqual(handlib.settings.plan_notes_allow(root, notes), {})  # unsaved .blend: no rule; second run changes nothing
 
     def test_sync_writes_notes_rules_only_when_asked(self):
         with tempfile.TemporaryDirectory() as tmp:
             root, agents = Path(tmp) / "repo", Path(tmp) / "agents"
-            server = ch.ServerConfig(transport="stdio")
-            game = ch.Instance(name="MyGame", hash="aaaa1111", path="C:/Projects/MyGame")
-            ch.sync_agents([game], agents, server, "uv run")
+            server = handlib.discovery.ServerConfig(transport="stdio")
+            game = handlib.discovery.Instance(name="MyGame", hash="aaaa1111", path="C:/Projects/MyGame")
+            handlib.agents.sync_agents([game], agents, server, "uv run")
             self.assertFalse((root / ".claude" / "settings.local.json").exists())
-            ch.sync_agents([game], agents, server, "uv run", notes_root=root)
+            handlib.agents.sync_agents([game], agents, server, "uv run", notes_root=root)
             text = (root / ".claude" / "settings.local.json").read_text(encoding="utf-8")
             self.assertIn("Edit(//c/Projects/MyGame/ClaudeHand/NOTES.md)", text)
 
@@ -628,15 +655,15 @@ class ChatSetupTests(unittest.TestCase):
         def fake_run(cmd, **kwargs):
             seen["cmd"] = cmd
             return Done()
-        result = ch.prewarm_chat_channel(Path("/repo"), "uv run -q --no-project", run=fake_run)
+        result = handlib.chatsetup.prewarm_chat_channel(Path("/repo"), "uv run -q --no-project", run=fake_run)
         self.assertTrue(result["ok"])
         self.assertEqual(seen["cmd"][-1], "--check")
         self.assertTrue(seen["cmd"][-2].endswith("chat_channel.py"))
 
     def test_claude_version(self):
-        self.assertEqual(ch.parse_claude_version("2.1.319 (Claude Code)"), (2, 1, 319))
-        self.assertLess(ch.parse_claude_version("2.1.99"), ch.MIN_CLAUDE_FOR_PERMISSION_RELAY)
-        self.assertIsNone(ch.parse_claude_version(None))
+        self.assertEqual(handlib.chatsetup.parse_claude_version("2.1.319 (Claude Code)"), (2, 1, 319))
+        self.assertLess(handlib.chatsetup.parse_claude_version("2.1.99"), handlib.constants.MIN_CLAUDE_FOR_PERMISSION_RELAY)
+        self.assertIsNone(handlib.chatsetup.parse_claude_version(None))
 
     def test_registration_check(self):
         class Done:
@@ -644,54 +671,54 @@ class ChatSetupTests(unittest.TestCase):
                 self.returncode = code
                 self.stdout = "claude-hand-chat:\n  Scope: Project config\n" if code == 0 else 'No MCP server named "x"'
                 self.stderr = ""
-        self.assertTrue(ch.chat_server_registered(run=lambda *a, **k: Done(0), which=lambda _: "claude"))
-        self.assertFalse(ch.chat_server_registered(run=lambda *a, **k: Done(1), which=lambda _: "claude"))
-        self.assertIsNone(ch.chat_server_registered(which=lambda _: None))
+        self.assertTrue(handlib.chatsetup.chat_server_registered(run=lambda *a, **k: Done(0), which=lambda _: "claude"))
+        self.assertFalse(handlib.chatsetup.chat_server_registered(run=lambda *a, **k: Done(1), which=lambda _: "claude"))
+        self.assertIsNone(handlib.chatsetup.chat_server_registered(which=lambda _: None))
 
     def test_chat_addon_targets(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp) / "Blender"
             for version in ("4.2", "4.10", "3.6"):
                 (base / version / "scripts" / "addons").mkdir(parents=True)
-            self.assertEqual(ch.blender_chat_targets(base), [base / "4.10" / "scripts" / "addons"])  # newest, numerically
-            mcp = base / "4.2" / "scripts" / "addons" / ch.BLENDER_ADDON_FILE
+            self.assertEqual(handlib.install.blender_chat_targets(base), [base / "4.10" / "scripts" / "addons"])  # newest, numerically
+            mcp = base / "4.2" / "scripts" / "addons" / handlib.constants.BLENDER_ADDON_FILE
             mcp.write_text("", encoding="utf-8")
-            self.assertEqual(ch.blender_chat_targets(base), [mcp.parent])  # next to MCP for Blender
-            installed = mcp.parent / (ch.CHAT_ADDON_MODULE + ".py")
+            self.assertEqual(handlib.install.blender_chat_targets(base), [mcp.parent])  # next to MCP for Blender
+            installed = mcp.parent / (handlib.constants.CHAT_ADDON_MODULE + ".py")
             installed.write_text("", encoding="utf-8")
-            self.assertEqual(ch.find_chat_addon_installs(base), [installed])
+            self.assertEqual(handlib.install.find_chat_addon_installs(base), [installed])
 
     def test_install_chat_dry_run_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = io.StringIO()
             with unittest.mock.patch("sys.stdout", out), \
-                 unittest.mock.patch.object(ch, "find_blender_executables", lambda **kw: [Path("blender")]):
+                 unittest.mock.patch.object(handlib.install, "find_blender_executables", lambda **kw: [Path("blender")]):
                 ch.main(["blender-install-chat", "--addons-dir", tmp, "--dry-run"])
             self.assertEqual(list(Path(tmp).iterdir()), [])
             self.assertIn("--background", out.getvalue())
 
     def test_enable_script_is_valid_python(self):
-        ast.parse(ch.ENABLE_CHAT_ADDON)
-        self.assertIn(f"addon_utils.enable('{ch.CHAT_ADDON_MODULE}'", ch.ENABLE_CHAT_ADDON)
+        ast.parse(handlib.install.ENABLE_CHAT_ADDON)
+        self.assertIn(f"addon_utils.enable('{handlib.constants.CHAT_ADDON_MODULE}'", handlib.install.ENABLE_CHAT_ADDON)
 
 
 
 class SelftestTests(unittest.TestCase):
     def test_reads_unittest_output(self):
-        self.assertEqual(ch.unittest_summary("....\n------\nRan 187 tests in 16.4s\n\nOK (skipped=24)\n"),
+        self.assertEqual(handlib.checks.unittest_summary("....\n------\nRan 187 tests in 16.4s\n\nOK (skipped=24)\n"),
                          (True, "187개 통과 (건너뜀 24)"))
         failed = "FAIL: test_a (m.C.test_a)\nERROR: test_b (m.C.test_b)\nRan 9 tests in 1s\n\nFAILED (failures=1, errors=1)\n"
-        self.assertEqual(ch.unittest_summary(failed), (False, "실패: test_a, test_b"))
-        self.assertEqual(ch.unittest_summary("Traceback ...\nModuleNotFoundError: No module named 'bpy'\n"),
+        self.assertEqual(handlib.checks.unittest_summary(failed), (False, "실패: test_a, test_b"))
+        self.assertEqual(handlib.checks.unittest_summary("Traceback ...\nModuleNotFoundError: No module named 'bpy'\n"),
                          (False, "끝까지 돌지 못함: ModuleNotFoundError: No module named 'bpy'"))
 
     def test_knows_this_checkouts_versions(self):
-        self.assertTrue({"ch_capture", "ch_checkpoint", "ch_editor_status", "ch_scene_snapshot"} <= set(ch.repo_unity_tools()))
-        self.assertRegex(ch.addon_version(ch.CHAT_ADDON_SOURCE.read_text(encoding="utf-8")), r"^\d+\.\d+\.\d+$")
+        self.assertTrue({"ch_capture", "ch_checkpoint", "ch_editor_status", "ch_scene_snapshot"} <= set(handlib.checks.repo_unity_tools()))
+        self.assertRegex(handlib.checks.addon_version(handlib.constants.CHAT_ADDON_SOURCE.read_text(encoding="utf-8")), r"^\d+\.\d+\.\d+$")
 
     def test_checks_the_open_windows_without_changing_them(self):
         import unity_bridge
-        wanted = ch.repo_unity_tools()
+        wanted = handlib.checks.repo_unity_tools()
         live = {"name": "MyGame", "hash": "aaaa1111", "_mtime": 2, "tools": [{"name": t} for t in wanted if t != "ch_capture"]}
         gone = {"name": "Old", "hash": "bbbb2222", "_mtime": 1, "tools": []}
         calls = []
@@ -704,8 +731,8 @@ class SelftestTests(unittest.TestCase):
                 Path(params["path"]).write_bytes(b"png")
             return {"success": True}
         blender = lambda port, command, timeout: {"status": "success", "result": {"result": json.dumps({"enabled": True, "version": [0, 1, 0]})}}
-        checks = ch.selftest_checks([9876], run_tests=False, registry=[gone, live], unity_request=unity, blender=blender,
-                                    blenders=[ch.BlenderInstance(port=9876, filepath="C:/Art/props.blend")],
+        checks = handlib.checks.selftest_checks([9876], run_tests=False, registry=[gone, live], unity_request=unity, blender=blender,
+                                    blenders=[handlib.discovery.BlenderInstance(port=9876, filepath="C:/Art/props.blend")],
                                     supervisor_on=False, stale=[], hooks=[])
         by_item = {c.item: c for c in checks}
         self.assertFalse(by_item["MyGame: Claude Hand Tools"].ok)  # compiled before ch_capture existed
@@ -726,8 +753,8 @@ class SelftestTests(unittest.TestCase):
                                                    "permissionDecisionReason": "x"}})
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
-            ch.sync_agents([ch.Instance(name="MyGame", hash="aaaa1111"), ch.Instance(name="Props", hash="bbbb2222")], d,
-                           ch.ServerConfig(transport="stdio"), "python3")
+            handlib.agents.sync_agents([handlib.discovery.Instance(name="MyGame", hash="aaaa1111"), handlib.discovery.Instance(name="Props", hash="bbbb2222")], d,
+                           handlib.discovery.ServerConfig(transport="stdio"), "python3")
             (d / "mine.md").write_text("---\nname: mine\n---\nhand-written\n", encoding="utf-8")
             ran = []
 
@@ -736,8 +763,8 @@ class SelftestTests(unittest.TestCase):
                 if "unity_props" in cmd[-1]:
                     return Done(code=127, err="bash: uv: command not found")  # the hook never started: the call would go through
                 return Done(deny)
-            checks = {c.item: c for c in ch.hook_checks(d, run=run, shell=["sh", "-c"])}
-            unknown = ch.hook_checks(d, run=run, shell=[])  # Windows without Git Bash: cannot tell
+            checks = {c.item: c for c in handlib.checks.hook_checks(d, run=run, shell=["sh", "-c"])}
+            unknown = handlib.checks.hook_checks(d, run=run, shell=[])  # Windows without Git Bash: cannot tell
         self.assertEqual(sorted(checks), ["unity-mygame: 안전장치 훅", "unity-props: 안전장치 훅"])  # generated files only
         self.assertTrue(checks["unity-mygame: 안전장치 훅"].ok)
         self.assertFalse(checks["unity-props: 안전장치 훅"].ok)
@@ -745,17 +772,17 @@ class SelftestTests(unittest.TestCase):
         self.assertIn("command not found", checks["unity-props: 안전장치 훅"].detail)
         cmd, event = ran[0]
         self.assertEqual(cmd[:2], ["sh", "-c"])
-        self.assertEqual(cmd[2], ch.hook_command("python3", "MyGame@aaaa1111", "unity_mygame", "stdio"))  # the installed command as written
+        self.assertEqual(cmd[2], handlib.agents.hook_command("python3", "MyGame@aaaa1111", "unity_mygame", "stdio"))  # the installed command as written
         self.assertEqual(event["tool_name"], "mcp__claude_hand_selftest__probe")  # refused before anything is reported or marked
         self.assertEqual([c.ok for c in unknown], [None, None])
 
     def test_the_guard_refuses_the_selftest_probe_for_both_apps(self):
         import guard
-        self.assertIsNotNone(guard.guard_decision(ch.HOOK_PROBE, "MyGame@aaaa1111", "unity_mygame", "stdio", "unity"))
-        self.assertIsNotNone(guard.guard_decision(ch.HOOK_PROBE, "props@9876", "blender_props", "stdio", "blender"))
+        self.assertIsNotNone(guard.guard_decision(handlib.checks.HOOK_PROBE, "MyGame@aaaa1111", "unity_mygame", "stdio", "unity"))
+        self.assertIsNotNone(guard.guard_decision(handlib.checks.HOOK_PROBE, "props@9876", "blender_props", "stdio", "blender"))
 
     def test_hook_shell(self):
-        self.assertEqual(ch.hook_shell(platform="linux"), ["sh", "-c"])
+        self.assertEqual(handlib.checks.hook_shell(platform="linux"), ["sh", "-c"])
         with tempfile.TemporaryDirectory() as tmp:
             bash = Path(tmp) / "Git" / "bin" / "bash.exe"
             bash.parent.mkdir(parents=True)
@@ -763,9 +790,9 @@ class SelftestTests(unittest.TestCase):
             git = Path(tmp) / "Git" / "cmd" / "git.exe"
             git.parent.mkdir()
             git.write_bytes(b"")
-            self.assertEqual(ch.hook_shell({}, "win32", lambda name: str(git)), [str(bash.resolve()), "-c"])
-            self.assertEqual(ch.hook_shell({"CLAUDE_CODE_GIT_BASH_PATH": str(bash)}, "win32", lambda name: None), [str(bash), "-c"])
-            self.assertIsNone(ch.hook_shell({}, "win32", lambda name: None))
+            self.assertEqual(handlib.checks.hook_shell({}, "win32", lambda name: str(git)), [str(bash.resolve()), "-c"])
+            self.assertEqual(handlib.checks.hook_shell({"CLAUDE_CODE_GIT_BASH_PATH": str(bash)}, "win32", lambda name: None), [str(bash), "-c"])
+            self.assertIsNone(handlib.checks.hook_shell({}, "win32", lambda name: None))
 
 
 class UpdateAndStatusTests(unittest.TestCase):
@@ -776,13 +803,13 @@ class UpdateAndStatusTests(unittest.TestCase):
     def test_claude_mcp_get_parsing(self):
         local = "claude-hand-chat:\n  Scope: Local config (private to you in this project)\n  Status: ✓ Connected\n"
         pending = "claude-hand-chat:\n  Scope: Project config (shared via .mcp.json)\n  Status: ⏸ Pending approval\n"
-        entry = ch.claude_mcp_get(run=lambda *a, **k: self.Done(local), which=lambda _: "claude")
+        entry = handlib.chatsetup.claude_mcp_get(run=lambda *a, **k: self.Done(local), which=lambda _: "claude")
         self.assertEqual((entry.exists, entry.scope, entry.pending), (True, "local", False))
-        entry = ch.claude_mcp_get(run=lambda *a, **k: self.Done(pending), which=lambda _: "claude")
+        entry = handlib.chatsetup.claude_mcp_get(run=lambda *a, **k: self.Done(pending), which=lambda _: "claude")
         self.assertEqual((entry.scope, entry.pending), ("project", True))
-        missing = ch.claude_mcp_get(run=lambda *a, **k: self.Done('No MCP server named "claude-hand-chat".'), which=lambda _: "claude")
+        missing = handlib.chatsetup.claude_mcp_get(run=lambda *a, **k: self.Done('No MCP server named "claude-hand-chat".'), which=lambda _: "claude")
         self.assertFalse(missing.exists)
-        self.assertIsNone(ch.claude_mcp_get(which=lambda _: None))
+        self.assertIsNone(handlib.chatsetup.claude_mcp_get(which=lambda _: None))
 
     def write_chat_files(self, home, server=None, status=None):
         (home).mkdir(parents=True, exist_ok=True)
@@ -796,7 +823,7 @@ class UpdateAndStatusTests(unittest.TestCase):
         root.mkdir(exist_ok=True)
         if mcp_json is not None:
             (root / ".mcp.json").write_text(json.dumps(mcp_json), encoding="utf-8")
-        return "\n".join(ch.chat_status_report(Path(tmp) / "chat", mcp_entry=lambda: mcp_entry, fetch=fetch, root=root))
+        return "\n".join(handlib.chatsetup.chat_status_report(Path(tmp) / "chat", mcp_entry=lambda: mcp_entry, fetch=fetch, root=root))
 
     GOOD_MCP = {"mcpServers": {"claude-hand-chat": {"command": "uv", "args": [], "env": {"CLAUDE_HAND_SUPERVISOR": "x"}}}}
 
@@ -817,7 +844,7 @@ class UpdateAndStatusTests(unittest.TestCase):
     def test_status_flags_old_local_registration_and_old_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             old = {"mcpServers": {"claude-hand-chat": {"command": "uv", "args": []}}}
-            text = self.report(tmp, mcp_entry=ch.McpEntry(True, scope="local"), mcp_json=old)
+            text = self.report(tmp, mcp_entry=handlib.chatsetup.McpEntry(True, scope="local"), mcp_json=old)
         self.assertIn("local 범위", text)
         self.assertIn("이전 버전 형식", text)
         self.assertIn("한 번도 시작되지 않았습니다", text)
@@ -831,40 +858,40 @@ class UpdateAndStatusTests(unittest.TestCase):
         self.assertIn("응답하지 않습니다", text)
 
     def test_generated_agents_round_trip(self):
-        unity = ch.Instance(name="My Game", hash="aaaa1111", path="C:/Projects/My Game")
-        blender = ch.BlenderInstance(port=9877, filepath="C:/Art/props (v2).blend")
-        files = ch.build_agent_files([unity], ch.ServerConfig(transport="stdio"), [blender], None, "uv run")
-        back = {name: ch.parse_generated_agent(text) for name, text in files.items()}
+        unity = handlib.discovery.Instance(name="My Game", hash="aaaa1111", path="C:/Projects/My Game")
+        blender = handlib.discovery.BlenderInstance(port=9877, filepath="C:/Art/props (v2).blend")
+        files = handlib.agents.build_agent_files([unity], handlib.discovery.ServerConfig(transport="stdio"), [blender], None, "uv run")
+        back = {name: handlib.agents.parse_generated_agent(text) for name, text in files.items()}
         self.assertEqual((back["unity-my-game.md"].id, back["unity-my-game.md"].path), (unity.id, unity.path))
         self.assertEqual((back["blender-props-v2.md"].port, back["blender-props-v2.md"].filepath), (9877, blender.filepath))
-        untitled = ch.build_agent_files([], None, [ch.BlenderInstance(port=9878)], None, "uv run")
-        self.assertEqual(ch.parse_generated_agent(next(iter(untitled.values()))).filepath, "")
+        untitled = handlib.agents.build_agent_files([], None, [handlib.discovery.BlenderInstance(port=9878)], None, "uv run")
+        self.assertEqual(handlib.agents.parse_generated_agent(next(iter(untitled.values()))).filepath, "")
 
     def test_stale_checks_and_update_refresh(self):
         with tempfile.TemporaryDirectory() as tmp:
             agents, skills = Path(tmp) / "agents", Path(tmp) / "skills"
-            inst = ch.Instance(name="MyGame", hash="aaaa1111")
-            ch.write_agent_files(ch.build_agent_files([inst], ch.ServerConfig(transport="stdio"), [], None, "uv run -q --no-project"), agents)
+            inst = handlib.discovery.Instance(name="MyGame", hash="aaaa1111")
+            handlib.agents.write_agent_files(handlib.agents.build_agent_files([inst], handlib.discovery.ServerConfig(transport="stdio"), [], None, "uv run -q --no-project"), agents)
             agent_file = agents / "unity-mygame.md"
             agent_file.write_text(agent_file.read_text(encoding="utf-8").replace("## 작업 순서", "## old"), encoding="utf-8")
             (skills / "claude-hand").mkdir(parents=True)
             (skills / "claude-hand" / "SKILL.md").write_text("old skill", encoding="utf-8")
             (skills / "claude-hand-unity").mkdir()
             (skills / "claude-hand-unity" / "SKILL.md").write_text("---\nname: claude-hand-unity\n---\n", encoding="utf-8")
-            with unittest.mock.patch.object(ch, "candidate_config_files", lambda cwd=None: []), \
-                 unittest.mock.patch.object(ch, "find_chat_addon_installs", lambda base=None: []):
-                items = {c.item for c in ch.stale_checks(agents, skills)}
+            with unittest.mock.patch.object(handlib.discovery, "candidate_config_files", lambda cwd=None: []), \
+                 unittest.mock.patch.object(handlib.install, "find_chat_addon_installs", lambda base=None: []):
+                items = {c.item for c in handlib.checks.stale_checks(agents, skills)}
                 self.assertIn("설치된 감독 스킬이 저장소 버전과 다름", items)
                 self.assertIn("이전 버전으로 만든 하위 세션 정의", items)
                 out = io.StringIO()
                 with unittest.mock.patch("sys.stdout", out), \
-                     unittest.mock.patch.object(ch, "claude_mcp_get", lambda **kw: None), \
-                     unittest.mock.patch.object(ch, "read_chat_files", lambda home=None: (None, None)), \
-                     unittest.mock.patch.object(ch, "discover_stdio", lambda *a, **k: []), \
-                     unittest.mock.patch.object(ch, "discover_blender", lambda *a, **k: []), \
-                     unittest.mock.patch.object(ch, "REPO_ROOT", Path(tmp) / "repo"):
+                     unittest.mock.patch.object(handlib.chatsetup, "claude_mcp_get", lambda **kw: None), \
+                     unittest.mock.patch.object(handlib.link, "read_chat_files", lambda home=None: (None, None)), \
+                     unittest.mock.patch.object(handlib.discovery, "discover_stdio", lambda *a, **k: []), \
+                     unittest.mock.patch.object(handlib.discovery, "discover_blender", lambda *a, **k: []), \
+                     unittest.mock.patch.object(handlib.constants, "REPO_ROOT", Path(tmp) / "repo"):
                     ch.main(["update", "--agents-dir", str(agents), "--skills-dir", str(skills)])
-                self.assertEqual(ch.stale_checks(agents, skills), [])
+                self.assertEqual(handlib.checks.stale_checks(agents, skills), [])
             self.assertFalse((skills / "claude-hand-unity").exists())
             self.assertIn("## 작업 순서", agent_file.read_text(encoding="utf-8"))
 
@@ -872,7 +899,7 @@ class UpdateAndStatusTests(unittest.TestCase):
 
 class EverydayStartTests(unittest.TestCase):
     def test_start_scripts(self):
-        cmd = (ch.REPO_ROOT / "start-supervisor.cmd").read_bytes()
+        cmd = (handlib.constants.REPO_ROOT / "start-supervisor.cmd").read_bytes()
         self.assertFalse(cmd.startswith(b"\xef\xbb\xbf"), "a BOM breaks the first line of a batch file")
         text = cmd.decode("utf-8")
         self.assertIn("\r\n", text)
@@ -887,38 +914,38 @@ class EverydayStartTests(unittest.TestCase):
                 inside = False
             elif inside and t.startswith("echo"):
                 self.assertNotRegex(t, r"[()]", "a ) inside an if-block ends the block early")
-        sh = (ch.REPO_ROOT / "start-supervisor.sh").read_text(encoding="utf-8")
+        sh = (handlib.constants.REPO_ROOT / "start-supervisor.sh").read_text(encoding="utf-8")
         self.assertLess(sh.index("preflight"), sh.index("claude --dangerously"))
 
     def test_user_config_records_the_start_script(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             (home / "config.json").write_text(json.dumps({"keep": 1}), encoding="utf-8")
-            ch.write_user_config(home, root=Path("/repo"), start_script=Path("/repo/start-supervisor.cmd"))
+            handlib.launch.write_user_config(home, root=Path("/repo"), start_script=Path("/repo/start-supervisor.cmd"))
             config = json.loads((home / "config.json").read_text(encoding="utf-8"))
         self.assertEqual(config, {"keep": 1, "repo": "/repo", "start_script": "/repo/start-supervisor.cmd"})
 
     def test_supervisor_running(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
-            self.assertFalse(ch.supervisor_running(home))
+            self.assertFalse(handlib.link.supervisor_running(home))
             (home / "chat").mkdir()
             (home / "chat" / "server.json").write_text(json.dumps({"port": 1, "token": "t"}), encoding="utf-8")
-            self.assertTrue(ch.supervisor_running(home, fetch=lambda req: {"ok": True}))
+            self.assertTrue(handlib.link.supervisor_running(home, fetch=lambda req: {"ok": True}))
             def down(req):
                 raise OSError("refused")
-            self.assertFalse(ch.supervisor_running(home, fetch=down))
+            self.assertFalse(handlib.link.supervisor_running(home, fetch=down))
 
     def run_preflight(self, tmp, running=False):
         home = Path(tmp) / "home"
         out = io.StringIO()
         refreshed = []
         with unittest.mock.patch.dict("os.environ", {"CLAUDE_HAND_HOME": str(home)}), \
-             unittest.mock.patch.object(ch.Path, "home", lambda: Path(tmp)), \
-             unittest.mock.patch.object(ch, "supervisor_running", lambda home=None, fetch=None: running), \
-             unittest.mock.patch.object(ch, "plan_chat_config", lambda root=None, runner=None, direct_servers=None: {}), \
-             unittest.mock.patch.object(ch, "refresh_agents", lambda **kw: refreshed.append(kw) or ch.SyncResult()), \
-             unittest.mock.patch.object(ch, "LAUNCH_ARGS_FILE", Path(tmp) / ".launch-args"), \
+             unittest.mock.patch.object(Path, "home", lambda: Path(tmp)), \
+             unittest.mock.patch.object(handlib.link, "supervisor_running", lambda home=None, fetch=None: running), \
+             unittest.mock.patch.object(handlib.chatsetup, "plan_chat_config", lambda root=None, runner=None, direct_servers=None: {}), \
+             unittest.mock.patch.object(handlib.agents, "refresh_agents", lambda **kw: refreshed.append(kw) or handlib.agents.SyncResult()), \
+             unittest.mock.patch.object(handlib.constants, "LAUNCH_ARGS_FILE", Path(tmp) / ".launch-args"), \
              unittest.mock.patch("sys.stdout", out):
             code = ch.main(["preflight"])
         return code, out.getvalue(), refreshed, home
@@ -941,14 +968,14 @@ class EverydayStartTests(unittest.TestCase):
         used = lambda sid: sid == b  # only b has a transcript
         made = lambda: d
         # a first start with this version carries on from the newest earlier Claude Hand conversation
-        self.assertEqual(ch.supervisor_session({}, transcript=used, latest=lambda: c, new_id=made), (["--resume", c], c, True))
+        self.assertEqual(handlib.launch.supervisor_session({}, transcript=used, latest=lambda: c, new_id=made), (["--resume", c], c, True))
         # nothing earlier: a new conversation with an id chosen now
-        self.assertEqual(ch.supervisor_session({}, transcript=used, latest=lambda: None, new_id=made), (["--session-id", d], d, False))
+        self.assertEqual(handlib.launch.supervisor_session({}, transcript=used, latest=lambda: None, new_id=made), (["--session-id", d], d, False))
         # the remembered one has a transcript: open it again
-        self.assertEqual(ch.supervisor_session({"supervisor_session": b}, transcript=used, latest=lambda: c, new_id=made),
+        self.assertEqual(handlib.launch.supervisor_session({"supervisor_session": b}, transcript=used, latest=lambda: c, new_id=made),
                          (["--resume", b], b, True))
         # remembered but never used (new-session, or closed before any message): start that one, not an older one
-        self.assertEqual(ch.supervisor_session({"supervisor_session": a}, transcript=used, latest=lambda: c, new_id=made),
+        self.assertEqual(handlib.launch.supervisor_session({"supervisor_session": a}, transcript=used, latest=lambda: c, new_id=made),
                          (["--session-id", a], a, False))
 
     def test_earlier_supervisor_conversation_is_found_by_its_name(self):
@@ -961,22 +988,22 @@ class EverydayStartTests(unittest.TestCase):
             supervisor.write_text('{"type":"custom-title","customTitle":"Claude Hand","sessionId":"x"}\n', encoding="utf-8")
             os.utime(supervisor, (1_000_000, 1_000_000))
             (folder / "bbbbbbbb-1111-1111-1111-111111111111.jsonl").write_text('{"type":"user"}\n', encoding="utf-8")  # newer, plain
-            self.assertEqual(ch.latest_supervisor_session(root, config), supervisor.stem)
-            self.assertEqual(ch.session_transcript(supervisor.stem, config), supervisor)
-            self.assertIsNone(ch.session_transcript("cccccccc-1111-1111-1111-111111111111", config))
-            self.assertIsNone(ch.session_transcript("../../etc", config))
+            self.assertEqual(handlib.launch.latest_supervisor_session(root, config), supervisor.stem)
+            self.assertEqual(handlib.launch.session_transcript(supervisor.stem, config), supervisor)
+            self.assertIsNone(handlib.launch.session_transcript("cccccccc-1111-1111-1111-111111111111", config))
+            self.assertIsNone(handlib.launch.session_transcript("../../etc", config))
 
     def test_new_session_command(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             out = io.StringIO()
             with unittest.mock.patch.dict("os.environ", {"CLAUDE_HAND_HOME": str(home)}), \
-                 unittest.mock.patch.object(ch, "supervisor_running", lambda home=None, fetch=None: False), \
+                 unittest.mock.patch.object(handlib.link, "supervisor_running", lambda home=None, fetch=None: False), \
                  unittest.mock.patch("sys.stdout", out):
                 ch.main(["new-session"])
-            session = ch.read_user_config(home)["supervisor_session"]
+            session = handlib.launch.read_user_config(home)["supervisor_session"]
             self.assertRegex(session, r"^[0-9a-f-]{36}$")
-            self.assertEqual(ch.supervisor_session({"supervisor_session": session}, transcript=lambda s: None)[0],
+            self.assertEqual(handlib.launch.supervisor_session({"supervisor_session": session}, transcript=lambda s: None)[0],
                              ["--session-id", session])
             self.assertIn("새 대화", out.getvalue())
 
@@ -989,15 +1016,15 @@ class EverydayStartTests(unittest.TestCase):
 
     def test_shortcut_files(self):
         home = Path("/home/me")
-        mac = ch.shortcut_files("darwin", home)
-        linux = ch.shortcut_files("linux", home)
+        mac = handlib.launch.shortcut_files("darwin", home)
+        linux = handlib.launch.shortcut_files("linux", home)
         self.assertEqual(list(mac), [home / "Desktop" / "Claude Hand.command"])
-        self.assertIn(ch.START_SCRIPT.as_posix(), next(iter(mac.values())))
+        self.assertIn(handlib.constants.START_SCRIPT.as_posix(), next(iter(mac.values())))
         self.assertIn("Terminal=true", next(iter(linux.values())))
 
     @unittest.skipIf(sys.platform == "win32", "Windows shortcuts are .lnk files made by PowerShell")
     def test_shortcut_command_creates_and_removes(self):
-        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.object(ch.Path, "home", lambda: Path(tmp)), \
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.object(Path, "home", lambda: Path(tmp)), \
                 unittest.mock.patch("sys.stdout", io.StringIO()):
             ch.main(["shortcut"])
             created = list((Path(tmp) / "Desktop").iterdir())
@@ -1011,44 +1038,44 @@ class EverydayStartTests(unittest.TestCase):
 class RemoteControlTests(unittest.TestCase):
     def test_launch_args(self):
         on = '--remote-control --name "Claude Hand"'
-        self.assertEqual(ch.launch_args({}, env={}), on)  # on by default
-        self.assertEqual(ch.launch_args({"remote_control": True}, env={}), on)
-        self.assertEqual(ch.launch_args({"remote_control": False}, env={}), "")
-        self.assertEqual(ch.launch_args({}, env={"ANTHROPIC_API_KEY": "x"}), "")  # cannot work with this login: left out
+        self.assertEqual(handlib.launch.launch_args({}, env={}), on)  # on by default
+        self.assertEqual(handlib.launch.launch_args({"remote_control": True}, env={}), on)
+        self.assertEqual(handlib.launch.launch_args({"remote_control": False}, env={}), "")
+        self.assertEqual(handlib.launch.launch_args({}, env={"ANTHROPIC_API_KEY": "x"}), "")  # cannot work with this login: left out
 
     def test_problems(self):
-        self.assertEqual(ch.remote_control_problems({}), [])
-        self.assertEqual(len(ch.remote_control_problems({"ANTHROPIC_API_KEY": "x", "CLAUDE_CODE_USE_BEDROCK": "1"})), 2)
-        self.assertIn("ANTHROPIC_BASE_URL", ch.remote_control_problems({"ANTHROPIC_BASE_URL": "http://proxy"})[0])
+        self.assertEqual(handlib.launch.remote_control_problems({}), [])
+        self.assertEqual(len(handlib.launch.remote_control_problems({"ANTHROPIC_API_KEY": "x", "CLAUDE_CODE_USE_BEDROCK": "1"})), 2)
+        self.assertIn("ANTHROPIC_BASE_URL", handlib.launch.remote_control_problems({"ANTHROPIC_BASE_URL": "http://proxy"})[0])
         # the Claude desktop app puts the official address in its sessions' environment
-        self.assertEqual(ch.remote_control_problems({"ANTHROPIC_BASE_URL": "https://api.anthropic.com/"}), [])
+        self.assertEqual(handlib.launch.remote_control_problems({"ANTHROPIC_BASE_URL": "https://api.anthropic.com/"}), [])
 
     def test_on_off_and_preflight_args(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             clean = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC", "CLAUDE_CODE_USE"))}
             with unittest.mock.patch.dict("os.environ", {**clean, "CLAUDE_HAND_HOME": str(home)}, clear=True), \
-                 unittest.mock.patch.object(ch, "supervisor_running", lambda home=None, fetch=None: False), \
+                 unittest.mock.patch.object(handlib.link, "supervisor_running", lambda home=None, fetch=None: False), \
                  unittest.mock.patch("sys.stdout", io.StringIO()):
                 ch.main(["remote-control", "on"])
-                self.assertTrue(ch.read_user_config(home)["remote_control"])
-                self.assertIn("start_script", ch.read_user_config(home))
+                self.assertTrue(handlib.launch.read_user_config(home)["remote_control"])
+                self.assertIn("start_script", handlib.launch.read_user_config(home))
                 runner = EverydayStartTests()
                 _, text, _, _ = runner.run_preflight(tmp)
-                session = ch.read_user_config(home)["supervisor_session"]  # no earlier Claude Hand conversation here
+                session = handlib.launch.read_user_config(home)["supervisor_session"]  # no earlier Claude Hand conversation here
                 self.assertEqual((Path(tmp) / ".launch-args").read_text(encoding="utf-8").strip(),
-                                 f"--session-id {session} " + ch.launch_args({"remote_control": True}))
+                                 f"--session-id {session} " + handlib.launch.launch_args({"remote_control": True}))
                 ch.main(["remote-control", "off"])
-                self.assertFalse(ch.read_user_config(home)["remote_control"])
+                self.assertFalse(handlib.launch.read_user_config(home)["remote_control"])
         self.assertIn("Code 탭", text)
 
     def test_start_scripts_pass_the_launch_args(self):
-        cmd = (ch.REPO_ROOT / "start-supervisor.cmd").read_text(encoding="utf-8")
+        cmd = (handlib.constants.REPO_ROOT / "start-supervisor.cmd").read_text(encoding="utf-8")
         self.assertIn('set /p CH_ARGS=<".launch-args"', cmd)
         self.assertIn("%CH_ARGS% %*", cmd)
-        self.assertIn("$CH_ARGS", (ch.REPO_ROOT / "start-supervisor.sh").read_text(encoding="utf-8"))
+        self.assertIn("$CH_ARGS", (handlib.constants.REPO_ROOT / "start-supervisor.sh").read_text(encoding="utf-8"))
         self.assertIn('in (".launch-unset") do set "%%v="', cmd)
-        self.assertIn("< .launch-unset", (ch.REPO_ROOT / "start-supervisor.sh").read_text(encoding="utf-8"))
+        self.assertIn("< .launch-unset", (handlib.constants.REPO_ROOT / "start-supervisor.sh").read_text(encoding="utf-8"))
         self.assertLess(cmd.index(".launch-unset"), cmd.index("claude --dangerously"))
 
     def test_a_parent_sessions_variables_are_dropped(self):
@@ -1058,10 +1085,10 @@ class RemoteControlTests(unittest.TestCase):
                "CLAUDE_CODE_MESSAGING_SOCKET": r"\\.\pipe\x", "CLAUDE_AGENT_SDK_VERSION": "0.3", "CLAUDE_CODE_ENTRYPOINT": "claude-desktop",
                "CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDE_CODE_GIT_BASH_PATH": "C:/Git/bin/bash.exe", "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "9",
                "CLAUDE_HAND_HOME": "C:/h", "ANTHROPIC_BASE_URL": "https://api.anthropic.com", "PATH": "C:/bin"}
-        dropped = ch.inherited_session_env(env, persistent={"CLAUDE_CODE_MAX_OUTPUT_TOKENS"})
+        dropped = handlib.launch.inherited_session_env(env, persistent={"CLAUDE_CODE_MAX_OUTPUT_TOKENS"})
         self.assertEqual(dropped, ["CLAUDECODE", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT",
                                    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID"])
-        self.assertEqual(ch.inherited_session_env({"PATH": "C:/bin"}, persistent=set()), [])
+        self.assertEqual(handlib.launch.inherited_session_env({"PATH": "C:/bin"}, persistent=set()), [])
 
     @unittest.skipIf(sys.platform == "win32", "POSIX shell")
     def test_shell_keeps_the_quoted_name_together(self):
@@ -1074,13 +1101,13 @@ class RemoteControlTests(unittest.TestCase):
 
 class DesktopModeTests(unittest.TestCase):
     def test_installed_skill_knows_where_claude_hand_is(self):
-        text = ch.rendered_skill(Path("/opt/claude-hand"))
+        text = handlib.agents.rendered_skill(Path("/opt/claude-hand"))
         self.assertNotIn("{{CLAUDE_HAND}}", text)
         self.assertIn('uv run "/opt/claude-hand/tools/claude_hand.py" sync', text)
-        self.assertIn("{{CLAUDE_HAND}}", ch.SKILL_SOURCE.read_text(encoding="utf-8"))
+        self.assertIn("{{CLAUDE_HAND}}", handlib.constants.SKILL_SOURCE.read_text(encoding="utf-8"))
         with tempfile.TemporaryDirectory() as tmp:
-            installed = ch.install_skill(Path(tmp))
-            self.assertEqual(installed.read_text(encoding="utf-8"), ch.rendered_skill())
+            installed = handlib.agents.install_skill(Path(tmp))
+            self.assertEqual(installed.read_text(encoding="utf-8"), handlib.agents.rendered_skill())
 
     def test_old_desktop_mode_is_cleared(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1089,7 +1116,7 @@ class DesktopModeTests(unittest.TestCase):
             out = io.StringIO()
             with unittest.mock.patch.dict("os.environ", {"CLAUDE_HAND_HOME": str(home)}), unittest.mock.patch("sys.stdout", out):
                 ch.main(["mode", "panels"])
-            config = ch.read_user_config(home)
+            config = handlib.launch.read_user_config(home)
             self.assertNotIn("mode", config)
             self.assertFalse(config["remote_control"])  # other choices are kept
             self.assertIn("하나", out.getvalue())
@@ -1102,8 +1129,8 @@ class StartCommandTests(unittest.TestCase):
             launched = []
             base = {k: v for k, v in os.environ.items() if k != "CLAUDE_HAND_SUPERVISOR" and not k.startswith(("ANTHROPIC", "CLAUDE_CODE_USE"))}
             with unittest.mock.patch.dict("os.environ", {**base, "CLAUDE_HAND_HOME": tmp, **(env or {})}, clear=True), \
-                 unittest.mock.patch.object(ch, "supervisor_running", lambda home=None, fetch=None: running), \
-                 unittest.mock.patch.object(ch, "open_start_window", popen or (lambda: launched.append(1))), \
+                 unittest.mock.patch.object(handlib.link, "supervisor_running", lambda home=None, fetch=None: running), \
+                 unittest.mock.patch.object(handlib.launch, "open_start_window", popen or (lambda: launched.append(1))), \
                  unittest.mock.patch("sys.stdout", out):
                 code = ch.main(["start"])
             return code, out.getvalue(), launched
@@ -1122,8 +1149,8 @@ class StartCommandTests(unittest.TestCase):
     def test_window_commands(self):
         calls = []
         popen = lambda cmd, **kw: calls.append((cmd, kw.get("creationflags", 0)))
-        self.assertEqual(ch.open_start_window(Path("C:/ch/start-supervisor.cmd"), "win32", popen)[:4], ["cmd.exe", "/c", "start", "Claude Hand"])
-        self.assertEqual(ch.open_start_window(Path("/ch/start-supervisor.sh"), "darwin", popen)[:3], ["open", "-a", "Terminal"])
+        self.assertEqual(handlib.launch.open_start_window(Path("C:/ch/start-supervisor.cmd"), "win32", popen)[:4], ["cmd.exe", "/c", "start", "Claude Hand"])
+        self.assertEqual(handlib.launch.open_start_window(Path("/ch/start-supervisor.sh"), "darwin", popen)[:3], ["open", "-a", "Terminal"])
         self.assertEqual(len(calls), 2)
 
     def test_minimize_switch(self):

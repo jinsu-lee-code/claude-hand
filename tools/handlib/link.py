@@ -1,5 +1,5 @@
 """The low-level ways to things that are already running: where claude-hand keeps its files, the chat channel's
-server file, and MCP for Blender's socket.
+server file and whether it answers, and MCP for Blender's socket.
 
 Kept small on purpose: the guard hook loads this on every tool call of a subagent.
 """
@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import urllib.request
 from pathlib import Path
 
 
@@ -30,6 +31,20 @@ def read_chat_files(home: Path | None = None) -> tuple[dict | None, dict | None]
         except (OSError, ValueError):
             return None
     return load("server.json"), load("status.json")
+
+
+def supervisor_running(home: Path | None = None, fetch=None) -> bool:
+    """A supervisor session's chat channel answers right now (a server.json left behind by a closed one does not)."""
+    server, _ = read_chat_files((home or claude_hand_home()) / "chat")
+    if not server:
+        return False
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{server['port']}/v1/status",
+                                     headers={"X-Claude-Hand-Token": server.get("token", "")})
+        state = (fetch or (lambda r: json.loads(urllib.request.urlopen(r, timeout=2).read().decode("utf-8"))))(req)
+    except (OSError, ValueError, KeyError):
+        return False
+    return bool(state.get("ok"))
 
 
 def blender_request(port: int, command: dict, timeout: float = 2.0, connect_timeout: float = 0.5):

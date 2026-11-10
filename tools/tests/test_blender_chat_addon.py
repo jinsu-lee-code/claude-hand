@@ -16,7 +16,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import chat_channel as cc  # noqa: E402
-import claude_hand as ch  # noqa: E402
+import handlib.agents  # noqa: E402
+import handlib.discovery  # noqa: E402
+import handlib.install  # noqa: E402
 
 try:
     import bpy
@@ -45,7 +47,7 @@ class BlenderChatAddonTests(unittest.TestCase):
         bpy.ops.wm.read_factory_settings(use_empty=True)
         blend = root / "props.blend"
         bpy.ops.wm.save_as_mainfile(filepath=str(blend))
-        ch.write_agent_files(ch.build_agent_files([], None, [ch.BlenderInstance(port=9876, filepath=str(blend))], None, "uv run"),
+        handlib.agents.write_agent_files(handlib.agents.build_agent_files([], None, [handlib.discovery.BlenderInstance(port=9876, filepath=str(blend))], None, "uv run"),
                              root / "agents")
         self.emitted = []
         self.hub = cc.ChatHub(self.emitted.append, root / "agents")
@@ -253,8 +255,8 @@ class BlenderChatAddonTests(unittest.TestCase):
         self.hub.capture, self.hub.images_dir = lambda app, pin, path: str(png), Path(self.tmp.name) / "images"
         self.hub.post_user_message("blender", "props", "의자를 Unity로 보내줘", pin=addon.window_identity()[1])
         root = Path(self.tmp.name)
-        ch.write_agent_files(ch.build_agent_files([ch.Instance(name="MyGame", hash="aaaa1111")], ch.ServerConfig(transport="stdio"),
-                                                  [ch.BlenderInstance(port=9876, filepath=str(root / "props.blend"))], None, "uv run"),
+        handlib.agents.write_agent_files(handlib.agents.build_agent_files([handlib.discovery.Instance(name="MyGame", hash="aaaa1111")], handlib.discovery.ServerConfig(transport="stdio"),
+                                                  [handlib.discovery.BlenderInstance(port=9876, filepath=str(root / "props.blend"))], None, "uv run"),
                              root / "agents")
         self.hub.acted["unity-mygame"] = time.time() + 1  # its subagent worked after the request
         self.hub.reply("blender-props", "Unity에 놓았어요")
@@ -322,7 +324,7 @@ class HeadlessEnableTests(unittest.TestCase):
             shutil.copy2(ADDON, scripts / "addons" / ADDON.name)
             env = {**os.environ, "BLENDER_USER_SCRIPTS": str(scripts), "BLENDER_USER_CONFIG": str(config),
                    "CLAUDE_HAND_HOME": str(Path(tmp) / "home")}
-            code = "import bpy\nexec(" + repr(ch.ENABLE_CHAT_ADDON) + ")\nprint('PANEL', hasattr(bpy.types, 'CLAUDEHAND_PT_chat'))"
+            code = "import bpy\nexec(" + repr(handlib.install.ENABLE_CHAT_ADDON) + ")\nprint('PANEL', hasattr(bpy.types, 'CLAUDEHAND_PT_chat'))"
             # Inside Blender itself (selftest), sys.executable is its bundled Python, which has no bpy: run Blender.
             blender = getattr(bpy.app, "binary_path", "") or ""
             cmd = ([blender, "--background", "--python-expr", code] if Path(blender).name.lower().startswith("blender")

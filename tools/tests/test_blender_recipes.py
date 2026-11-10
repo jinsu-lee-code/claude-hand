@@ -17,14 +17,15 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import claude_hand as ch  # noqa: E402
+import handlib.agents  # noqa: E402
+import handlib.install  # noqa: E402
 
 try:
     import bpy  # noqa: F401
 except ImportError:  # pragma: no cover - depends on the machine
     bpy = None
 
-RECIPES = re.findall(r"```python\n(.*?)```", ch.BLENDER_PROMPT, re.S)
+RECIPES = re.findall(r"```python\n(.*?)```", handlib.agents.prompt_template("blender-subagent"), re.S)
 SEND_BLEND, RECEIVE_BLEND, SEND_FBX = RECIPES
 
 
@@ -96,7 +97,7 @@ class BlenderRecipeTests(unittest.TestCase):
         self.assertEqual({o.name for o in bpy.context.view_layer.objects if o.select_get()}, {"Bystander"})
 
     def test_port_expression_without_addon_is_harmless(self):
-        output = run(ch.blender_port_expr(9877))
+        output = run(handlib.install.blender_port_expr(9877))
         self.assertIn("not enabled", output)
 
 

@@ -52,7 +52,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from claude_hand import GENERATED_MARKER, capture_window, refresh_agents, slug, supervisor_running  # noqa: E402
+from handlib.agents import refresh_agents, slug  # noqa: E402
+from handlib.capture import capture_window  # noqa: E402
+from handlib.constants import GENERATED_MARKER  # noqa: E402
+from handlib.link import claude_hand_home, supervisor_running  # noqa: E402
 from unity_bridge import describe_dialogs, find_project, waiting_dialogs  # noqa: E402
 
 SERVER_NAME = "claude-hand-chat"
@@ -133,10 +136,6 @@ def clip(text: str, limit: int) -> str:
 
 def log(*parts) -> None:
     print("[claude-hand-chat]", *parts, file=sys.stderr, flush=True)  # stdout is the MCP protocol
-
-
-def claude_hand_home(env=os.environ) -> Path:
-    return Path(env.get("CLAUDE_HAND_HOME") or Path.home() / ".claude-hand")
 
 
 def default_agents_dir(env=os.environ) -> Path:

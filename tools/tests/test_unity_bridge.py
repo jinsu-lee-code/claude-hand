@@ -13,6 +13,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import claude_hand as ch  # noqa: E402
+import handlib.agents  # noqa: E402
+import handlib.chatsetup  # noqa: E402
+import handlib.checks  # noqa: E402
+import handlib.constants  # noqa: E402
+import handlib.discovery  # noqa: E402
+import handlib.install  # noqa: E402
+import handlib.settings  # noqa: E402
 import unity_bridge as ub  # noqa: E402
 
 TOOLS = [
@@ -220,27 +227,27 @@ class BridgeServerTests(unittest.TestCase):
 
 class GeneratorTests(unittest.TestCase):
     def test_agent_gets_the_bridge_server(self):
-        inst = ch.Instance(name="hand_test", hash="49ac508c")
-        text = ch.render_agent(inst, "unity-hand-test", ch.ServerConfig(transport="stdio"), "uv run -q --no-project", True, False)
+        inst = handlib.discovery.Instance(name="hand_test", hash="49ac508c")
+        text = handlib.agents.render_agent(inst, "unity-hand-test", handlib.discovery.ServerConfig(transport="stdio"), "uv run -q --no-project", True, False)
         front = text.split("---")[1]
         self.assertIn('tools: "mcp__unity_hand_test__*, mcp__unity_hand_test_ch__*, Read, Glob, Grep"', front)
         self.assertIn("  - unity_hand_test_ch:", front)
         self.assertIn('"--hash", "49ac508c", "--project-name", "hand_test"', front)
-        self.assertIn(ch.UNITY_BRIDGE_SCRIPT.as_posix(), front)
+        self.assertIn(handlib.constants.UNITY_BRIDGE_SCRIPT.as_posix(), front)
         self.assertNotIn("execute_custom_tool", text)
         self.assertIn("ch_bridge_status", text)
 
     def test_bridge_only_editors_are_discovered(self):
-        mcp = [ch.Instance(name="A", hash="aaaa1111")]
-        bridge = [ch.Instance(name="A", hash="aaaa1111", path="C:/A", source="bridge"), ch.Instance(name="B", hash="bbbb2222", source="bridge")]
-        merged = ch.merge_instances(mcp, bridge)
+        mcp = [handlib.discovery.Instance(name="A", hash="aaaa1111")]
+        bridge = [handlib.discovery.Instance(name="A", hash="aaaa1111", path="C:/A", source="bridge"), handlib.discovery.Instance(name="B", hash="bbbb2222", source="bridge")]
+        merged = handlib.discovery.merge_instances(mcp, bridge)
         self.assertEqual([i.id for i in merged], ["A@aaaa1111", "B@bbbb2222"])
         self.assertEqual(merged[0].path, "C:/A")
 
     def test_discover_bridge_reads_the_registry(self):
         with tempfile.TemporaryDirectory() as tmp:
             register(Path(tmp), 1, name="hand_test")
-            found = ch.discover_bridge(Path(tmp), alive_fn=lambda entry: True)
+            found = handlib.discovery.discover_bridge(Path(tmp), alive_fn=lambda entry: True)
         self.assertEqual([(i.id, i.path, i.alive) for i in found], [("hand_test@49ac508c", "C:/Projects/hand_test", True)])
 
 
@@ -254,15 +261,15 @@ class SupervisorDenyTests(unittest.TestCase):
                 "blender": {"command": "uvx", "args": ["mcp-for-blender"]},
                 "github": {"command": "npx", "args": ["github-mcp"]},
                 "claude-hand-chat": {"command": "uv", "args": ["run", "chat_channel.py"]}}}), encoding="utf-8")
-            keys = ch.direct_app_servers([cfg])
+            keys = handlib.chatsetup.direct_app_servers([cfg])
             self.assertEqual(keys, ["UnityMCP", "blender", "unity-mcp"])
             root = Path(tmp) / "repo"
             root.mkdir()
-            plan = ch.plan_chat_config(root, direct_servers=keys)
+            plan = handlib.chatsetup.plan_chat_config(root, direct_servers=keys)
             settings = plan[root / ".claude" / "settings.local.json"]
             self.assertEqual(settings["permissions"]["deny"], ["mcp__UnityMCP__*", "mcp__blender__*", "mcp__unity-mcp__*"])
-            ch.write_json_files(plan)
-            self.assertEqual(ch.plan_chat_config(root, direct_servers=keys), {})
+            handlib.settings.write_json_files(plan)
+            self.assertEqual(handlib.chatsetup.plan_chat_config(root, direct_servers=keys), {})
 
 
 class DoctorMismatchTests(unittest.TestCase):
@@ -272,30 +279,30 @@ class DoctorMismatchTests(unittest.TestCase):
             versions = {"claude": "2.1.300", "uv": "uv", "git": "git", "node": "v20", "agent-desktop": "1"}
             with unittest.mock.patch.dict(os.environ, {"HOME": str(home), "USERPROFILE": str(home), "APPDATA": str(home),
                                                        "CLAUDE_HAND_HOME": str(home / ".claude-hand")}), \
-                 unittest.mock.patch.object(ch.Path, "home", lambda: home), \
-                 unittest.mock.patch.object(ch, "candidate_config_files", lambda cwd=None: []), \
-                 unittest.mock.patch.object(ch, "discover_blender", lambda ports, request=None: []), \
-                 unittest.mock.patch.object(ch, "find_blender_executables", lambda **kw: []), \
-                 unittest.mock.patch.object(ch, "claude_mcp_get", lambda **kw: None), \
-                 unittest.mock.patch.object(ch, "plan_chat_config", lambda root=None, runner=None, direct_servers=None: {}), \
-                 unittest.mock.patch.object(ch, "discover_bridge", lambda directory=None, alive_fn=None: via_bridge), \
-                 unittest.mock.patch.object(ch, "discover_stdio", lambda *a, **kw: via_mcp):
-                return {c.item: c for c in ch.doctor_checks([], [9876], version=lambda *cmd: versions[cmd[0]])}
+                 unittest.mock.patch.object(Path, "home", lambda: home), \
+                 unittest.mock.patch.object(handlib.discovery, "candidate_config_files", lambda cwd=None: []), \
+                 unittest.mock.patch.object(handlib.discovery, "discover_blender", lambda ports, request=None: []), \
+                 unittest.mock.patch.object(handlib.install, "find_blender_executables", lambda **kw: []), \
+                 unittest.mock.patch.object(handlib.chatsetup, "claude_mcp_get", lambda **kw: None), \
+                 unittest.mock.patch.object(handlib.chatsetup, "plan_chat_config", lambda root=None, runner=None, direct_servers=None: {}), \
+                 unittest.mock.patch.object(handlib.discovery, "discover_bridge", lambda directory=None, alive_fn=None: via_bridge), \
+                 unittest.mock.patch.object(handlib.discovery, "discover_stdio", lambda *a, **kw: via_mcp):
+                return {c.item: c for c in handlib.checks.doctor_checks([], [9876], version=lambda *cmd: versions[cmd[0]])}
 
     def test_open_but_not_seen_by_mcp_for_unity(self):
-        by_item = self.checks([ch.Instance(name="hand_test", hash="49ac508c", source="bridge")], [])
+        by_item = self.checks([handlib.discovery.Instance(name="hand_test", hash="49ac508c", source="bridge")], [])
         self.assertFalse(by_item["MCP for Unity 연결"].ok)
         self.assertIn("Stdio", by_item["MCP for Unity 연결"].fix)
         self.assertNotIn("Claude Hand Tools 연결", by_item)
         self.assertEqual(by_item["연결된 Unity 에디터"].detail, "hand_test@49ac508c")  # still found for sync
 
     def test_seen_by_mcp_for_unity_only(self):
-        by_item = self.checks([], [ch.Instance(name="hand_test", hash="49ac508c")])
+        by_item = self.checks([], [handlib.discovery.Instance(name="hand_test", hash="49ac508c")])
         self.assertFalse(by_item["Claude Hand Tools 연결"].ok)
         self.assertIn("unity-install", by_item["Claude Hand Tools 연결"].fix)
 
     def test_both_paths_agree(self):
-        same = [ch.Instance(name="hand_test", hash="49ac508c")]
+        same = [handlib.discovery.Instance(name="hand_test", hash="49ac508c")]
         by_item = self.checks(same, same)
         self.assertNotIn("MCP for Unity 연결", by_item)
         self.assertNotIn("Claude Hand Tools 연결", by_item)
