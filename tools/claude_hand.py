@@ -54,6 +54,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -2173,6 +2174,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps([asdict(c) for c in checks], ensure_ascii=False, indent=2))
         return 0
+    missing = print_checks(checks)
+    print(f"\n빠진 항목 {missing}개" if missing else "\n모두 준비됐습니다.")
+    print(f"(진단 {time.time() - started:.1f}초)")
+    return 0
+
+
+def print_checks(checks: list[Check]) -> int:
+    """doctor / selftest output, grouped by area; returns how many failed."""
     area = None
     for c in checks:
         if c.area != area:
@@ -2182,10 +2191,147 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"  {mark}{c.item}: {c.detail}")
         if c.fix and not c.ok:
             print(f"       고치기: {c.fix}")
-    missing = [c for c in checks if c.ok is False]
-    print(f"\n빠진 항목 {len(missing)}개" if missing else "\n모두 준비됐습니다.")
-    print(f"(진단 {time.time() - started:.1f}초)")
-    return 0
+    return sum(c.ok is False for c in checks)
+
+
+# --------------------------------------------------------------------------- selftest
+#
+# The checks done by hand so far that need no eyes on the screen: the test suites, and whether the open Unity and
+# Blender windows and the chat channel actually answer with this checkout's version. It changes nothing in them.
+
+BLENDER_TESTS_EXPR = ("import sys, unittest; sys.path.insert(0, {tests!r}); import test_blender_chat_addon as t; "
+                      "unittest.TextTestRunner().run(unittest.defaultTestLoader.loadTestsFromModule(t))")
+BLENDER_ADDON_STATE_CODE = """import bpy, json, sys
+module = sys.modules.get("claude_hand_chat")
+print(json.dumps({"enabled": "claude_hand_chat" in bpy.context.preferences.addons,
+                  "version": list(module.bl_info["version"]) if module else None}))"""
+
+
+def repo_unity_tools(root: Path = REPO_ROOT) -> list[str]:
+    """The ch_* tools the Unity package in this checkout defines."""
+    names = set()
+    for source in (root / "unity" / "com.claudehand.tools" / "Editor").glob("*.cs"):
+        names.update(re.findall(r'\[McpForUnityTool\("(ch_\w+)"', source.read_text(encoding="utf-8", errors="replace")))
+    return sorted(names)
+
+
+def addon_version(source: str) -> str:
+    match = re.search(r'"version":\s*\((\d+),\s*(\d+),\s*(\d+)\)', source)
+    return ".".join(match.groups()) if match else ""
+
+
+def unittest_summary(output: str) -> tuple[bool, str]:
+    """(passed, "187개 통과 (건너뜀 24)") from unittest's output; on failure, the failing tests' names."""
+    failed = re.findall(r"^(?:FAIL|ERROR): (\S+)", output, re.M)
+    passed = bool(re.search(r"^OK\b", output, re.M)) and not failed
+    if failed:
+        return False, "실패: " + ", ".join(failed[:5]) + (f" 외 {len(failed) - 5}개" if len(failed) > 5 else "")
+    ran, skipped = re.search(r"^Ran (\d+) tests?", output, re.M), re.search(r"skipped=(\d+)", output)
+    if not passed:
+        return False, "끝까지 돌지 못함: " + (output.strip().splitlines() or ["출력 없음"])[-1][:200]
+    return True, f"{ran.group(1) if ran else '?'}개 통과" + (f" (건너뜀 {skipped.group(1)})" if skipped else "")
+
+
+def selftest_checks(blender_ports: list[int], run_tests: bool = True, run=subprocess.run, progress=None,
+                    registry=None, unity_request=None, blender=None, blenders=None, chat_lines=None,
+                    supervisor_on=None, stale=None) -> list[Check]:
+    checks: list[Check] = []
+    progress = progress or (lambda message: None)
+    add = lambda *a: checks.append(Check(*a))
+    tests = REPO_ROOT / "tools" / "tests"
+
+    if run_tests:
+        progress("Python 테스트 실행 중...")
+        proc = run([sys.executable, "-m", "unittest", "discover", "-s", str(tests)], cwd=str(REPO_ROOT), capture_output=True,
+                   text=True, encoding="utf-8", errors="replace", timeout=600)
+        ok, detail = unittest_summary((proc.stdout or "") + (proc.stderr or ""))
+        add("테스트", "Python 테스트", ok, detail, "" if ok else "uv run --no-project python -m unittest discover -s tools/tests -v")
+        exes = find_blender_executables()
+        if exes:
+            progress("Blender 안 애드온 테스트 실행 중...")
+            proc = run([str(exes[0]), "--background", "--factory-startup", "--python-expr", BLENDER_TESTS_EXPR.format(tests=str(tests))],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+            ok, detail = unittest_summary((proc.stdout or "") + (proc.stderr or ""))
+            add("테스트", f"Blender 안 애드온 테스트 ({exes[0].parent.name})", ok, detail,
+                "" if ok else "selftest 출력의 실패한 테스트 이름으로 tools/tests/test_blender_chat_addon.py를 보세요")
+        else:
+            add("테스트", "Blender 안 애드온 테스트", None, "Blender 실행 파일을 못 찾아 건너뜀")
+
+    progress("Unity 확인 중...")
+    import unity_bridge
+    call = unity_request or unity_bridge.request
+    wanted, seen = repo_unity_tools(), set()
+    for entry in sorted(registry if registry is not None else unity_bridge.load_registry(), key=lambda e: -e.get("_mtime", 0)):
+        if entry.get("hash") in seen:
+            continue
+        try:
+            call(entry, "__ping__", timeout=3)
+        except unity_bridge.BridgeError:
+            continue  # left behind by an editor that closed
+        seen.add(entry.get("hash"))
+        name = entry.get("name", "?")
+        missing = [tool for tool in wanted if tool not in {t.get("name") for t in entry.get("tools", [])}]
+        add("Unity", f"{name}: Claude Hand Tools", not missing, f"ch_* 도구 {len(wanted)}개 응답" if not missing else
+            "저장소에 있는데 Unity에 없는 도구: " + ", ".join(missing),
+            "" if not missing else "Unity 창을 앞으로 가져와 새 패키지를 컴파일하게 하고, Console에 컴파일 오류가 없는지 보세요")
+        shot = Path(tempfile.gettempdir()) / f"claude-hand-selftest-{entry.get('hash')}.png"
+        try:
+            call(entry, "ch_capture", {"path": str(shot), "max_size": 128}, timeout=20)
+            captured = shot.exists()
+            detail = "씬 뷰를 찍음" if captured else "그림 파일이 생기지 않음"
+        except unity_bridge.BridgeError as exc:
+            captured, detail = False, exc.message
+        finally:
+            shot.unlink(missing_ok=True)
+        add("Unity", f"{name}: 결과 미리보기 찍기", captured, detail, "" if captured else "Unity에 씬 뷰가 열려 있는지 보세요")
+    if not seen:
+        add("Unity", "열린 Unity", None, "Claude Hand Tools가 응답하는 Unity가 없어 건너뜀")
+
+    progress("Blender 확인 중...")
+    want = addon_version(CHAT_ADDON_SOURCE.read_text(encoding="utf-8"))
+    open_blenders = blenders if blenders is not None else discover_blender(blender_ports)
+    for inst in open_blenders:
+        label = f"{inst.name}@{inst.port}: 채팅 애드온"
+        try:
+            res = (blender or blender_request)(inst.port, {"type": "execute_code", "params": {"code": BLENDER_ADDON_STATE_CODE}}, 10.0)
+            state = json.loads(str(((res or {}).get("result") or {}).get("result", "")).strip().splitlines()[-1])
+        except (OSError, ValueError, IndexError, AttributeError) as exc:
+            add("Blender", label, False, f"상태를 읽지 못함: {exc}", "MCP for Blender 서버가 켜져 있는지 보세요")
+            continue
+        version = ".".join(map(str, state.get("version") or []))
+        if not state.get("enabled") or not version:
+            add("Blender", label, False, "켜져 있지 않음", "uv run tools/claude_hand.py blender-install-chat")
+        else:
+            add("Blender", label, version == want, version + ("" if version == want else f" (저장소 {want})"),
+                "" if version == want else "uv run tools/claude_hand.py update 뒤 Blender를 다시 여세요")
+    if not open_blenders:
+        add("Blender", "열린 Blender", None, "응답하는 Blender가 없어 건너뜀")
+
+    progress("채팅 확인 중...")
+    running = supervisor_running() if supervisor_on is None else supervisor_on
+    if not running:
+        add("채팅", "감독 세션", None, "Claude Hand가 꺼져 있어 채널 확인은 건너뜀 (켠 뒤 다시 돌리면 확인)")
+    else:
+        for line in chat_lines if chat_lines is not None else chat_status_report():
+            if line.startswith(("OK ", "!! ")):
+                add("채팅", "채널 서버", line.startswith("OK "), line[3:].strip())
+
+    found = stale if stale is not None else stale_checks(Path.home() / ".claude" / "agents", Path.home() / ".claude" / "skills")
+    checks += found or [Check("갱신", "하위 세션 정의·감독 스킬·Blender 애드온 파일", True, "저장소 버전과 같음")]
+    return checks
+
+
+def cmd_selftest(args: argparse.Namespace) -> int:
+    started = time.time()
+    progress = None if args.json else (lambda message: print("  " + message, file=sys.stderr, flush=True))
+    checks = selftest_checks(parse_ports(args.blender_ports), run_tests=not args.no_tests, progress=progress)
+    if args.json:
+        print(json.dumps([asdict(c) for c in checks], ensure_ascii=False, indent=2))
+    else:
+        failed = print_checks(checks)
+        print(f"\n문제 {failed}개" if failed else "\n모두 통과했습니다.")
+        print(f"({time.time() - started:.1f}초)")
+    return 1 if any(c.ok is False for c in checks) else 0
 
 
 def cmd_unity_install(args: argparse.Namespace) -> int:
@@ -2393,6 +2539,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor.add_argument("--blender-ports", default=DEFAULT_BLENDER_PORTS)
     p_doctor.add_argument("--json", action="store_true", help="machine-readable output")
     p_doctor.set_defaults(func=cmd_doctor)
+
+    p_st = sub.add_parser("selftest", help="run the tests and check that the open Unity/Blender windows and the chat answer "
+                                           "with this version (changes nothing)")
+    p_st.add_argument("--no-tests", action="store_true", help="skip the Python and in-Blender test suites")
+    p_st.add_argument("--blender-ports", default=DEFAULT_BLENDER_PORTS)
+    p_st.add_argument("--json", action="store_true", help="machine-readable output")
+    p_st.set_defaults(func=cmd_selftest)
 
     p_ui = sub.add_parser("unity-install", help="add MCP for Unity + Claude Hand Tools to a project's manifest")
     p_ui.add_argument("project")

@@ -319,7 +319,11 @@ class HeadlessEnableTests(unittest.TestCase):
             env = {**os.environ, "BLENDER_USER_SCRIPTS": str(scripts), "BLENDER_USER_CONFIG": str(config),
                    "CLAUDE_HAND_HOME": str(Path(tmp) / "home")}
             code = "import bpy\nexec(" + repr(ch.ENABLE_CHAT_ADDON) + ")\nprint('PANEL', hasattr(bpy.types, 'CLAUDEHAND_PT_chat'))"
-            proc = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=120)
+            # Inside Blender itself (selftest), sys.executable is its bundled Python, which has no bpy: run Blender.
+            blender = getattr(bpy.app, "binary_path", "") or ""
+            cmd = ([blender, "--background", "--python-expr", code] if Path(blender).name.lower().startswith("blender")
+                   else [sys.executable, "-c", code])
+            proc = subprocess.run(cmd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
             self.assertIn("CLAUDE_HAND_CHAT enabled", proc.stdout, proc.stderr)
             self.assertIn("PANEL True", proc.stdout)
             self.assertTrue((config / "userpref.blend").exists())

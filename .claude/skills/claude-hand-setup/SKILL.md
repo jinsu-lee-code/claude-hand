@@ -29,6 +29,7 @@ description: claude-hand를 처음 설치하고 세팅할 때 쓴다. 사용자�
    - 설치된 Blender 채팅 애드온이 옛 버전이면 새 파일로 바꾼다. Blender를 다시 열어야 적용된다.
 2. 감독 세션을 `start-supervisor.cmd`로 다시 열라고 안내한다.
 3. `doctor`로 [갱신] 항목이 사라졌는지 확인한다.
+4. `uv run tools/claude_hand.py selftest`로 실제로 동작하는지 본다(1분쯤, 아무것도 바꾸지 않음). `!!` 항목은 "고치기" 안내와 함께 그대로 보여준다. 열린 Unity가 새 `ch_*` 도구를 모르면 Unity가 아직 새 패키지를 컴파일하지 않은 것이다.
 
 ## 0. 진단과 계획
 

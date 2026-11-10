@@ -762,6 +762,49 @@ class ChatSetupTests(unittest.TestCase):
 
 
 
+class SelftestTests(unittest.TestCase):
+    def test_reads_unittest_output(self):
+        self.assertEqual(ch.unittest_summary("....\n------\nRan 187 tests in 16.4s\n\nOK (skipped=24)\n"),
+                         (True, "187개 통과 (건너뜀 24)"))
+        failed = "FAIL: test_a (m.C.test_a)\nERROR: test_b (m.C.test_b)\nRan 9 tests in 1s\n\nFAILED (failures=1, errors=1)\n"
+        self.assertEqual(ch.unittest_summary(failed), (False, "실패: test_a, test_b"))
+        self.assertEqual(ch.unittest_summary("Traceback ...\nModuleNotFoundError: No module named 'bpy'\n"),
+                         (False, "끝까지 돌지 못함: ModuleNotFoundError: No module named 'bpy'"))
+
+    def test_knows_this_checkouts_versions(self):
+        self.assertTrue({"ch_capture", "ch_checkpoint", "ch_editor_status", "ch_scene_snapshot"} <= set(ch.repo_unity_tools()))
+        self.assertRegex(ch.addon_version(ch.CHAT_ADDON_SOURCE.read_text(encoding="utf-8")), r"^\d+\.\d+\.\d+$")
+
+    def test_checks_the_open_windows_without_changing_them(self):
+        import unity_bridge
+        wanted = ch.repo_unity_tools()
+        live = {"name": "MyGame", "hash": "aaaa1111", "_mtime": 2, "tools": [{"name": t} for t in wanted if t != "ch_capture"]}
+        gone = {"name": "Old", "hash": "bbbb2222", "_mtime": 1, "tools": []}
+        calls = []
+
+        def unity(entry, tool, params=None, timeout=0):
+            calls.append((entry["name"], tool))
+            if entry is gone:
+                raise unity_bridge.BridgeError("UNREACHABLE", "closed")
+            if tool == "ch_capture":
+                Path(params["path"]).write_bytes(b"png")
+            return {"success": True}
+        blender = lambda port, command, timeout: {"status": "success", "result": {"result": json.dumps({"enabled": True, "version": [0, 1, 0]})}}
+        checks = ch.selftest_checks([9876], run_tests=False, registry=[gone, live], unity_request=unity, blender=blender,
+                                    blenders=[ch.BlenderInstance(port=9876, filepath="C:/Art/props.blend")],
+                                    supervisor_on=False, stale=[])
+        by_item = {c.item: c for c in checks}
+        self.assertFalse(by_item["MyGame: Claude Hand Tools"].ok)  # compiled before ch_capture existed
+        self.assertIn("ch_capture", by_item["MyGame: Claude Hand Tools"].detail)
+        self.assertTrue(by_item["MyGame: 결과 미리보기 찍기"].ok)
+        self.assertNotIn(("Old", "ch_capture"), calls)  # a closed editor is skipped, not reported
+        self.assertFalse(by_item["props@9876: 채팅 애드온"].ok)
+        self.assertIn("저장소", by_item["props@9876: 채팅 애드온"].detail)
+        self.assertIsNone(by_item["감독 세션"].ok)  # Claude Hand off is not a failure
+        self.assertTrue(by_item["하위 세션 정의·감독 스킬·Blender 애드온 파일"].ok)
+        self.assertEqual({tool for _, tool in calls} - {"__ping__", "ch_capture"}, set())  # nothing that changes a scene
+
+
 class UpdateAndStatusTests(unittest.TestCase):
     class Done:
         def __init__(self, out, code=0):

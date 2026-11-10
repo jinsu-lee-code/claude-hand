@@ -159,7 +159,7 @@ uv run tools/claude_hand.py update     # 하위 세션·감독 스킬·채팅 �
 |---|---|
 | `.claude/skills/claude-hand-setup/` | 처음 세팅 스킬입니다. 이 폴더에서 Claude Code를 열면 바로 쓸 수 있습니다. |
 | `skills/orchestrator/` | 평소에 감독 세션이 따르는 규칙(스킬)입니다. `sync`가 `~/.claude/skills/claude-hand/`에 설치합니다. |
-| `tools/claude_hand.py` | 하위 세션 생성(`list`, `sync`), 안전장치(`guard`), 세팅 도우미(`doctor`, `update`, `mode`, `unity-install`, `unity-open`, `blender-open`, `chat-setup`, `blender-install-chat`, `chat-status`, `shortcut`, `remote-control`)가 들어 있습니다. |
+| `tools/claude_hand.py` | 하위 세션 생성(`list`, `sync`), 안전장치(`guard`), 세팅 도우미(`doctor`, `selftest`, `update`, `mode`, `unity-install`, `unity-open`, `blender-open`, `chat-setup`, `blender-install-chat`, `chat-status`, `shortcut`, `remote-control`)가 들어 있습니다. |
 | `tools/chat_channel.py` | 채팅 채널 서버입니다. Claude Code가 실행하는 MCP 서버이고, Unity·Blender 채팅창과는 로컬 HTTP로 통신합니다. |
 | `unity/com.claudehand.tools/` | Unity 패키지입니다. `ch_*` 도구 8개와 채팅창(Window > Claude Hand > Chat)을 추가합니다. `ch_*` 도구는 이 패키지가 여는 자기 통로로 불립니다(MCP for Unity 버전에 상관없이 동작). |
 | `tools/unity_bridge.py` | 하위 세션이 그 통로로 `ch_*` 도구를 부를 때 쓰는 MCP 서버입니다. `--list`로 통로를 연 Unity를 볼 수 있습니다. |
@@ -229,6 +229,7 @@ Blender에는 MCP for Blender 말고 따로 설치할 것이 없습니다. 그 �
    Claude Code에서 `/agents`를 입력해 `unity-*`, `blender-*`가 보이면 끝입니다.
 
 `uv run tools/claude_hand.py doctor`를 실행하면 언제든 빠진 항목과 고치는 명령을 볼 수 있습니다.
+설치가 아니라 **실제로 동작하는지**는 `uv run tools/claude_hand.py selftest`로 봅니다. 테스트(Python, Blender 안 애드온)를 돌리고, 열린 Unity·Blender와 채팅 채널이 이 버전으로 응답하는지 확인합니다(1분쯤, 아무것도 바꾸지 않음). 테스트를 빼려면 `--no-tests`.
 
 `sync`에 대해 알아둘 것:
 - 지금 쓰는 MCP 설정(`.mcp.json`, `~/.claude.json`, Claude Desktop 설정)을 찾아서 같은 방식으로 서버를 띄웁니다. Unity는 stdio와 HTTP 둘 다 됩니다.

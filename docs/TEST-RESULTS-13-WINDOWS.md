@@ -126,6 +126,14 @@
 - Unity: 새 `ChTaskbar`(`FlashWindowEx`, 에디터 주 창), Unity가 앞에 있지 않으면 깜빡임. 채팅 창에 포커스가 없으면 탭 이름에 "Claude Hand (N)", 채팅 창을 누르면 지움.
 - 확인: Python 187개 OK, Blender 안 테스트 OK(알림 조건, 설치 테스트만 예전 환경 문제). Unity 컴파일 오류 없음. 열린 Unity·Blender에서 깜빡임 함수를 한 번씩 불러 실제로 깜빡임(Unity 주 창 찾음, Blender 창 1개). 사용자 확인: 일을 시키고 다른 창으로 가 있으면 답이 올 때 잘 깜빡임. Unity 탭 이름의 안 읽은 수(C)는 따로 확인 안 함.
 
+## selftest 명령 (2026-11-10)
+
+다음에 할 것 목록의 두 번째. 지금까지 손으로 한 확인 중 화면이 필요 없는 것을 한 번에.
+
+- `uv run tools/claude_hand.py selftest` (`--no-tests`, `--json`): Python 테스트, Blender 안 애드온 테스트(설치된 blender.exe로 background), 응답하는 Unity마다 저장소의 `ch_*` 도구가 다 있는지(옛 컴파일 잡기)와 `ch_capture`로 씬 뷰 찍기, 응답하는 Blender마다 채팅 애드온이 켜져 있고 저장소와 같은 버전인지, 감독이 켜져 있으면 채팅 채널 상태, 설치된 하위 세션 정의·스킬·애드온 파일이 저장소와 같은지. 닫힌 Unity의 남은 등록 파일은 건너뜀, Claude Hand가 꺼져 있으면 채팅은 실패가 아니라 정보(`--`). 씬은 바꾸지 않음(Unity는 `__ping__`·`ch_capture`만, Blender는 읽기만). 실패가 있으면 종료 코드 1.
+- 같이 고친 것: Blender 안 테스트 중 "blender-install-chat이 돌리는 스크립트" 테스트가 Blender 안에서 돌면 `sys.executable`(Blender의 Python, bpy 없음)을 써서 늘 실패하던 것 → Blender 안에서는 blender.exe로 돌림. 이제 Blender 안 테스트 17개 모두 통과.
+- 실제 실행(감독 켜진 상태): 모두 통과, 36초 — Python 190개(건너뜀 24), Blender 17개, hand_test `ch_*` 8개 응답·씬 뷰 찍음, test_blender 애드온 0.6.0, 채널 서버 OK, 설치 파일 최신.
+
 ## 남은 것·참고
 
 - **`Bash(uv run *)` 미리 허용**: 새 `settings.local.json`이 이 폴더 세션의 `uv run …`을 허락 없이 실행하게 함. 12단계 E에서 본 `list` 같은 확인창은 이제 안 뜸. `uv run`은 아무 스크립트나 돌릴 수 있어 범위가 넓음.
@@ -139,6 +147,6 @@
 기능 후보 목록에서 1~4(진행 표시, 되돌리기, 프로젝트 메모, 결과 미리보기)는 끝남. 남은 것:
 
 - ~~**끝났다는 알림**~~: 20단계로 만듦(작업 표시줄 깜빡임, Unity 탭 안 읽은 수).
-- **자동 점검 명령 `selftest`**: 화면이 필요 없는 확인(전용 통로 응답, Blender 안 애드온 테스트, 채팅 상태, 감독 환경 변수)을 한 번에.
+- ~~**자동 점검 명령 `selftest`**~~: 만듦(위 "selftest 명령"). 감독 세션의 환경 변수는 밖에서 읽을 방법이 마땅치 않아 넣지 않음.
 - **대화상자 자동 감지**: Unity가 "씬 저장할까요?" 같은 창에서 멈추면 감독이 바로 알아채기(DESIGN 2단계 후보).
 - 정리: DESIGN.md를 오늘 바뀐 내용에 맞추기(최소화 방식, 대화 이어 쓰기, 채팅 기록, 세션 변수 정리, 되돌리기, 메모, 한글 입력창, 미리보기), `Bash(uv run *)`를 `uv run tools/claude_hand.py *`로 좁히기, MCP for Unity Python 3.14 버그 보고.
