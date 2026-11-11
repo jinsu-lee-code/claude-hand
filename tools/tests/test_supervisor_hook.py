@@ -58,9 +58,29 @@ class DecisionTests(unittest.TestCase):
     def test_tells_the_channel_and_lets_the_call_through(self):
         reason, asked = self.decide(agent_call("[요청 1111-052233-12] 큐브"), {"ours": True, "chat_id": "unity-mygame", "asker": "unity-mygame"})
         self.assertIsNone(reason)
-        self.assertEqual(asked, [("/v1/assign", {"target": "unity-mygame", "request": "1111-052233-12"})])
+        self.assertEqual(asked, [("/v1/assign", {"target": "unity-mygame", "agent": "", "request": "1111-052233-12"})])
         reason, asked = self.decide(send_message("[요청 없음] 이어서"), {"ours": True, "chat_id": "unity-mygame", "asker": ""})
-        self.assertEqual((reason, asked), (None, [("/v1/assign", {"target": "a0e1826e13107d88f", "request": ""})]))
+        self.assertEqual((reason, asked), (None, [("/v1/assign", {"target": "a0e1826e13107d88f", "agent": "", "request": ""})]))
+
+    def test_an_agent_resumed_by_its_id_is_named_from_the_sessions_files(self):
+        """A resumed supervisor goes on with the subagents of days ago, by id. Claude Code keeps what each one is next
+        to the session's transcript (the layout of 2.1, checked with a real session)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript = Path(tmp) / "2bfcab59-32d4-4e90-8df7-37b79974a4e9.jsonl"
+            subagents = transcript.with_suffix("") / "subagents"
+            subagents.mkdir(parents=True)
+            (subagents / "agent-aab83db2fc71cb6c4.meta.json").write_text(json.dumps(
+                {"agentType": "unity-mygame", "isBuiltIn": False, "description": "Create cylinder in Unity"}), encoding="utf-8")
+            (subagents / "agent-broken.meta.json").write_text("not json", encoding="utf-8")
+            (subagents / "agent-list.meta.json").write_text("[1]", encoding="utf-8")
+            event = {**send_message("이어서", to="aab83db2fc71cb6c4"), "transcript_path": str(transcript)}
+            self.assertEqual(hook.agent_type(event, "aab83db2fc71cb6c4"), "unity-mygame")
+            _, asked = self.decide(event, {"ours": True, "chat_id": "unity-mygame", "missing": True})
+            self.assertEqual(asked, [("/v1/assign", {"target": "aab83db2fc71cb6c4", "agent": "unity-mygame", "request": None})])
+            for unknown in ("ffff", "broken", "list", "../../x", ""):
+                self.assertEqual(hook.agent_type(event, unknown), "", unknown)
+            self.assertEqual(hook.agent_type({"transcript_path": ""}, "aab83db2fc71cb6c4"), "")
+            self.assertEqual(hook.agent_type({}, "aab83db2fc71cb6c4"), "")
 
     def test_refuses_a_hand_out_the_channel_cannot_place(self):
         missing, asked = self.decide(agent_call("큐브를 만들어라"), {"ours": True, "chat_id": "unity-mygame", "missing": True})
@@ -142,6 +162,24 @@ class ProcessTests(unittest.TestCase):
         self.assertEqual(self.hub.assigned["unity-mygame"]["asker"], "unity-mygame")
         proc = self.run_hook(agent_call("코드에서 찾아봐", "Explore"))  # not a window's subagent: no tag asked of it
         self.assertEqual((proc.returncode, proc.stdout), (0, b""))
+
+    def test_an_agent_id_the_channel_never_saw_is_placed_by_the_sessions_files(self):
+        """The first hand-out after Claude Hand starts, from a supervisor that goes on with its subagents of before."""
+        transcript = Path(self.tmp.name) / "projects" / "2bfcab59.jsonl"
+        subagents = transcript.with_suffix("") / "subagents"
+        subagents.mkdir(parents=True)
+        (subagents / "agent-aab83db2fc71cb6c4.meta.json").write_text(json.dumps({"agentType": "unity-mygame"}), encoding="utf-8")
+        self.hub.post_user_message("unity", "MyGame", "큐브 만들어줘")
+        request = self.hub.logs["unity-mygame"][-1]["request"]
+        event = {**send_message("큐브를 만들어라", to="aab83db2fc71cb6c4"), "transcript_path": str(transcript)}
+        proc = self.run_hook(event)
+        self.assertEqual(json.loads(proc.stdout.decode("ascii"))["hookSpecificOutput"]["permissionDecision"], "deny")
+        proc = self.run_hook({**event, "tool_input": {**event["tool_input"], "message": f"[요청 {request}]\n큐브를 만들어라"}})
+        self.assertEqual((proc.returncode, proc.stdout), (0, b""))
+        self.assertEqual(self.hub.assigned["unity-mygame"]["asker"], "unity-mygame")
+        self.hub.assigned.clear()
+        proc = self.run_hook(send_message("큐브를 만들어라", to="aab83db2fc71cb6c4"))  # no such files: none of the channel's business
+        self.assertEqual((proc.returncode, proc.stdout, self.hub.assigned), (0, b"", {}))
 
     def test_without_claude_hand_or_with_garbage_the_call_goes_ahead(self):
         nowhere = {**os.environ, "CLAUDE_HAND_HOME": str(Path(self.tmp.name) / "nobody-home")}

@@ -617,7 +617,7 @@ namespace ClaudeHand.Editor
         /// </summary>
         private void DrawUndo()
         {
-            var marks = ChCheckpoint.Marks;
+            var marks = ChCheckpoint.Undoable;  // not a request that only looked: there is nothing to undo down to it
             if (marks.Count == 0 || _progress != null) return;
             var mark = marks[marks.Count - 1];
             if (!GUILayout.Button($"되돌리기: {mark.label} ({mark.time})", EditorStyles.miniButton)) return;
@@ -626,7 +626,7 @@ namespace ClaudeHand.Editor
             int replaced = notes.Where(n => n.kind == "replaced").Select(n => n.path).Distinct().Count();
             int added = notes.Count(n => n.kind == "added");
             var files = (replaced > 0 ? $"\n이 요청이 바꾼 파일 {replaced}개는 이전 것으로 돌아갑니다." : "") +
-                        (added > 0 ? $"\n이 요청이 가져온 에셋 {added}개는 휴지통으로 갑니다." : "");
+                        (added > 0 ? $"\n이 요청이 가져온 에셋 {added}개는 프로젝트에서 빠집니다({ChCheckpoint.RemovedFolder}에 보관)." : "");
             var ok = EditorUtility.DisplayDialog("Claude Hand 되돌리기",
                 $"'{mark.label}' 요청({mark.time}) 이후 이 Unity에서 바뀐 것을 모두 되돌립니다.\n" +
                 "그 뒤에 직접 고친 것도 함께 되돌아갑니다. 저장해 둔 씬 파일은 다시 저장해야 바뀝니다." + files, "되돌리기", "취소");

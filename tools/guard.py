@@ -122,6 +122,20 @@ def action_summary(tool_input: dict) -> str:
     return " ".join(parts)[:120]
 
 
+def only_looks(app: str, tool_input: dict) -> bool:
+    """Blender code that can only look (handlib.looks reads it): it needs no undo point and leaves the window as it
+    was. False for anything else, and for Unity, whose own package tells afterwards whether a point has anything to
+    undo (ChCheckpoint)."""
+    code = tool_input.get("code")
+    if app != "blender" or not isinstance(code, str):
+        return False
+    try:
+        from handlib import looks
+        return looks.python_only_looks(code)
+    except Exception:
+        return False
+
+
 def post_to_channel(path: str, body: dict, home: Path | None = None, post=None) -> dict:
     """POST to the chat channel of the running supervisor; {} when there is none. Waits half a second at most."""
     from handlib import link
@@ -143,18 +157,28 @@ def report_progress(event: dict, pin: str, server: str, app: str, home: Path | N
     if not short:
         return None
     try:
-        reply = post_to_channel("/v1/progress", {"app": app, "pin": pin, "tool": short, "agent_id": str(event.get("agent_id") or ""),
-                                                 "detail": action_summary(event.get("tool_input") or {})}, home, post)
+        tool_input = event.get("tool_input") or {}
+        body = {"app": app, "pin": pin, "tool": short, "agent_id": str(event.get("agent_id") or ""), "detail": action_summary(tool_input)}
+        if only_looks(app, tool_input):
+            body["looks"] = True  # the channel goes by the tool's name otherwise, and this one runs any code
+        reply = post_to_channel("/v1/progress", body, home, post)
         if reply.get("stop"):
             return ("사용자가 채팅창에서 [중지]를 눌러 이 호출을 막았습니다. 더 부르지 말고, 지금까지 한 것과 남은 것을 그대로 "
                     "감독에게 보고하고 끝내세요. 한 것을 되돌리지는 마세요(되돌릴지는 사용자가 정합니다).")
         if reply.get("busy"):
             return (f"이 창({pin})은 지금 다른 하위 세션이 작업 중이라 이 호출을 막았습니다. 같은 대상에 둘이 동시에 일하면 서로 "
                     "덮어씁니다. 더 부르지 말고 이 내용을 그대로 감독에게 보고하세요.")
+        own_mark =short == "ch_checkpoint" and str(tool_input.get("action") or "mark").strip().lower() == "mark"
         # A "cancel that" request starts with the undo itself: a fresh point there would leave nothing to undo.
-        undoing = short == "ch_checkpoint" or "undo_last_request" in str((event.get("tool_input") or {}).get("code", ""))
+        undoing = (short == "ch_checkpoint" and not own_mark) or "undo_last_request" in str(tool_input.get("code", ""))
         if reply.get("new_request") and not undoing:
             (mark or mark_checkpoint)(app, pin, str(reply.get("label") or ""))
+        if own_mark and reply.get("chat_id"):
+            # With Claude Hand running, every request has its point already (set here, named after what the user
+            # asked). A second one from the subagent would take over the chat window's 되돌리기 button under a name
+            # the user never typed, and leave the first behind with nothing to undo.
+            return ("이 요청의 되돌리기 지점은 Claude Hand가 이미 찍어 두었습니다(채팅창의 [되돌리기]). 따로 찍지 않아도 되니 "
+                    "이 호출 없이 하던 일을 이어서 하세요. 문제가 아니므로 보고에 적지 않아도 됩니다.")
     except Exception:  # progress is a nicety; the guard's answer must not depend on it
         pass
     return None

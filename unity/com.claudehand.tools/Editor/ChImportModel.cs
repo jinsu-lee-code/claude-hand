@@ -19,7 +19,7 @@ namespace ClaudeHand.Editor
                       "sent again, the model file this project already has is replaced in place instead: scene objects and " +
                       "prefabs that use it take the new shape and keep their place, and nothing new is added. Undoing the " +
                       "request (ch_checkpoint undo, the chat window's 되돌리기) takes the files back too: a model that came " +
-                      "in goes to the trash, one that was replaced gets its earlier file back. Supports FBX and OBJ; " +
+                      "in is taken out of the project, one that was replaced gets its earlier file back. Supports FBX and OBJ; " +
                       "GLB/glTF need the glTFast package.")]
     public static class ChImportModel
     {
@@ -135,7 +135,7 @@ namespace ClaudeHand.Editor
                 }
                 File.Copy(incoming.ModelPath, target, true);
                 // Unity's Undo knows nothing of files. Written down with the request's undo point, so that 되돌리기
-                // takes this back too: the folder that came in goes to the trash, the file that was replaced returns.
+                // takes this back too: the folder that came in is taken out of the project, the file that was replaced returns.
                 undoable = existing == null
                     ? ChCheckpoint.NoteAdded(folder, AssetDatabase.AssetPathToGUID(folder))
                     : ChCheckpoint.NoteReplaced(assetPath, previous);

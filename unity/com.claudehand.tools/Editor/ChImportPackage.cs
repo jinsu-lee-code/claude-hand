@@ -16,7 +16,7 @@ namespace ClaudeHand.Editor
                       "waits for Unity to finish importing and compiling, then (by default) places the exported prefabs in the " +
                       "active scene and returns refs to them. Run with dry_run=true first to see what would be added or overwritten. " +
                       "Undoing the request (ch_checkpoint undo, the chat window's 되돌리기) takes the files back too: what the " +
-                      "package added goes to the trash, what it wrote over gets its earlier file back.",
+                      "package added is taken out of the project, what it wrote over gets its earlier file back.",
         RequiresPolling = true,
         PollAction = "status",
         MaxPollSeconds = 600)]

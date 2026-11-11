@@ -265,7 +265,7 @@ class McpTests(unittest.TestCase):
     def test_reply_tool(self):
         mcp, _ = self.run_session([])
         mcp.hub.logs["unity-mygame"] = []
-        ok = mcp.call_tool({"name": "reply", "arguments": {"chat_id": "unity-mygame", "text": "done"}})
+        ok = mcp.call_tool({"name": "reply", "arguments": {"chat_id": "unity-mygame", "text": "done", "working": False}})
         bad = mcp.call_tool({"name": "reply", "arguments": {"chat_id": "nope", "text": "done"}})
         empty = mcp.call_tool({"name": "reply", "arguments": {"chat_id": "unity-mygame", "text": " "}})
         self.assertEqual(ok, {"content": [{"type": "text", "text": "sent"}]})
@@ -279,13 +279,38 @@ class McpTests(unittest.TestCase):
         self.assertIn("working", cc.REPLY_TOOL["inputSchema"]["properties"])
         # Which other windows a request changed is asked of every reply: the supervisor knows, the channel only guesses.
         self.assertIn("changed_windows", cc.REPLY_TOOL["inputSchema"]["required"])
-        named = mcp.call_tool({"name": "reply", "arguments": {"chat_id": "unity-mygame", "text": "done",
+        named = mcp.call_tool({"name": "reply", "arguments": {"chat_id": "unity-mygame", "text": "done", "working": False,
                                                               "changed_windows": ["unity-mygame", "hand_test"]}})
         self.assertIn("changed_windows names no window Claude Hand knows: hand_test.", named["content"][0]["text"])
-        none = mcp.call_tool({"name": "reply", "arguments": {"chat_id": "unity-mygame", "text": "done", "changed_windows": []}})
+        none = mcp.call_tool({"name": "reply", "arguments": {"chat_id": "unity-mygame", "text": "done", "working": False,
+                                                             "changed_windows": []}})
         self.assertEqual(none, {"content": [{"type": "text", "text": "sent"}]})
         context = mcp.call_tool({"name": "current_context", "arguments": {}})
         self.assertEqual(json.loads(context["content"][0]["text"])["windows"], [])
+
+    def test_a_reply_has_to_say_whether_the_work_goes_on(self):
+        """A real supervisor, resumed for days, never said `working`: not on "on it", not on the result. The tool
+        definition asking for it changed nothing, and neither did a hint in the result. A reply without it is sent
+        back, the first few times."""
+        mcp, _ = self.run_session([])
+        mcp.hub.logs["unity-mygame"] = []
+        say = lambda **more: mcp.call_tool({"name": "reply", "arguments": {"chat_id": "unity-mygame", "text": "만들고 있어요", **more}})
+        self.assertEqual(set(cc.REPLY_TOOL["inputSchema"]["required"]), {"chat_id", "text", "working", "changed_windows"})
+        asked = say()
+        self.assertTrue(asked["isError"])
+        self.assertIn("working: true", asked["content"][0]["text"])
+        self.assertIn("working: false", asked["content"][0]["text"])
+        self.assertEqual(mcp.hub.logs["unity-mygame"], [])  # nothing reached the panel
+        self.assertEqual(say(working=True), {"content": [{"type": "text", "text": "sent"}]})
+        self.assertEqual(say(working=False), {"content": [{"type": "text", "text": "sent"}]})
+        self.assertEqual(say(origin="desktop", request="큐브"), {"content": [{"type": "text", "text": "sent"}]})  # a record, not an answer
+        self.assertTrue(say(chat_id="nope")["isError"])  # an unknown chat is told so, not asked about working
+        self.assertEqual(mcp.hub.working_asked, 1)
+        for _ in range(cc.WORKING_ASKS - 1):
+            self.assertTrue(say()["isError"])
+        # A supervisor that still leaves it out is not made to send every answer twice for ever.
+        self.assertEqual(say(), {"content": [{"type": "text", "text": "sent"}]})
+        self.assertNotIn("working", mcp.hub.logs["unity-mygame"][-1])
 
 
 class EndToEndTests(unittest.TestCase):
@@ -345,6 +370,12 @@ class EndToEndTests(unittest.TestCase):
 
         self.send({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
                    "params": {"name": "reply", "arguments": {"chat_id": "unity-mygame", "text": "복제했어요"}}})
+        asked = self.read()["result"]  # sent back once: is this a status or the result?
+        self.assertTrue(asked["isError"])
+        self.assertIn("working: false", asked["content"][0]["text"])
+        self.send({"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                   "params": {"name": "reply", "arguments": {"chat_id": "unity-mygame", "text": "복제했어요", "working": False,
+                                                             "changed_windows": []}}})
         self.assertEqual(self.read()["result"]["content"][0]["text"], "sent")
         updates = self.http("GET", "/v1/updates?chat_id=unity-mygame&after=0&wait=1")
         self.assertEqual([i["kind"] for i in updates["items"]], ["user", "reply"])
@@ -604,6 +635,25 @@ class PreviewTests(unittest.TestCase):
         [image] = self.images("blender-props")
         self.assertEqual(image["window"], "MyGame")
 
+    def test_a_window_that_was_only_looked_at_is_not_shown(self):
+        self.hub.post_user_message("blender", "props", "의자를 Unity로 보내줘", pin="props@9877")
+        for tool, detail in (("ch_scene_snapshot", ""), ("ch_editor_status", ""), ("ch_checkpoint", "list"), ("get_scene_info", ""),
+                             ("find_gameobjects", "Chair"), ("ch_export_model", "")):
+            self.assertTrue(cc.only_looks(tool, detail), tool)
+            self.hub.report_action("unity", "MyGame@aaaa1111", tool, detail)
+        self.hub.report_action("unity", "MyGame@aaaa1111", "execute_code", "return go.transform.position;", looks=True)  # code a guard has read
+        self.hub.reply("blender-props", "중지했어요. Unity는 씬만 확인하고 멈췄어요.")
+        time.sleep(0.3)
+        self.assertEqual(self.shots, [])  # nothing there is different from before
+        self.hub.post_user_message("blender", "props", "다시 보내줘", pin="props@9877")
+        for tool, detail in (("ch_import_model", ""), ("ch_checkpoint", "undo"), ("execute_code", "x = 1"), ("manage_gameobject", "find")):
+            self.assertFalse(cc.only_looks(tool, detail), tool)
+        self.hub.report_action("unity", "MyGame@aaaa1111", "ch_scene_snapshot", "")
+        self.hub.report_action("unity", "MyGame@aaaa1111", "ch_import_model", "")
+        self.hub.reply("blender-props", "Unity에 놓았어요")
+        [image] = self.images("blender-props")
+        self.assertEqual(image["window"], "MyGame")
+
     def test_no_picture_without_a_capture_or_for_desktop_replies(self):
         self.hub.post_user_message("blender", "props", "Unity 씬 저장해줘", pin="props@9877")
         self.hub.report_action("unity", "MyGame@aaaa1111", "manage_scene", "save")
@@ -773,6 +823,47 @@ class OverviewTests(unittest.TestCase):
         waiter.join(5)
         self.assertFalse(waiter.is_alive())
         self.assertEqual(result["others"], ["한가함: Level (Unity)"])
+
+    def test_a_request_answered_on_it_without_the_flag_still_waits_once_its_work_is_handed_out(self):
+        """What a real supervisor does: "on it" without `working`, then the hand-outs, one window after the other."""
+        self.open_panel("blender", "props", "props@9877")
+        self.hub.post_user_message("blender", "props", "의자를 Level로 보내줘", pin="props@9877")
+        request = self.hub.logs["blender-props"][-1]["request"]
+        self.hub.reply("blender-props", "보내고 있어요. 잠시만 기다려 주세요.")
+        self.assertEqual(self.states()["blender-props"], "idle")  # for all the channel knows, that was the answer
+        self.hub.assign("blender-props", request)
+        self.assertEqual(self.states()["blender-props"], "waiting")  # work for it was handed out: it was "on it"
+        self.hub.report_action("blender", "props@9877", "execute_code", "export", "aaa")
+        self.assertEqual(self.states()["blender-props"], "working")
+        self.hub.agent_stopped("blender", "props@9877", "aaa")
+        self.assertEqual(self.states()["blender-props"], "waiting")  # between one subagent's turn and the next
+        self.assertEqual(self.hub.poll("unity-mygame", 0, 0)["others"], ["props (Blender) · 답 기다림 · “의자를 Level로 보내줘”"])
+        self.hub.assign("unity-level", request)
+        self.hub.report_action("unity", "Level@bbbb2222", "ch_import_model", "", "bbb")
+        self.hub.agent_stopped("unity", "Level@bbbb2222", "bbb")
+        self.hub.reply("blender-props", "Level에 놓았어요")
+        self.assertEqual(self.states()["blender-props"], "idle")
+
+    def test_a_waiting_panel_hears_at_once_that_a_request_is_under_way(self):
+        self.open_panel("blender", "props", "props@9877")
+        self.hub.post_user_message("blender", "props", "의자를 Level로 보내줘", pin="props@9877")
+        self.hub.reply("blender-props", "보내고 있어요.")
+        shown = self.hub.poll("unity-mygame", 0, 0, -1, -1)
+        self.assertEqual(shown["others"], ["한가함: props (Blender)"])
+        result = {}
+        waiter = threading.Thread(target=lambda: result.update(self.hub.poll("unity-mygame", 0, 10, shown["progress_rev"], shown["others_rev"])))
+        waiter.start()
+        time.sleep(0.2)
+        self.hub.assign("blender-props", self.hub.logs["blender-props"][0]["request"])  # not at the panel's next ask, up to 20 s later
+        waiter.join(5)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(result["others"], ["props (Blender) · 답 기다림 · “의자를 Level로 보내줘”"])
+
+    def test_an_answer_that_needed_no_work_does_not_show_as_waiting(self):
+        self.open_panel("unity", "MyGame")
+        self.hub.post_user_message("unity", "MyGame", "지금 뭐가 선택돼 있지?")
+        self.hub.reply("unity-mygame", "큐브예요")
+        self.assertEqual(self.states(), {"unity-mygame": "idle"})
 
     def test_the_supervisor_sees_the_states_in_current_context(self):
         self.hub.update_context("unity", "MyGame", "MyGame@aaaa1111", {"scene": "Main", "selection": ["Player"], "focused": True})
@@ -1110,6 +1201,117 @@ class WorkerTests(unittest.TestCase):
         self.stop()
         self.assertNotIn("stop", self.act("ccc", pin="Props@bbbb2222"))  # Props still works on its own panel's request
         self.assertTrue(self.act("aaa")["stop"])
+
+    def test_stop_after_on_it_without_working_still_belongs_to_the_request(self):
+        """What a real supervisor does: it answers "on it" without `working`, then hands the work out. The stop that
+        followed was nobody's request: not in `trace`, and no bar to the other window working for it."""
+        events = []
+        self.hub.events = lambda event, **fields: events.append({"event": event, **fields})
+        self.hub.post_user_message("blender", "props", "의자를 Props로 보내줘", pin="props@9877")
+        theirs = self.request_of("blender-props")
+        self.hub.reply("blender-props", "보내고 있어요. 잠시만 기다려 주세요.")
+        self.hub.assign("unity-props", theirs)
+        self.act("ccc", pin="Props@bbbb2222")
+        self.assertTrue(self.hub.request_stop("blender", "props", "props@9877")["stopping"])
+        self.assertIn("의자를 Props로 보내줘", self.emitted.messages[-1]["params"]["content"])  # the supervisor hears which request
+        self.assertEqual([e["request"] for e in events if e["event"] == "stop"], [theirs])  # `trace` shows the stop under it
+        self.assertEqual(self.act("ccc", pin="Props@bbbb2222")["by"], "blender-props")  # the window working for it is shut
+        self.assertEqual(self.hub.assign("unity-props", theirs), {"ours": True, "chat_id": "unity-props", "stop": True})
+        self.hub.assign("unity-mygame", "")  # asked in the Claude app meanwhile: none of that stop's business
+        self.assertNotIn("stop", self.act("aaa"))
+
+    def test_the_answer_to_stop_frees_the_windows_that_worked_for_the_request(self):
+        """After 중지 the supervisor ends the subagents itself, and one that is killed runs no Stop hook: the window
+        showed as at work for five more minutes, and was shut to another subagent."""
+        self.hub.post_user_message("blender", "props", "의자를 Props로 보내줘", pin="props@9877")
+        self.hub.reply("blender-props", "보내고 있어요.")
+        self.hub.assign("unity-props", self.request_of("blender-props"))
+        self.act("ccc", pin="Props@bbbb2222")
+        self.hub.request_stop("blender", "props", "props@9877")
+        self.hub.reply("blender-props", "중지했어요. 내보내기까지만 했어요.")
+        self.assertEqual((self.hub.stops, self.hub.assigned, self.hub.early), ({}, {}, {}))
+        self.assertIsNone(self.hub.poll("unity-props", 0, 0)["progress"])  # no work line left behind
+        self.assertEqual({s["chat_id"]: s["state"] for s in self.hub.overview()}, {"unity-props": "idle"})
+        self.assertNotIn("busy", self.act("ddd", pin="Props@bbbb2222"))  # free for another subagent
+        # The same in the panel's own window, and with a stop pressed before any work was seen.
+        self.hub.post_user_message("unity", "MyGame", "큐브 백 개 만들어줘")
+        self.hub.reply("unity-mygame", "만들고 있어요.")
+        self.act("aaa")
+        self.stop()
+        self.assertTrue(self.act("aaa")["stop"])
+        self.hub.reply("unity-mygame", "중지했어요. 6개까지 만들었어요.")
+        self.assertNotIn("busy", self.act("bbb"))
+        self.hub.post_user_message("blender", "props", "하나 더 보내줘", pin="props@9877")
+        self.hub.reply("blender-props", "보내고 있어요.")
+        self.assertTrue(self.hub.request_stop("blender", "props", "props@9877")["stopping"])  # in the gap before the work starts
+        self.hub.reply("blender-props", "중지했어요. 아직 아무것도 하지 않았어요.")
+        self.assertEqual((self.hub.stops, self.hub.early), ({}, {}))  # answered: not kept open as another "on it"
+
+    def test_one_undo_point_per_request_and_window_in_front_of_the_first_change(self):
+        """Seen with a real supervisor: a window at work for another panel's request got a second undo point for it
+        when its own panel was told "after this one", and a request that only looked left a point with nothing to undo."""
+        self.hub.post_user_message("blender", "props", "의자를 Props로 보내줘", pin="props@9877")
+        theirs = self.request_of("blender-props")
+        self.hub.reply("blender-props", "보내고 있어요.")
+        self.hub.assign("unity-props", theirs)
+        look = self.hub.report_action("unity", "Props@bbbb2222", "ch_scene_snapshot", "", "ccc")
+        self.assertFalse(look["new_request"])  # looking: nothing to undo yet
+        first = self.hub.report_action("unity", "Props@bbbb2222", "ch_import_model", "", "ccc")
+        self.assertEqual((first["new_request"], first["label"]), (True, "의자를 Props로 보내줘"))
+        self.hub.post_user_message("unity", "Props", "바닥 색 바꿔줘")  # the Props panel asks for something of its own meanwhile
+        self.hub.reply("unity-props", "지금 하는 일이 끝나면 바로 할게요.")
+        self.assertIsNotNone(self.hub.poll("unity-props", 0, 0)["progress"])  # the line of the work going on stays
+        self.assertFalse(self.act("ccc", pin="Props@bbbb2222")["new_request"])  # still the same request: no second point
+        self.hub.agent_stopped("unity", "Props@bbbb2222", "ccc")
+        self.assertIsNone(self.hub.poll("unity-props", 0, 0)["progress"])  # the answer goes to the Blender panel: nothing else would take the line away
+        self.hub.assign("ccc", theirs)  # one more turn for the same request (the supervisor resumes the subagent by its id)
+        self.assertFalse(self.act("ccc", pin="Props@bbbb2222")["new_request"])
+        self.hub.agent_stopped("unity", "Props@bbbb2222", "ccc")
+        self.hub.reply("blender-props", "Props에 놓았어요")
+        self.hub.assign("unity-props", self.request_of("unity-props"))  # now the Props panel's own request: its own point
+        own = self.act("ccc", pin="Props@bbbb2222")
+        self.assertEqual((own["new_request"], own["label"]), (True, "바닥 색 바꿔줘"))
+        self.assertFalse(self.act("ccc", pin="Props@bbbb2222")["new_request"])
+
+    def test_code_that_only_looks_sets_no_undo_point(self):
+        """Seen with a real supervisor: "where is everything?" was answered with a tool that runs any code, which
+        counted as a change. The request left an undo point with nothing to undo, and the panel's 되돌리기 did
+        nothing the first time. The guard reads Blender's code and says when it only looks."""
+        code = "execute_blender_code"
+        self.hub.post_user_message("blender", "props", "뭐가 있는지 알려줘", pin="props@9877")
+        self.hub.assign("blender-props", self.request_of("blender-props"))
+        self.assertFalse(self.hub.report_action("blender", "props@9877", code, "print(bpy.data.filepath)", "bbb", looks=True)["new_request"])
+        self.assertEqual(self.hub.poll("blender-props", 0, 0)["progress"]["actions"], 1)  # the work line shows it all the same
+        self.hub.agent_stopped("blender", "props@9877", "bbb")
+        self.hub.reply("blender-props", "Cube와 Sphere가 있어요")
+        self.hub.post_user_message("blender", "props", "Cube를 옮겨줘")
+        self.hub.assign("blender-props", self.request_of("blender-props"))
+        self.assertFalse(self.hub.report_action("blender", "props@9877", code, "print(bpy.data.filepath)", "bbb", looks=True)["new_request"])
+        move = self.hub.report_action("blender", "props@9877", code, "cube.location.x += 2", "bbb")
+        self.assertEqual((move["new_request"], move["label"]), (True, "Cube를 옮겨줘"))  # in front of the first change
+        self.assertFalse(self.hub.report_action("blender", "props@9877", code, "cube.location.x += 2", "bbb")["new_request"])
+
+    def test_a_subagent_resumed_by_its_id_is_placed_after_a_restart(self):
+        """A resumed supervisor goes on with the subagents of before, by id (SendMessage). A channel that had just
+        started took such an id for none of its business, and the hand-out went by without a request."""
+        history = Path(self.tmp.name) / "history"
+        self.hub.use_history(history)
+        self.hub.post_user_message("unity", "Props", "바닥 색 바꿔줘")
+        self.act("ccc", pin="Props@bbbb2222")
+        self.hub.agent_stopped("unity", "Props@bbbb2222", "ccc")
+        self.hub.reply("unity-props", "바꿨어요")
+        emitted = Recorder()
+        restarted = cc.ChatHub(emitted, Path(self.tmp.name))
+        restarted.use_history(history)
+        restarted.initialized = True
+        self.assertEqual(restarted.assign("ccc", None), {"ours": True, "chat_id": "unity-props", "missing": True})
+        self.assertEqual(restarted.assign("zzz", None), {"ours": False})
+        # The hook reads the subagent's name from the session's files: an id the channel never saw is placed too.
+        self.assertEqual(restarted.assign("zzz", None, agent="unity-mygame"), {"ours": True, "chat_id": "unity-mygame", "missing": True})
+        self.assertEqual(restarted.assign("zzz", "", agent="Explore"), {"ours": False})
+        restarted.post_user_message("unity", "Props", "하나 더")
+        self.assertNotIn("agent_id", emitted.messages[-1]["params"]["meta"])  # a new supervisor is not pointed at another session's agent
+        self.assertEqual(restarted.logs["unity-props"][0]["text"], "바닥 색 바꿔줘")  # the history itself is as before
 
     def test_work_after_on_it_without_working_is_logged_under_its_own_request(self):
         events = []

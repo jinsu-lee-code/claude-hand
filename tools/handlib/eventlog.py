@@ -140,7 +140,7 @@ def describe(event: dict, since: float | None = None) -> str:
     elif kind == "action":
         parts = [who, " ".join(filter(None, [event.get("tool", ""), event.get("detail", "")]))]
         if event.get("first"):
-            parts.append("(이 요청의 첫 동작: 되돌리기 지점)")
+            parts.append("(이 요청의 되돌리기 지점)")
     elif kind == "refused":
         parts = [who, event.get("tool", ""), event.get("reason", "")]
     elif kind == "call":

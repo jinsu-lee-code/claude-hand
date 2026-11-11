@@ -32,6 +32,7 @@ import json
 import re
 import sys
 import urllib.request
+from pathlib import Path
 
 TAG_RE = re.compile(r"\[\s*요청\s*[:：]?\s*(없음|none|\d{4}-\d{6}-\d+)\s*\]", re.IGNORECASE)
 HOW = ("프롬프트(SendMessage면 메시지) 첫 줄에 `[요청 <번호>]`를 적고 다시 부르세요. 번호는 그 채팅창 메시지의 <channel> 태그에 있는 "
@@ -56,13 +57,29 @@ def handed_out(event: dict) -> tuple[str, str] | None:
     return None
 
 
+def agent_type(event: dict, agent_id: str) -> str:
+    """The subagent type of an agent this session started earlier. SendMessage names such an agent by its id, and a
+    supervisor that is resumed (start-supervisor does that) goes on with agents from days ago, whose ids a chat
+    channel that has just started has never seen. Claude Code keeps each agent's type beside the session's
+    transcript: <transcript without .jsonl>/subagents/agent-<id>.meta.json. "" when that cannot be read (the channel
+    may still know the id from the agent's own work)."""
+    transcript = str(event.get("transcript_path") or "")
+    if not transcript or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", agent_id):
+        return ""
+    try:
+        meta = json.loads((Path(transcript).with_suffix("") / "subagents" / f"agent-{agent_id}.meta.json").read_text(encoding="utf-8"))
+        return str(meta.get("agentType") or "") if isinstance(meta, dict) else ""
+    except (OSError, ValueError):
+        return ""
+
+
 def decision(event: dict, post) -> str | None:
     """A denial reason, or None to let the call through. post(path, body) -> the channel's answer ({} when none)."""
     handed = handed_out(event)
     if handed is None or not handed[0]:
         return None
     target, text = handed
-    answer = post("/v1/assign", {"target": target, "request": tag_of(text)}) or {}
+    answer = post("/v1/assign", {"target": target, "agent": agent_type(event, target), "request": tag_of(text)}) or {}
     if not answer.get("ours"):
         return None  # not a window's subagent (or no Claude Hand to ask)
     window = answer.get("chat_id") or target

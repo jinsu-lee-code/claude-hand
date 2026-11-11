@@ -214,6 +214,47 @@ class ProgressTests(unittest.TestCase):
                                   "props@9876", "blender_props", "blender", home=home, post=new, mark=lambda *a: marks.append(a))
         self.assertEqual(marks, [("unity", self.PIN, "큐브 만들어줘"), ("blender", "props@9876", "의자")])  # once per request
 
+    def test_blender_code_that_only_looks_is_reported_as_looking(self):
+        """execute_code runs any Python, so its name does not say whether the request has changed anything yet: a
+        question answered with it left an undo point with nothing to undo."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home, sent = self.home(tmp), []
+            post = lambda req: sent.append(json.loads(req.data)) or {"new_request": False}
+            blender = lambda tool, **tool_input: guard.report_progress(
+                {"tool_name": f"mcp__blender_props__{tool}", "tool_input": tool_input}, "props@9876", "blender_props", "blender", home=home, post=post)
+            blender("execute_blender_code", code='import bpy\nprint(bpy.data.filepath, bpy.app.version_string, "dirty", bpy.data.is_dirty)')
+            blender("execute_blender_code", code='import bpy\nbpy.data.objects["Cube"].location.x += 2')
+            blender("execute_blender_code", code="import bpy\nprint(")  # cannot be read: may change
+            blender("get_scene_info")  # its name says it
+            # Unity's execute_code is C#, not read here: ChCheckpoint tells afterwards whether the point has anything to undo.
+            guard.report_progress({"tool_name": "mcp__unity_mygame__execute_code", "tool_input": {"code": "print(1)"}},
+                                  self.PIN, self.SERVER, "unity", home=home, post=post)
+        self.assertEqual([body.get("looks") for body in sent], [True, None, None, None, None])
+        self.assertEqual(sent[0]["detail"], 'print(bpy.data.filepath, bpy.app.version_string, "dirty", bpy.data.is_dirty)')
+
+    def test_a_subagents_own_undo_point_is_refused_while_claude_hand_sets_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home, marks = self.home(tmp), []
+            mark = lambda app, pin, label: marks.append(label)
+            own = {"tool_name": "mcp__unity_mygame_ch__ch_checkpoint", "tool_input": {"action": "mark", "label": "Import CH_Capsule"}}
+            going = lambda req: {"ok": True, "chat_id": "unity-mygame", "new_request": False, "label": ""}
+            reason = guard.report_progress(own, self.PIN, self.SERVER, "unity", home=home, post=going, mark=mark)
+            self.assertIn("이미 찍어 두었습니다", reason)
+            self.assertIn("문제가 아니므로", reason)
+            self.assertEqual(marks, [])
+            # As the first action of a request: the request's point is set, under the user's words; the subagent's is not.
+            first = lambda req: {"ok": True, "chat_id": "unity-mygame", "new_request": True, "label": "캡슐 보내줘"}
+            default = {"tool_name": "mcp__unity_mygame_ch__ch_checkpoint", "tool_input": {"label": "x"}}  # no action: mark
+            self.assertIn("이미 찍어 두었습니다", guard.report_progress(default, self.PIN, self.SERVER, "unity", home=home, post=first, mark=mark))
+            self.assertEqual(marks, ["캡슐 보내줘"])
+            # Without Claude Hand nobody else sets a point: the subagent's own goes through.
+            self.assertIsNone(guard.report_progress(own, self.PIN, self.SERVER, "unity", home=home, post=lambda req: {}, mark=mark))
+            self.assertIsNone(guard.report_progress(own, self.PIN, self.SERVER, "unity", home=home, post=lambda req: 1 / 0, mark=mark))
+            for action in ("list", "undo"):
+                event = {"tool_name": "mcp__unity_mygame_ch__ch_checkpoint", "tool_input": {"action": action}}
+                self.assertIsNone(guard.report_progress(event, self.PIN, self.SERVER, "unity", home=home, post=first, mark=mark))
+            self.assertEqual(marks, ["캡슐 보내줘"])
+
     def test_the_report_says_which_subagent_it_is(self):
         with tempfile.TemporaryDirectory() as tmp:
             home, sent = self.home(tmp), []

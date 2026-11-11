@@ -87,15 +87,17 @@ REPLY_TOOL = {
             "origin": {"type": "string", "enum": ["panel", "desktop"],
                        "description": "desktop: the request came from the terminal or the Claude app, not from this panel"},
             "request": {"type": "string", "description": "With origin desktop: one line saying what was asked"},
-            "working": {"type": "boolean", "description": "true on a short message sent while the work still goes on "
-                                                          "('working on it'); leave it out on the result"},
+            "working": {"type": "boolean", "description": "true on a short message sent while the work for the request "
+                                                          "still goes on ('working on it'); false on the result, and on an "
+                                                          "answer that needed no work. Say which on every reply (not "
+                                                          "needed with origin desktop)."},
             "changed_windows": {"type": "array", "items": {"type": "string"},
                                 "description": "The chat_ids of the OTHER windows this request changed, e.g. the Unity project "
                                                "a model from this Blender window was sent to. The panel shows a picture of each "
                                                "under the result. [] when only this chat's own window was touched, on a working "
                                                "message and with origin desktop. Never a window that worked for another request."},
         },
-        "required": ["chat_id", "text", "changed_windows"],
+        "required": ["chat_id", "text", "working", "changed_windows"],
     },
 }
 
@@ -106,6 +108,24 @@ STALL_SECONDS = 300.0  # when no subagent work was seen at all: how long a panel
 STOP_SECONDS = 180.0   # a panel's 중지 holds until its request is answered, but never longer than this
 EARLY_SECONDS = 120.0  # an answer sent before any work was seen: how long that work may still take to start (see _asking)
 SEEN_SECONDS = 90.0    # a panel asks for news every MAX_WAIT_SECONDS at the latest: one silent for this long has been closed
+
+# Tools that leave a window as it was. A window that did nothing else for a request is not one the request changed:
+# its picture under the answer would show nothing new (see report_action).
+LOOKING_TOOLS = {"ch_scene_snapshot", "ch_editor_status", "ch_capture", "ch_export_model", "ch_export_objects"}
+# A reply has to say whether the work still goes on. The tool definition asks for it, but Claude Code does not hold
+# a call to that, and a supervisor that has answered without it for days goes on doing so (a hint in the result
+# changed nothing; being refused once did, as with the request tag on hand-outs). So the first few replies without
+# it are sent back, with this.
+WORKING_ASKS = 5
+WORKING_ASK = ("Not sent: say whether the work for this request still goes on. Send the same text again with working: true "
+               "(a status while the work goes on, such as 'on it') or working: false (the result, or an answer that needed "
+               "no work). The panel's work line, its 중지 button and the alert that an answer came depend on it. Say it on "
+               "every reply from now on.")
+
+
+def only_looks(tool: str, detail: str = "") -> bool:
+    return tool in LOOKING_TOOLS or tool.startswith(("get_", "read_", "find_", "list_")) or \
+        (tool == "ch_checkpoint" and detail.strip() == "list")
 
 CONTEXT_TOOL = {
     "name": "current_context",
@@ -193,6 +213,12 @@ class ChatHub:
         self.find_dialogs = None  # callable(app, pin) -> the dialogs that stop that window now ([] for none)
         self.dialog_seen: dict[str, str] = {}  # chat_id -> the dialogs already told about, so each is told once
         self.workers: dict[str, dict] = {}  # chat_id -> the subagent at work in that window: {"agent_id", "last", "stopped"}
+        # chat_id -> the id of the subagent that last worked in its window. Kept with the chat's history: a supervisor
+        # that is resumed goes on with the subagents of before (SendMessage to their ids), and a channel that has just
+        # started has to know whose window such an id is (see assign).
+        self.agent_ids: dict[str, str] = {}
+        self.working_asked = 0  # replies sent back for not saying `working` (see wants_working)
+        self.pointed: dict[str, tuple] = {}  # chat_id -> the request its window's newest undo point was set for (see report_action)
         self.reminded: dict[str, int] = {}  # chat_id -> seq of the request the supervisor was reminded of (once each)
         self.stops: dict[str, dict] = {}  # chat_id -> its panel's 중지: {"seq": of the request it stops (0: work asked elsewhere), "ts"}
         self.started = time.time()  # requests older than this server (shown again from history) are not its to chase
@@ -245,9 +271,10 @@ class ChatHub:
         waiting = [(chat, item) for chat in self.logs if chat != chat_id for item in [self._asking(chat, now)] if item is not None]
         return waiting[0] if len(waiting) == 1 else ("", None)
 
-    def assign(self, target: str, request: str | None) -> dict:
+    def assign(self, target: str, request: str | None, agent: str = "") -> dict:
         """The supervisor is about to hand work to a subagent (its hook on Agent and SendMessage says so, see
-        tools/supervisor_hook.py). target: the subagent's name, or the id of one that worked before (SendMessage).
+        tools/supervisor_hook.py). target: the subagent's name, or the id of one that worked before (SendMessage);
+        agent: for such an id, the subagent's name when the hook could tell it.
         request: the id from the prompt's `[요청 …]` tag, "" for `[요청 없음]` (asked in the terminal or the Claude
         app), None when the prompt has no tag. From here until that subagent stops, the work in its window belongs
         to that request: previews, 중지 and the event log need not guess. The answer tells the hook what to do:
@@ -256,8 +283,8 @@ class ChatHub:
         agents = {a.name for a in installed_agents(self.agents_dir)}
         with self.cond:
             now = time.time()
-            window = target if target in agents else next(
-                (chat for chat, worker in self.workers.items() if target and worker["agent_id"] == target), "")
+            window = next((name for name in (target, agent) if name in agents), "") or next(
+                (chat for chat, known in self.agent_ids.items() if target and known == target and chat in agents), "")
             if not window:
                 return {"ours": False}
             if request is None:
@@ -269,11 +296,12 @@ class ChatHub:
                 if item is None:
                     return {"ours": True, "chat_id": window, "unknown": True}
                 stop = self.stops.get(asker)
-                if stop and stop["seq"] == item["seq"] and now - stop["ts"] <= STOP_SECONDS and self._request_item(asker) is item:
+                if stop and stop["seq"] == item["seq"] and now - stop["ts"] <= STOP_SECONDS and self._asking(asker, now) is item:
                     self._log("refused", request=request, chat_id=window, tool="(맡기기)", reason="사용자가 채팅창에서 중지를 누름")
                     return {"ours": True, "chat_id": window, "stop": True}
             self.assigned[window] = {"asker": asker, "item": item, "ts": now}
             self._log("assigned", request=request, chat_id=window, text="" if asker else "채팅창 요청이 아님")
+            self.cond.notify_all()  # the other panels show the asking window: its request is under way (see _state)
         return {"ours": True, "chat_id": window, "asker": asker}
 
     def _asking(self, chat_id: str, now: float) -> dict | None:
@@ -313,6 +341,8 @@ class ChatHub:
                     chat_id, items = str(saved["chat_id"]), saved["items"]
                 except (OSError, ValueError, KeyError, TypeError):
                     continue
+                if isinstance(saved.get("agent_id"), str) and saved["agent_id"]:
+                    self.agent_ids[chat_id] = saved["agent_id"]
                 kept = [dict(item) for item in items if isinstance(item, dict) and item.get("kind") in HISTORY_KINDS]
                 for item in kept[-LOG_LIMIT:]:
                     self.seq += 1
@@ -325,7 +355,10 @@ class ChatHub:
         try:
             self.history_dir.mkdir(parents=True, exist_ok=True)
             tmp = self.history_dir / f"{name}.{os.getpid()}.tmp"
-            tmp.write_text(json.dumps({"chat_id": chat_id, "items": items}, ensure_ascii=False), encoding="utf-8")
+            saved = {"chat_id": chat_id, "items": items}
+            if self.agent_ids.get(chat_id):
+                saved["agent_id"] = self.agent_ids[chat_id]
+            tmp.write_text(json.dumps(saved, ensure_ascii=False), encoding="utf-8")
             os.replace(tmp, self.history_dir / f"{name}.json")
         except OSError as exc:  # a full disk or a locked file must not stop the chat
             log("could not save the chat history:", exc)
@@ -375,6 +408,12 @@ class ChatHub:
         worker = self.workers.get(chat_id)
         working = entry is not None and now - entry["updated"] <= PROGRESS_TTL and not (worker and worker["stopped"])
         own = self._request_item(chat_id)
+        early = self.early.get(chat_id) if own is None else None
+        if early is not None and self._asking(chat_id, now) is not None and (
+                early["worked"] or any(given["item"] is early["item"] for given in self.assigned.values())):
+            # Answered "on it" without saying so (see _asking), and work for it was handed out or seen since: the
+            # panel still waits for the result, between one subagent's turn and the next as well.
+            own = early["item"]
         if working:
             asker, item = self._work_for(chat_id, now)
             state.update(state="stopping" if entry.get("stopping") else "working", seconds=round(now - entry["started"]),
@@ -475,16 +514,35 @@ class ChatHub:
         with self.cond:
             now = time.time()
             asked = self._asking(chat_id, now) if origin != "desktop" else None
+            stop = None if working or origin == "desktop" else self.stops.get(chat_id)
+            if stop is not None and stop["seq"] != (asked["seq"] if asked else 0):
+                stop = None  # pressed on an earlier request
+            # The windows that stop covered (see _stop_for), told before the answer changes what the chat asks: those at
+            # work for this chat's request, and its own unless that one works for another chat's request meanwhile.
+            halted = set()
+            if stop is not None:
+                halted = {w for w in set(self.progress) | set(self.assigned) if self._work_for(w, now)[0] == chat_id}
+                if not stop["seq"] or self._work_for(chat_id, now)[0] in (chat_id, ""):
+                    halted.add(chat_id)
             self._append(chat_id, item)
             self._log("reply", request=(asked or {}).get("request", ""), chat_id=chat_id, text=eventlog.short(text),
                       working=working or None, origin="desktop" if origin == "desktop" else None)
             if working:
                 return True
-            if self.progress.pop(chat_id, None) is not None:  # the answer is in: the bar goes away
+            # The answer is in: the bar goes away. Not while the window is at work for somebody else's request (its
+            # own panel was told "after this one"): the bar would flicker, and the work going on would look like the
+            # start of a new request and get a second undo point.
+            given = self._assignment(chat_id, now)
+            if (given is None or given["asker"] == ("" if origin == "desktop" else chat_id)) and self.progress.pop(chat_id, None) is not None:
                 self._bump_progress(chat_id)
             if origin == "desktop":
                 return True
-            if asked is not None and self.worked.get(chat_id, 0) < asked["seq"] and not changed:
+            if stop is not None:  # the answer to 중지: whatever worked for the request is over, said or not
+                for window in sorted(halted):
+                    self._halt(window, now)
+                del self.stops[chat_id]
+                self.early.pop(chat_id, None)
+            elif asked is not None and self.worked.get(chat_id, 0) < asked["seq"] and not changed:
                 self.early[chat_id] = {"item": asked, "worked": False, "ts": now}  # nothing was done for it yet: see _asking
             else:
                 self.early.pop(chat_id, None)
@@ -492,6 +550,27 @@ class ChatHub:
         if others:
             threading.Thread(target=self._attach_previews, args=(chat_id, others), daemon=True).start()
         return True
+
+    def _halt(self, window: str, now: float) -> None:
+        """The work in this window is over without its subagent saying so: the supervisor ended it after 중지, and a
+        subagent that is killed runs no Stop hook. Left alone, the window would show as at work, and stay shut to
+        another subagent, until the timeouts ran out. Called with the lock held."""
+        worker = self.workers.get(window)
+        if worker and not worker["stopped"]:
+            worker["stopped"] = now
+        self.assigned.pop(window, None)
+        if self.progress.pop(window, None) is not None:
+            self._bump_progress(window)
+
+    def wants_working(self) -> bool:
+        """A reply came without saying whether it is a status or the result: whether to send it back for that. The
+        first few times only (WORKING_ASKS): a supervisor that keeps leaving it out is not made to send every answer
+        twice, and the channel copes as before (see _asking)."""
+        with self.cond:
+            if self.working_asked >= WORKING_ASKS:
+                return False
+            self.working_asked += 1
+            return True
 
     def _changed_elsewhere(self, chat_id: str, declared: list[str] | None = None) -> list[str]:
         """The other windows to show under this chat's result: the user asked here and cannot see them. The
@@ -750,12 +829,14 @@ class ChatHub:
         self.progress_rev[chat_id] = self.progress_rev.get(chat_id, 0) + 1
         self.cond.notify_all()
 
-    def report_action(self, app: str, pin: str, tool: str, detail: str, agent_id: str = "") -> dict | None:
+    def report_action(self, app: str, pin: str, tool: str, detail: str, agent_id: str = "", looks: bool = False) -> dict | None:
         """A window's subagent is about to run a Unity/Blender tool (its guard hook says so): show it in that
         window's panel. new_request is true for the first action of a request (the guard sets an undo point then),
         with label: the panel message it answers, if any. busy is true when another subagent is still at work in
-        that window: two at once overwrite each other, so the guard refuses the call. None for a pin no generated
-        subagent has."""
+        that window: two at once overwrite each other, so the guard refuses the call. looks: the guard read the
+        code this call runs and it can only look (a tool that runs any code does not show it in its name). None for
+        a pin no generated subagent has."""
+        looks = looks or only_looks(tool, detail)
         agent = next((a for a in installed_agents(self.agents_dir) if a.app == app and a.pin == pin), None)
         if agent is None:
             return None
@@ -776,17 +857,30 @@ class ChatHub:
                 self.workers[agent.name] = {"agent_id": agent_id, "last": now, "stopped": 0.0}
             else:  # a guard from before agent ids were reported: the same window, whoever it is
                 worker.update(last=now, stopped=0.0)
+            if agent_id and self.agent_ids.get(agent.name) != agent_id:
+                self.agent_ids[agent.name] = agent_id
+                if self.history_dir is not None:
+                    self._save_history(agent.name)
             self.names.setdefault(agent.name, {"app": agent.app, "window": agent.pin.rpartition("@")[0]})
             asker, asked = self._work_for(agent.name, now)
             if agent.name in self.assigned:
                 self.assigned[agent.name]["ts"] = now
             if asker:
-                if asker != agent.name:  # asked in another window, whose reply may show this one
+                if asker != agent.name and not looks:  # asked in another window, whose reply may show this one
                     self.acted.setdefault(agent.name, {})[asker] = self.seq
                 self._note_work(asker, now)
             entry = self._progress_entry(agent.name, now)
-            first = not entry.get("marked")
-            entry.update(tool=tool[:80], detail=detail[:120], actions=entry["actions"] + 1, updated=now, marked=True)
+            # One undo point per request and window, in front of the first action that may change something: a request
+            # that only looked (or was stopped while it still looked) leaves no point behind with nothing to undo.
+            # Which request it is, the channel knows for sure when the supervisor said so or the window's own panel
+            # waits; then the point holds through "on it" answers and the subagent's several turns. Otherwise (asked
+            # in the Claude app, or a guess) a request lasts as long as its work line does.
+            known = asked is not None and (agent.name in self.assigned or asker == agent.name)
+            point = ("request", asker, asked["seq"]) if known else ("bar", entry["started"])
+            first = self.pointed.get(agent.name) != point and not looks
+            if first:
+                self.pointed[agent.name] = point
+            entry.update(tool=tool[:80], detail=detail[:120], actions=entry["actions"] + 1, updated=now)
             self._bump_progress(agent.name)
             label = " ".join(str(asked.get("text", "")).split())[:40] if asked is not None and first else ""
             self._log("action", request=self._request_for(agent.name), chat_id=agent.name, pin=pin, tool=tool[:80], detail=detail[:120],
@@ -807,7 +901,11 @@ class ChatHub:
                 if self.stops.get(agent.name, {}).get("seq") == 0:  # 중지 on work asked elsewhere: it has stopped
                     del self.stops[agent.name]
             if worker is None or worker["agent_id"] in ("", agent_id):
-                self.assigned.pop(agent.name, None)  # what it was handed is done; the next hand-out says anew whose it is
+                given = self.assigned.pop(agent.name, None)  # what it was handed is done; the next hand-out says anew whose it is
+                if given is not None and given["asker"] != agent.name and self.progress.pop(agent.name, None) is not None:
+                    # It worked for a request asked elsewhere: the answer goes there, and none comes to this window's
+                    # panel to take its work line away (the line also hides the panel's 되돌리기).
+                    self._bump_progress(agent.name)
             self.cond.notify_all()  # the other panels show this window: it is no longer at work
         return {"chat_id": agent.name}
 
@@ -819,7 +917,7 @@ class ChatHub:
         chat_id, agent = resolve_window(installed_agents(self.agents_dir), app, window, pin)
         with self.cond:
             now = time.time()
-            item = self._request_item(chat_id)
+            item = self._asking(chat_id, now)  # also a request answered "on it" without the flag: its work goes on
             entry = self.progress.get(chat_id)
             working = entry is not None and now - entry["updated"] <= PROGRESS_TTL
             if item is None and not working:
@@ -854,7 +952,7 @@ class ChatHub:
         that work for that request (see _work_for). Called with the lock held."""
         asker, _ = self._work_for(chat_id, now)
         for chat, stop in list(self.stops.items()):
-            item = self._request_item(chat)
+            item = self._asking(chat, now)
             if now - stop["ts"] > STOP_SECONDS or (item["seq"] if item else 0) != stop["seq"]:
                 del self.stops[chat]
             elif chat == chat_id or (stop["seq"] and asker == chat):
@@ -871,8 +969,8 @@ class ChatHub:
         return None
 
     def _open_request(self, chat_id: str) -> str:
-        """The panel message not answered yet, in a few words ("" when the request came from elsewhere)."""
-        item = self._request_item(chat_id)
+        """The panel message still waiting for its result, in a few words ("" when the request came from elsewhere)."""
+        item = self._asking(chat_id, time.time())
         return " ".join(str(item.get("text", "")).split())[:40] if item else ""
 
     def _current_progress(self, chat_id: str) -> dict | None:
@@ -946,6 +1044,8 @@ class StdioMcp:
             return {"isError": True, "content": [{"type": "text", "text": "text is empty"}]}
         changed = args.get("changed_windows")  # None from a session that knows the tool without it: the channel then guesses
         changed = [str(c) for c in changed] if isinstance(changed, list) else None
+        if origin == "panel" and args.get("working") is None and self.hub.known_chat(chat_id) and self.hub.wants_working():
+            return {"isError": True, "content": [{"type": "text", "text": WORKING_ASK}]}
         if not self.hub.reply(chat_id, clip(text, MAX_TEXT), origin, clip(str(args.get("request", "")), MAX_CONTEXT),
                               working=args.get("working") in (True, "true"), changed=changed):
             return {"isError": True, "content": [{"type": "text", "text": f"Unknown chat_id {chat_id!r}. Use the chat_id from the "
@@ -1066,7 +1166,8 @@ class PanelHandler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True, "chat_id": chat_id})
         elif path == "/v1/progress":  # a subagent's guard hook, just before each Unity/Blender tool call
             result = self.hub.report_action(str(body.get("app", "")), str(body.get("pin", ""))[:200],
-                                            str(body.get("tool", "")), str(body.get("detail", "")), str(body.get("agent_id", ""))[:80])
+                                            str(body.get("tool", "")), str(body.get("detail", "")), str(body.get("agent_id", ""))[:80],
+                                            looks=body.get("looks") is True)
             self._json(200 if result else 404, {"ok": result is not None, **(result or {})})
         elif path == "/v1/stop":  # 중지 in a panel
             app = str(body.get("app", ""))
@@ -1076,7 +1177,8 @@ class PanelHandler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True, **self.hub.request_stop(app, str(body.get("window", ""))[:200], str(body.get("pin", ""))[:200])})
         elif path == "/v1/assign":  # the supervisor's hook, just before it hands work to a subagent
             request = body.get("request")
-            self._json(200, {"ok": True, **self.hub.assign(str(body.get("target", ""))[:200], None if request is None else str(request)[:80])})
+            self._json(200, {"ok": True, **self.hub.assign(str(body.get("target", ""))[:200], None if request is None else str(request)[:80],
+                                                           str(body.get("agent") or "")[:200])})
         elif path == "/v1/stopped":  # a subagent's Stop hook: it finished its turn
             result = self.hub.agent_stopped(str(body.get("app", "")), str(body.get("pin", ""))[:200], str(body.get("agent_id", ""))[:80])
             self._json(200 if result else 404, {"ok": result is not None, **(result or {})})

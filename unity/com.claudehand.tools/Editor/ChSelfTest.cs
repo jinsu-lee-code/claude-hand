@@ -16,7 +16,7 @@ namespace ClaudeHand.Editor
     /// `claude_hand.py selftest --unity-project &lt;path&gt;` does that for a project that is closed, and hands in two
     /// versions of a model that a real Blender exported (CLAUDE_HAND_SELFTEST_MODEL_A / _B); without them two small OBJ
     /// files stand in. It works in a new scene that is never saved, and deletes the assets it made when it is done
-    /// (what its undo checks send to the trash stays there: two small folders).
+    /// (what its undo checks take out of the project stays in Library/ClaudeHand/removed: a few small folders).
     /// The result goes to CLAUDE_HAND_SELFTEST_OUT (default Library/ClaudeHand/selftest.json); the exit code is 1 when
     /// a check failed.
     /// </summary>
@@ -38,6 +38,13 @@ namespace ClaudeHand.Editor
         private static double _packageDeadline;
         private static double _nextPoll;
 
+        // ... and so do the scene checks after them.
+        private const double SceneSeconds = 10;
+        private static int _sceneStep;
+        private static int _marksBefore;
+        private static GameObject _sceneCube;
+        private static double _sceneDeadline;
+
         private static void Check(string name, bool ok, string detail = "")
         {
             Checks.Add(new { name, ok, detail });
@@ -46,6 +53,8 @@ namespace ClaudeHand.Editor
 
         public static void Run()
         {
+            Checks.Clear();
+            _failed = false;
             bool waiting = false;
             try
             {
@@ -187,12 +196,33 @@ namespace ClaudeHand.Editor
                 Describe(undone) + " / " + AssetImporter.GetAtPath(assetPath).userData);
             Check("undo: the scene object shows the earlier mesh again", meshBack != null && meshBack.vertexCount == verticesNow,
                 $"{verticesNow} -> {(meshBack != null ? meshBack.vertexCount : 0)} vertices");
-            Check("undo: the model that came in went to the trash, and its scene object with it",
+            Check("undo: the model that came in is out of the project, kept with its .meta, and its scene object is gone",
                 Ok(undone) && !AssetDatabase.IsValidFolder(extraFolder) && !Directory.Exists(Path.Combine(ChPaths.ProjectRoot, extraFolder)) &&
-                EditorSceneManager.GetActiveScene().rootCount == rootsBefore && undone["data"]["removed"].Values<string>().Contains(extraFolder),
+                EditorSceneManager.GetActiveScene().rootCount == rootsBefore && undone["data"]["removed"].Values<string>().Contains(extraFolder) &&
+                KeptOutside(extraFolder) && undone.Value<string>("message").Contains(ChCheckpoint.RemovedFolder),
                 Describe(undone));
             Check("undo: nothing is left to undo, and a later import says so", ChCheckpoint.Marks.Count == 0 &&
                   Call(ChImportModel.HandleCommand, new { manifest = manifestB }).Value<string>("message").Contains("No undo point is set"));
+
+            // 6. A request that only looked leaves a mark that nothing happened after. It has nothing to undo: it is
+            // not offered, an undo passes it by, and the next request's mark takes its place.
+            Call(ChCheckpoint.HandleCommand, new { action = "mark", label = "self-test changed" });
+            var kept = Call(ChImportModel.HandleCommand, new { manifest = manifestA, new_copy = true, place = false, name = Name + "_looked" });
+            var keptFolder = Ok(kept) ? kept["data"].Value<string>("asset_path") : string.Empty;
+            keptFolder = keptFolder.Length > 0 ? keptFolder.Substring(0, keptFolder.LastIndexOf('/')) : keptFolder;
+            Call(ChCheckpoint.HandleCommand, new { action = "mark", label = "self-test looked" });
+            var listed = Call(ChCheckpoint.HandleCommand, new { action = "list" });
+            Check("a mark nothing happened after: not offered", Ok(kept) && ChCheckpoint.Marks.Count == 2 && ChCheckpoint.Undoable.Count == 1 &&
+                  listed["data"]["marks"].Count() == 1 && listed["data"]["marks"][0].Value<string>("label") == "self-test changed" &&
+                  listed.Value<string>("message").Contains("skipped"), Describe(listed));
+            var passed = Call(ChCheckpoint.HandleCommand, new { action = "undo" });
+            Check("a mark nothing happened after: an undo passes it by", Ok(passed) && passed["data"].Value<string>("label") == "self-test changed" &&
+                  ChCheckpoint.Marks.Count == 0 && !AssetDatabase.IsValidFolder(keptFolder), Describe(passed));
+            Call(ChCheckpoint.HandleCommand, new { action = "mark", label = "self-test looked" });
+            Call(ChCheckpoint.HandleCommand, new { action = "mark", label = "self-test looked again" });
+            var none = Call(ChCheckpoint.HandleCommand, new { action = "undo" });
+            Check("a mark nothing happened after: the next one takes its place", ChCheckpoint.Marks.Count == 1 &&
+                  ChCheckpoint.Marks[0].label == "self-test looked again" && !Ok(none), Describe(none));
         }
 
         /// <summary>
@@ -251,11 +281,53 @@ namespace ClaudeHand.Editor
                 if (status.Value<string>("_mcp_status") == "pending" && EditorApplication.timeSinceStartup < _packageDeadline) return;
                 EditorApplication.update -= PackageTick;
                 FinishPackageChecks(status);
+                _sceneStep = 0;
+                EditorApplication.update += SceneTick;  // from the next tick on: what this one changed is told at its end
+                return;
             }
             catch (Exception ex)
             {
                 EditorApplication.update -= PackageTick;
                 Check("package: ran to the end", false, ex.ToString());
+            }
+            Finish();
+        }
+
+        /// <summary>
+        /// 8. A change in the scene alone, with no file touched: its mark has something to undo once the editor has
+        /// told what changed (by the end of the tick it happened in, so this goes over ticks as well), and undoing
+        /// the mark takes the change back.
+        /// </summary>
+        private static void SceneTick()
+        {
+            try
+            {
+                if (_sceneStep == 0)
+                {
+                    _rootsBefore = EditorSceneManager.GetActiveScene().rootCount;
+                    _marksBefore = ChCheckpoint.Marks.Count;  // the one step 6 left may still be there: assets came in since
+                    Call(ChCheckpoint.HandleCommand, new { action = "mark", label = "self-test scene" });
+                    _sceneCube = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                    _sceneCube.name = "ChSelfTestScene";
+                    Undo.RegisterCreatedObjectUndo(_sceneCube, "Create ChSelfTestScene");
+                    _sceneDeadline = EditorApplication.timeSinceStartup + SceneSeconds;
+                    _sceneStep = 1;
+                    return;
+                }
+                bool told = ChCheckpoint.Undoable.Any(m => m.label == "self-test scene");
+                if (!told && EditorApplication.timeSinceStartup < _sceneDeadline) return;
+                EditorApplication.update -= SceneTick;
+                Check("a change in the scene: its mark has something to undo", told,
+                    $"{ChCheckpoint.Marks.Count} mark(s), {ChCheckpoint.Undoable.Count} with something to undo");
+                var undone = Call(ChCheckpoint.HandleCommand, new { action = "undo" });
+                Check("a change in the scene: undone with its mark", told && Ok(undone) && _sceneCube == null &&
+                      EditorSceneManager.GetActiveScene().rootCount == _rootsBefore && ChCheckpoint.Marks.Count == _marksBefore, Describe(undone));
+                if (_sceneCube != null) UnityEngine.Object.DestroyImmediate(_sceneCube);
+            }
+            catch (Exception ex)
+            {
+                EditorApplication.update -= SceneTick;
+                Check("scene: ran to the end", false, ex.ToString());
             }
             Finish();
         }
@@ -274,10 +346,20 @@ namespace ClaudeHand.Editor
             Check("undo: what the package wrote over is back as it was",
                 Ok(undone) && File.ReadAllBytes(materialFile).SequenceEqual(_materialBefore) &&
                 undone["data"]["restored"].Values<string>().Contains(_packageMaterial), Describe(undone));
-            Check("undo: what the package added went to the trash, and its scene object with it",
+            Check("undo: what the package added is out of the project, kept, and its scene object is gone",
                 Ok(undone) && prefab != null && AssetDatabase.LoadAssetAtPath<GameObject>(prefab) == null &&
                 !File.Exists(Path.Combine(ChPaths.ProjectRoot, prefab)) && EditorSceneManager.GetActiveScene().rootCount == _rootsBefore &&
-                undone["data"]["removed"].HasValues && undone["data"]["problems"].Count() == 0, Describe(undone));
+                undone["data"]["removed"].HasValues && undone["data"]["removed"].Values<string>().All(KeptOutside) &&
+                undone["data"]["problems"].Count() == 0, Describe(undone));
+        }
+
+        /// <summary>An asset that an undo took out of the project lies in Library/ClaudeHand/removed, with its .meta.</summary>
+        private static bool KeptOutside(string assetPath)
+        {
+            var root = Path.Combine(ChPaths.LibraryDir, "removed");
+            var name = Path.GetFileName(assetPath.TrimEnd('/'));
+            return Directory.Exists(root) && Directory.GetDirectories(root).Any(dir =>
+                (Directory.Exists(Path.Combine(dir, name)) || File.Exists(Path.Combine(dir, name))) && File.Exists(Path.Combine(dir, name + ".meta")));
         }
 
         /// <summary>Deletes what the test made, writes the result and, without a window, ends Unity.</summary>

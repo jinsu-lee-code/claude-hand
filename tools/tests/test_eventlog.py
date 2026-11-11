@@ -108,7 +108,9 @@ class TraceTests(unittest.TestCase):
                          ["unity-props", "Props@bbbb2222", "unity-mygame"])
         call = next(e for e in lines if e["event"] == "call")
         self.assertEqual((call["tool"], call["ok"], call["code"]), ("ch_export_objects", False, "NOT_FOUND"))
-        self.assertTrue(lines[1]["first"])  # the first action of the request: where the undo point is set
+        exported, imported = (e for e in lines if e["event"] == "action")
+        self.assertNotIn("first", exported)  # exporting leaves Props as it was: no undo point there
+        self.assertTrue(imported["first"])   # the first action that may change something: where the undo point is set
         self.assertNotIn("저장했어요", json.dumps(lines, ensure_ascii=False))  # work asked elsewhere afterwards is not this request
         after = [e for e in events if e["ts"] >= lines[-1]["ts"] and e not in lines]
         self.assertEqual([(e["event"], e.get("request")) for e in after], [("action", None), ("reply", None)])
