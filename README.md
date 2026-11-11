@@ -17,7 +17,7 @@ Unity·Blender 안의 채팅창 ──(claude-hand-chat 채널)──┐
  └─ 교환 폴더 %USERPROFILE%\.claude-hand\exchange  (.unitypackage / .blend / .fbx + manifest, 30일 지나면 켤 때 정리)
 ```
 
-> 상태: **0.12.0.** Windows의 실제 Unity 6.3과 Blender 5.2에서 써 가며 확인했습니다([12단계](docs/TEST-RESULTS-12-WINDOWS.md), [13~21단계](docs/TEST-RESULTS-13-WINDOWS.md)). macOS·Linux에서는 자동 테스트만 돌렸습니다.
+> 상태: **0.12.1.** Windows의 실제 Unity 6.3과 Blender 5.2에서 써 가며 확인했습니다([12단계](docs/TEST-RESULTS-12-WINDOWS.md), [13~21단계](docs/TEST-RESULTS-13-WINDOWS.md)). macOS·Linux에서는 자동 테스트만 돌렸습니다.
 > 2026-11-10의 구조 개편([점검](docs/REVIEW-2026-11-10.md))과 그 뒤에 더한 기능(다시 보낸 모델을 제자리에서 바꾸기, Unity → Blender, 요청 기록, 중지 버튼)은 자동 테스트와, 창 없이 연 Unity·Blender에서 실제로 돌려 확인했습니다. 열린 창과 감독 세션이 있어야 볼 수 있는 것은 [TEST-PLAN](docs/TEST-PLAN.md) 22~26단계에 있습니다.
 
 ## 매일 쓰는 법
@@ -207,7 +207,7 @@ uv run tools/claude_hand.py update     # 하위 세션·감독 스킬·채팅 �
 | `ch_import_model` | Blender가 내보낸 FBX(또는 OBJ, GLB)를 `Assets/ClaudeHand/Imports/<이름>/` 아래로 가져와 씬에 배치합니다. **같은 .blend의 같은 오브젝트가 다시 오면 새로 넣지 않고 있던 모델 파일을 제자리에서 바꿉니다.** 씬과 프리팹에 놓인 것이 그 자리에서 새 모양이 됩니다. 바꾸기 전 파일은 `Library/ClaudeHand/replaced/`에 남습니다. `dry_run=true`로 어느 쪽이 될지 먼저 볼 수 있고, `new_copy=true`면 따로 한 벌을 넣습니다. `materials="project"`면 프로젝트에 같은 이름의 머티리얼이 하나 있을 때 그것으로 연결합니다. |
 | `ch_export_model` | 씬 오브젝트(ref)나 모델 에셋을 Blender(또는 다른 Unity 프로젝트)가 받을 모델 파일로 교환 폴더에 둡니다. 모델 파일(FBX, OBJ, GLB)에서 온 오브젝트는 그 파일을 가져올 때 모습 그대로 보냅니다. Unity에서 만든 메시는 프로젝트에 FBX Exporter 패키지(`com.unity.formats.fbx`)가 있을 때 FBX로 씁니다. 프로젝트는 바뀌지 않습니다. |
 | `ch_apply_settings` | Interaction Mode를 **No Throttling**으로 바꿉니다. Unity가 뒤에 있어도 명령을 처리하게 하는 설정입니다. 보기(`show`), 적용(`apply`), 되돌리기(`revert`)를 할 수 있습니다. 메뉴 **Tools > Claude Hand**에도 있습니다. |
-| `ch_checkpoint` | 요청마다 되돌리기 지점을 둡니다. 하위 세션이 그 요청의 첫 동작을 하기 직전에 저절로 찍히고, 채팅창의 **되돌리기** 버튼이나 `action=undo`로 그 지점 이후의 변경을 Unity Undo로 되돌립니다. 그 요청이 파일에 한 일도 함께 돌립니다: `ch_import_model`이 바꾼 모델 파일은 이전 것으로, `ch_import_model`·`ch_import_package`가 가져온 에셋은 휴지통으로. 그 밖에는 Undo에 남는 변경만 되돌아갑니다. |
+| `ch_checkpoint` | 요청마다 되돌리기 지점을 둡니다. 하위 세션이 그 요청에서 무언가를 바꾸는 첫 동작을 하기 직전에 저절로 찍히고(요청마다, 창마다 하나), 채팅창의 **되돌리기** 버튼이나 `action=undo`로 그 지점 이후의 변경을 Unity Undo로 되돌립니다. 읽기만 한 요청처럼 그 뒤로 바뀐 것이 없는 지점은 건너뜁니다. 그 요청이 파일에 한 일도 함께 돌립니다: `ch_import_model`이 바꾼 모델 파일은 이전 것으로 돌아가고, `ch_import_model`·`ch_import_package`가 가져온 에셋은 프로젝트에서 빠집니다(지우지 않고 `Library/ClaudeHand/removed`에 보관). 그 밖에는 Undo에 남는 변경만 되돌아갑니다. |
 | `ch_capture` | 씬 뷰를 지금 모습 그대로 PNG로 저장합니다(기즈모 없이). 씬은 바꾸지 않습니다. 채팅창의 결과 미리보기에 씁니다. |
 
 명령줄에서도 부를 수 있습니다. 예: `uv run tools/claude_hand.py unity-call MyGame ch_editor_status`
@@ -267,7 +267,7 @@ Blender 쪽 일은 MCP for Blender의 Python 실행 도구(`execute_code`)로 �
 ```powershell
 uv run tools/claude_hand.py selftest --unity-project "C:\경로\프로젝트"
 ```
-Unity를 창 없이 열어, Blender가 실제로 내보낸 모델을 받고, 같은 모델이 다시 왔을 때 제자리에서 바꾸고, 프로젝트 머티리얼에 연결하고, 다시 Blender로 보내는 것까지 확인합니다(2~3분). 요청을 되돌렸을 때 바뀐 파일이 돌아오고 들어온 에셋이 휴지통으로 가는지, 다른 프로젝트에서 온 패키지를 받고 되돌리는 것도 봅니다. 저장하지 않는 새 씬에서 하고, 만든 에셋은 끝나면 지웁니다. 바꾸기 전 파일 사본이 `Library/ClaudeHand/replaced/`에 몇 개 남고, 되돌리기를 확인하며 보낸 시험용 폴더 둘이 휴지통에 남습니다.
+Unity를 창 없이 열어, Blender가 실제로 내보낸 모델을 받고, 같은 모델이 다시 왔을 때 제자리에서 바꾸고, 프로젝트 머티리얼에 연결하고, 다시 Blender로 보내는 것까지 확인합니다(2~3분). 요청을 되돌렸을 때 바뀐 파일이 돌아오고 들어온 에셋이 프로젝트에서 빠지는지, 다른 프로젝트에서 온 패키지를 받고 되돌리는 것도 봅니다. 저장하지 않는 새 씬에서 하고, 만든 에셋은 끝나면 지웁니다. 바꾸기 전 파일 사본이 `Library/ClaudeHand/replaced/`에 몇 개 남고, 되돌리기를 확인하며 뺀 시험용 폴더 둘이 `Library/ClaudeHand/removed/`에 남습니다(둘 다 최근 10개만 남습니다).
 
 `sync`에 대해 알아둘 것:
 - 지금 쓰는 MCP 설정(`.mcp.json`, `~/.claude.json`, Claude Desktop 설정)을 찾아서 같은 방식으로 서버를 띄웁니다. Unity는 stdio와 HTTP 둘 다 됩니다.
@@ -315,7 +315,7 @@ Unity를 창 없이 열어, Blender가 실제로 내보낸 모델을 받고, 같
 - 같은 프로젝트나 같은 Blender 창에 하위 세션 둘을 동시에 붙이면 안 됩니다. 명령이 하나씩 처리되기 때문입니다. 감독 스킬에 이 규칙이 들어 있고, Claude Hand가 켜져 있는 동안에는 안전장치가 나중에 온 하위 세션의 호출을 막습니다.
 - Blender → Unity는 FBX라서 Blender 셰이더 노드가 그대로 옮겨지지 않습니다. 기본 색과 텍스처 정도만 옮겨지고, 복잡한 재질은 Unity에서 다시 손봐야 합니다. 프로젝트에 같은 이름의 머티리얼을 만들어 두고 `materials="project"`로 받으면, 다시 보낼 때마다 손볼 필요가 없습니다.
 - 다시 보낸 모델을 제자리에서 바꾸는 것은 **저장된 .blend**에서 **같은 오브젝트 이름**으로 보냈을 때만 됩니다. .blend를 다른 이름으로 저장했거나 옮겼거나 오브젝트 이름을 바꿨으면 새 모델로 들어옵니다. 모델 파일을 바꾼 것은 그 요청의 **되돌리기**로 돌아갑니다(바꾸기 전 파일이 다시 놓입니다). 바꾸기 전 파일은 `Library/ClaudeHand/replaced/`에 최근 10개까지 있어서, 그보다 오래된 것은 되돌리기로도 돌아오지 않습니다.
-- **되돌리기**가 파일까지 돌리는 것은 claude-hand의 가져오기 도구(`ch_import_model`, `ch_import_package`)가 한 일뿐입니다. MCP for Unity의 도구가 만들거나 고친 파일(스크립트, 머티리얼 에셋, 프리팹 파일)은 돌아가지 않습니다. 휴지통으로 간 에셋은 Unity의 다시 실행(Ctrl+Y)으로 돌아오지 않으니, 필요하면 휴지통에서 꺼냅니다.
+- **되돌리기**가 파일까지 돌리는 것은 claude-hand의 가져오기 도구(`ch_import_model`, `ch_import_package`)가 한 일뿐입니다. MCP for Unity의 도구가 만들거나 고친 파일(스크립트, 머티리얼 에셋, 프리팹 파일)은 돌아가지 않습니다. 되돌리기로 빠진 에셋은 Unity의 다시 실행(Ctrl+Y)으로 돌아오지 않습니다. 필요하면 그 프로젝트의 `Library/ClaudeHand/removed/<빠진 때>_<이름>/`에 있는 것을 `.meta`와 함께 `Assets` 아래 원래 자리로 옮기면 됩니다(최근 10개만 남습니다). Windows 휴지통을 쓰지 않는 이유는, 휴지통이 "바로 삭제"로 설정돼 있으면 그대로 사라지기 때문입니다.
 - Unity → Blender에서 모델 파일에서 온 오브젝트는 그 파일이 그대로 갑니다. 씬에서 바꾼 것(머티리얼 교체, 덧붙인 오브젝트, 위치)은 가지 않습니다. Unity에서 만든 메시는 FBX Exporter 패키지가 있어야 하고, 이 경로는 그 패키지의 소스를 보고 만들었을 뿐 실제로 돌려 보지는 않았습니다.
 - **중지** 버튼은 하위 세션의 다음 Unity·Blender 호출부터 막습니다. 이미 시작한 동작 하나(긴 가져오기 등)는 끝까지 갑니다. 중지는 그 요청에 답이 오면 풀리고, 답이 없어도 3분 뒤에는 풀립니다. 그 사이에 데스크톱 앱에서 다른 창에 시킨 일이 있으면 그 일도 함께 막힐 수 있습니다.
 - Blender 하위 세션이 처음 연결을 확인할 때와 `sync`·`doctor`가 파일 이름을 읽을 때, Blender 안에서 읽기 전용 Python(`print(bpy.data.filepath)`)이 실행됩니다.
