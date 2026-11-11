@@ -8,6 +8,7 @@ Each module uses only the ones above it in this list, and other modules' names t
   link        the low-level ways to things already running (home folder, chat server file, MCP for Blender's socket)
   eventlog    one line per thing that happened to a request, and reading them back (trace)
   overview    what goes on in each open window, in words (the panels' other windows, status)
+  looks       whether code about to run in Blender can only look (it needs no undo point then)
   settings    the small JSON files claude-hand keeps or edits
   discovery   finding the open Unity editors and Blender windows
   capture     a picture of what a window shows now
