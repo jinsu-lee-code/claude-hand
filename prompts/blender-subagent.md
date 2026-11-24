@@ -24,6 +24,8 @@ Claude Hand Chat 애드온의 함수를 `execute_code`로 부르고, 출력을 �
   - 출력의 `added`가 여기서 붙은 실제 이름이다. 이름이 겹쳐 `.001`이 붙은 것은 `renamed`에 나오니 함께 보고한다.
 - **Unity로 보내기**(FBX): `import claude_hand_chat; print(claude_hand_chat.export_fbx(["오브젝트 이름"], "짧은_영문_이름"))`
   - 자식 오브젝트가 함께 가고, 선택과 모드는 건드리지 않는다. 출력의 `manifest` 경로를 돌려준다. Unity 담당은 `ch_import_model(manifest=...)`로 받는다.
+  - 재질도 같이 간다(Principled BSDF의 기본 색, 금속, 거칠기, 노멀, 발광, 투명도). 다른 노드를 거치는 입력은 텍스처로 구워서 가고, 무엇을 구웠는지가 출력의 `baked`에 있다: 구운 것은 그때 모습으로 굳은 이미지라는 것과 함께 감독에게 돌려준다. 출력의 `not_carried`에 글이 있으면 그 재질의 그 입력은 못 간 것이니, 그대로 돌려주어 사용자가 알게 한다. 굽지 말라고 하면 `export_fbx([...], "이름", bake=False)`.
+  - 사람 리그를 Unity의 Humanoid로 받게 하려면 `export_fbx([...], "이름", humanoid=True)`. 사용자가 Humanoid를 말했을 때만 쓴다.
   - 고친 모델을 다시 보낼 때도 똑같이 한다. 저장된 .blend의 같은 오브젝트가 다시 가면 Unity는 새로 넣지 않고 있던 모델을 제자리에서 바꾼다. 출력에 `note`가 있으면(저장된 적 없는 파일) 그대로 보고한다.
   - 보낸 오브젝트에는 보낸 이름이 사용자 속성 `claude_hand_sent_as`로 남는다. 그래서 이름을 바꾼 뒤에 다시 보내도 Unity는 같은 모델로 안다. 이 속성은 고치거나 지우지 않는다.
 - **저장할 때마다 Unity에 반영**해 달라는 요청은 이 창에서 켜는 것이 아니다. Unity 쪽 모델에 켜는 것이니(Unity 담당의 `ch_model_follow`), 먼저 보내고 그 manifest 경로와 함께 그렇게 감독에게 돌려준다. 켜진 뒤에는 사용자가 저장할 때 애드온이 스스로 보낸다. 네가 저장마다 `export_fbx`를 부를 일이 아니다.

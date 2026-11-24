@@ -47,8 +47,11 @@ namespace ClaudeHand.Editor
             [ChParameter("Import as a separate new model even though this project already has one from the same source (default false). Later re-sends leave the copy alone.", Required = false)]
             public bool? new_copy { get; set; }
 
-            [ChParameter("embedded: keep the materials that come inside the model file. project: where this project has exactly one material of the same name, use that one instead. Default: embedded for a new model; for one replaced in place, what was chosen when it first came.", Required = false)]
+            [ChParameter("embedded: the model's own materials. For a manifest from Blender (0.17 and later) they are made from what it says of each material (colour, metallic, roughness, normal, emission and their images), as this project's kind of material, in Materials/ and Textures/ next to the model; one that was edited here since is left alone. project: where this project has exactly one material of the same name, use that one instead. Default: embedded for a new model; for one replaced in place, what was chosen when it first came.", Required = false)]
             public string materials { get; set; }
+
+            [ChParameter("humanoid: set the rig up as Unity's Humanoid (the bones must be a person's, in T-pose; falls back to generic with a warning when Unity finds no match). generic: Unity's Generic. Default: what the manifest says, else as the model is.", Required = false)]
+            public string rig { get; set; }
 
             [ChParameter("Only report whether this would add a new model or replace one in place, and which; change nothing (default false).", Required = false)]
             public bool? dry_run { get; set; }
@@ -62,6 +65,17 @@ namespace ClaudeHand.Editor
             public string Name;
             public string Source;  // null: unknown (an unsaved .blend), so it never counts as a re-send
             public List<string> Roots = new List<string>();
+
+            // What a manifest from Blender says besides the file (0.17 and later; see ChModelLook).
+            public string Axes;           // "blender": the file is in Blender's own axes, and Unity is to bake the conversion
+            public string Rig;            // "humanoid" / "generic"; null: as the model is set
+            public JArray Materials;      // what each material is made of
+            public string MaterialsHash;  // of that, images included: what a model that follows is compared by
+            public string TexturesDir;    // where the materials' image files are
+            public List<string> NotCarried = new List<string>();  // what of the materials Blender could not put into words
+            public Dictionary<string, string> Clips;  // take name -> clip name, of the takes that are this model's; null: all
+            public List<string> Baked = new List<string>();  // the material inputs that came as an image baked from their nodes
+            public JObject Check;  // where each object is and how far each mesh reaches, as Blender measured (ChModelLook.ShapeCheck)
         }
 
         /// <summary>
@@ -81,6 +95,17 @@ namespace ClaudeHand.Editor
             /// </summary>
             [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
             public bool follow;
+
+            /// <summary>The manifest's hash of the materials this model has now (Blender compares its own with it).</summary>
+            [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+            public string materials_hash;
+
+            /// <summary>
+            /// The materials made for this model from the manifest: name -> hash of the .mat as it was written. One
+            /// whose file differs from that has been edited in this project since, and is not written over.
+            /// </summary>
+            [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+            public Dictionary<string, string> generated;
         }
 
         public static object HandleCommand(JObject @params)
@@ -103,7 +128,14 @@ namespace ClaudeHand.Editor
                 return ChErrors.Make(ChErrors.InvalidArgs, "materials must be embedded or project.", "after_fix");
             }
 
+            var rig = (p.rig ?? string.Empty).Trim().ToLowerInvariant();
+            if (rig.Length > 0 && rig != "humanoid" && rig != "generic")
+            {
+                return ChErrors.Make(ChErrors.InvalidArgs, "rig must be humanoid or generic.", "after_fix");
+            }
+
             if (!TryResolveModel(p.manifest, out var incoming, out var resolveError)) return resolveError;
+            if (rig.Length > 0) incoming.Rig = rig;  // the caller's word over the manifest's
 
             var busy = ChErrors.BusyIfCompiling();
             if (busy != null) return busy;
@@ -175,9 +207,15 @@ namespace ClaudeHand.Editor
             var importer = AssetImporter.GetAtPath(assetPath);
             var record = ReadRecord(importer);
             var mode = materials.Length > 0 ? materials : record?.materials ?? "embedded";
-            bool dirty = false;
+            bool dirty = ChModelLook.Settings(importer as ModelImporter, incoming);
             var materialReport = mode == "project" ? UseProjectMaterials(importer as ModelImporter, model, assetPath, warnings, ref dirty) : null;
             var unlinked = new List<string>();
+            var generated = record?.generated;
+            object made = null;
+            if (mode == "embedded" && record?.materials != "project")
+            {
+                generated = ChModelLook.Materials(importer as ModelImporter, incoming, assetPath, generated, warnings, ref dirty, out made);
+            }
             if (mode == "embedded" && record?.materials == "project" && importer is ModelImporter linked)
             {
                 // Asked to go back to the model's own materials: drop the links an earlier materials=project made.
@@ -188,18 +226,23 @@ namespace ClaudeHand.Editor
                     unlinked.Add(id.name);
                 }
                 materialReport = new { mode = "embedded", linked = new List<object>(), unmatched = new List<string>(), ambiguous = new List<object>(), unlinked };
+                // The model's own materials again, made from the manifest like a new model's.
+                generated = ChModelLook.Materials(importer as ModelImporter, incoming, assetPath, generated, warnings, ref dirty, out made);
             }
             if (incoming.Source != null && p.new_copy != true)
             {
                 dirty |= WriteRecord(importer, model, new Record { source = incoming.Source, roots = incoming.Roots, materials = mode,
-                                                                   follow = follow || record?.follow == true }, warnings);
+                                                                   follow = follow || record?.follow == true, generated = generated,
+                                                                   materials_hash = incoming.MaterialsHash ?? record?.materials_hash }, warnings);
             }
             if (dirty)
             {
                 importer.SaveAndReimport();
+                if (ChModelLook.RigFailed(importer as ModelImporter, assetPath, warnings)) importer.SaveAndReimport();
                 model = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
             }
 
+            var shape = ChModelLook.ShapeCheck(incoming, assetPath, warnings);
             bool updated = existing != null;
             var uses = updated ? InstancesInOpenScenes(model) : new List<GameObject>();
             bool place = p.place ?? uses.Count == 0;
@@ -212,6 +255,14 @@ namespace ClaudeHand.Editor
                     ? (GameObject)PrefabUtility.InstantiatePrefab(model, parent)
                     : (GameObject)PrefabUtility.InstantiatePrefab(model, scene);
                 Undo.RegisterCreatedObjectUndo(instance, "Claude Hand import model");
+                var controller = updated ? null : ChModelLook.Controller(assetPath);
+                if (controller != null)
+                {
+                    // A model with clips, placed for the first time: it moves when the scene runs.
+                    var animator = instance.GetComponent<Animator>();
+                    if (animator == null) animator = Undo.AddComponent<Animator>(instance);
+                    if (animator.runtimeAnimatorController == null) animator.runtimeAnimatorController = controller;
+                }
                 EditorSceneManager.MarkSceneDirty(instance.scene);
                 var hierarchyPath = ChRefs.HierarchyPath(instance.transform);
                 placed = new { @ref = builder.Add(instance, hierarchyPath), name = instance.name, path = hierarchyPath };
@@ -259,6 +310,13 @@ namespace ClaudeHand.Editor
                 instances,
                 instance_count = uses.Count,
                 materials = materialReport,
+                materials_made = made,
+                // What Blender could not say of the materials (an input fed through other nodes): tell the user.
+                not_carried = incoming.NotCarried,
+                // Material inputs that came as an image baked from their nodes: as the nodes were then, no longer nodes.
+                baked = incoming.Baked,
+                // The imported model held against what Blender measured: same, or which parts differ.
+                shape_check = shape,
                 warnings,
             });
         }
@@ -267,9 +325,11 @@ namespace ClaudeHand.Editor
         /// The model at `assetPath` gets the file that came in, in place, because its .blend was saved (ch_model_follow
         /// update). That is the user's own doing, not a request's: nothing is noted for an undo, nothing is placed in
         /// the scene, and the file it replaces is kept apart from the requests' files. Returns where that file is kept.
+        /// `materials`: which materials were made and which were left as edited here (null when none came along).
         /// </summary>
-        internal static string ReplaceFollowed(Incoming incoming, string assetPath, List<string> warnings)
+        internal static string ReplaceFollowed(Incoming incoming, string assetPath, List<string> warnings, out object materials)
         {
+            materials = null;
             using (ChCheckpoint.UsersOwn(assetPath))
             {
                 var target = Path.Combine(ChPaths.ProjectRoot, assetPath);
@@ -278,12 +338,25 @@ namespace ClaudeHand.Editor
                 AssetDatabase.ImportAsset(assetPath, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
                 var importer = AssetImporter.GetAtPath(assetPath);
                 var model = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
-                if (model != null && ReadRecord(importer)?.materials == "project")
+                var record = ReadRecord(importer);
+                if (model == null || record == null) return previous;
+                bool dirty = ChModelLook.Settings(importer as ModelImporter, incoming);
+                if (record.materials == "project")
                 {
                     // A material the model has only now gets its project material too, as chosen when the model first came.
-                    bool dirty = false;
                     UseProjectMaterials(importer as ModelImporter, model, assetPath, warnings, ref dirty);
-                    if (dirty) importer.SaveAndReimport();
+                }
+                else
+                {
+                    record.generated = ChModelLook.Materials(importer as ModelImporter, incoming, assetPath, record.generated, warnings, ref dirty,
+                                                             out materials, ChCheckpoint.AlsoUsersOwn);
+                }
+                record.materials_hash = incoming.MaterialsHash ?? record.materials_hash;
+                dirty |= WriteRecord(importer, model, record, warnings);
+                if (dirty)
+                {
+                    importer.SaveAndReimport();
+                    if (ChModelLook.RigFailed(importer as ModelImporter, assetPath, warnings)) importer.SaveAndReimport();
                 }
                 return previous;
             }
@@ -381,11 +454,14 @@ namespace ClaudeHand.Editor
                 return null;
             }
 
+            // The materials made for this model from its manifest (ChModelLook) are its own, like the ones inside the file.
+            var own = (Path.GetDirectoryName(assetPath)?.Replace('\\', '/') ?? "Assets") + "/Materials/";
             var byName = new Dictionary<string, List<string>>(StringComparer.Ordinal);
             foreach (var guid in AssetDatabase.FindAssets("t:Material", new[] { "Assets" }))
             {
                 var path = AssetDatabase.GUIDToAssetPath(guid);
                 if (!path.EndsWith(".mat", StringComparison.OrdinalIgnoreCase)) continue;  // materials inside other models do not count
+                if (path.StartsWith(own, StringComparison.Ordinal)) continue;
                 var key = Path.GetFileNameWithoutExtension(path);
                 if (!byName.TryGetValue(key, out var paths)) byName[key] = paths = new List<string>();
                 if (!paths.Contains(path)) paths.Add(path);
@@ -398,7 +474,7 @@ namespace ClaudeHand.Editor
             foreach (var material in used)
             {
                 var from = AssetDatabase.GetAssetPath(material);
-                if (!string.Equals(from, assetPath, StringComparison.Ordinal))
+                if (!string.Equals(from, assetPath, StringComparison.Ordinal) && !from.StartsWith(own, StringComparison.Ordinal))
                 {
                     // Linked when the model came before. (Unity's built-in default material is neither: the model named none.)
                     if (from.StartsWith("Assets/", StringComparison.Ordinal)) linked.Add(new { name = material.name, to = from });
@@ -485,6 +561,18 @@ namespace ClaudeHand.Editor
                 var source = manifest.Value<string>("source");
                 incoming.Source = string.IsNullOrWhiteSpace(source) ? null : ChPaths.ToPosix(source.Trim());
                 incoming.Roots = (manifest["roots"] as JArray)?.Select(r => r.ToString()).OrderBy(r => r, StringComparer.Ordinal).ToList() ?? new List<string>();
+                incoming.Axes = manifest.Value<string>("axes");
+                incoming.Rig = manifest.Value<string>("rig");
+                incoming.Materials = manifest["materials"] as JArray;
+                incoming.MaterialsHash = manifest.Value<string>("materials_hash");
+                var textures = manifest.Value<string>("textures_dir");
+                incoming.TexturesDir = string.IsNullOrEmpty(textures) ? null : Path.Combine(Path.GetDirectoryName(path) ?? string.Empty, textures);
+                incoming.NotCarried = (manifest["not_carried"] as JArray)?.Select(n => n.ToString()).ToList() ?? new List<string>();
+                incoming.Baked = (manifest["baked"] as JArray)?.Select(n => n.ToString()).ToList() ?? new List<string>();
+                incoming.Check = manifest["check"] as JObject;
+                incoming.Clips = (manifest["clips"] as JArray)?.OfType<JObject>()
+                    .Where(c => !string.IsNullOrEmpty(c.Value<string>("take")) && !string.IsNullOrEmpty(c.Value<string>("name")))
+                    .GroupBy(c => c.Value<string>("take")).ToDictionary(g => g.Key, g => g.First().Value<string>("name"));
             }
             else
             {

@@ -408,6 +408,12 @@ namespace ClaudeHand.Editor
             return new UnnotedScope();
         }
 
+        /// <summary>Inside a UsersOwn scope: this asset is written as part of the same doing (a followed model's material or image).</summary>
+        internal static void AlsoUsersOwn(string assetPath)
+        {
+            UsersOwnPaths[assetPath] = Now + QuietSeconds;
+        }
+
         /// <summary>The user's own doing replaced an asset a short while ago (and Unity may still be telling of it).</summary>
         private static bool UsersOwnLately()
         {
@@ -698,6 +704,9 @@ namespace ClaudeHand.Editor
         /// <summary>Moves a file or a folder, and the .meta next to it. All or nothing: a file in use leaves both where they were.</summary>
         private static void Move(string source, string target)
         {
+            // Unity keeps the file of an asset it has read open for a while (a model's .controller, read anew by the
+            // Undo just before when the model was imported again since): a folder with such a file cannot be moved.
+            AssetDatabase.ReleaseCachedFileHandles();
             bool meta = File.Exists(source + ".meta");
             if (meta)
             {

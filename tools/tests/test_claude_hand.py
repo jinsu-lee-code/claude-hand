@@ -609,6 +609,32 @@ class SetupHelperTests(unittest.TestCase):
         self.assertEqual(handlib.install.node_major("v22.3.0"), 22)
         self.assertIsNone(handlib.install.node_major(None))
 
+    def test_doctor_starts_the_unity_server_and_says_why_it_did_not_come_up(self):
+        """A Unity subagent starts this server for itself; when it cannot, the subagent only lacks tools and nothing says why."""
+        cfg = handlib.discovery.ServerConfig(transport="stdio", command="uvx", origin="test",
+                                             args=["--offline", "--from", "mcpforunityserver==10.3.0", "mcp-for-unity"])
+        ran = []
+
+        def run(code, err=""):
+            return lambda command, **kwargs: ran.append(command) or unittest.mock.Mock(returncode=code, stdout="", stderr=err)
+
+        self.assertEqual(handlib.checks.unity_server_starts(cfg, run(0), lambda: False), (True, "뜸", ""))
+        self.assertEqual(ran[-1], ["uvx", "--offline", "--from", "mcpforunityserver==10.3.0", "mcp-for-unity", "--help"])  # talks to no Unity
+        failed = "error: Failed to install: pywin32\n  cause: failed to remove directory `x`: (os error 32)"
+        ok, seen, fix = handlib.checks.unity_server_starts(cfg, run(2, failed), lambda: False)
+        self.assertEqual((ok, seen), (False, "cause: failed to remove directory `x`: (os error 32)"))
+        self.assertIn("터미널에서 직접 실행", fix)
+        ok, seen, fix = handlib.checks.unity_server_starts(cfg, run(2, failed), lambda: True)  # asked from inside the desktop app
+        self.assertIn("Claude 데스크톱 앱이 띄운 것이라", fix)
+        self.assertIn("uvx --offline --from mcpforunityserver==10.3.0 mcp-for-unity --help", fix)
+
+        def missing(command, **kwargs):
+            raise FileNotFoundError("uvx")
+        self.assertEqual(handlib.checks.unity_server_starts(cfg, missing, lambda: False)[0], False)
+        # Asked only by the doctor command: a check that is put together from parts starts nothing.
+        import inspect
+        self.assertIsNone(inspect.signature(handlib.checks.doctor_checks).parameters["server_starts"].default)
+
     def test_doctor_reports_gaps_with_fixes(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
@@ -1505,9 +1531,24 @@ class StartCommandTests(unittest.TestCase):
     def test_window_commands(self):
         calls = []
         popen = lambda cmd, **kw: calls.append((cmd, kw.get("creationflags", 0)))
-        self.assertEqual(handlib.launch.open_start_window(Path("C:/ch/start-supervisor.cmd"), "win32", popen)[:4], ["cmd.exe", "/c", "start", "Claude Hand"])
+        script = Path("C:/ch/start-supervisor.cmd")
+        self.assertEqual(handlib.launch.open_start_window(script, "win32", popen, contained=False)[:4], ["cmd.exe", "/c", "start", "Claude Hand"])
         self.assertEqual(handlib.launch.open_start_window(Path("/ch/start-supervisor.sh"), "darwin", popen)[:3], ["open", "-a", "Terminal"])
         self.assertEqual(len(calls), 2)
+        # Started from inside a packaged app (the Claude desktop app): the shell opens the window, not this process, or the
+        # supervisor and all it starts would be in the app's container, where uv cannot build an environment.
+        self.assertEqual(handlib.launch.open_start_window(script, "win32", popen, contained=True), ["explorer.exe", str(script)])
+        self.assertEqual(calls[-1], (["explorer.exe", str(script)], 0))
+        self.assertEqual(handlib.launch.open_start_window(Path("/ch/start-supervisor.sh"), "darwin", popen, contained=True)[:3], ["open", "-a", "Terminal"])
+
+    def test_a_process_outside_a_packaged_app_is_not_taken_for_one_inside(self):
+        self.assertFalse(handlib.launch.inside_app_container(env={}))  # nowhere to look: not said to be inside
+        if sys.platform != "win32":
+            self.assertFalse(handlib.launch.inside_app_container())
+        with tempfile.TemporaryDirectory() as tmp:  # a folder of our own is where it says it is, on every system
+            if sys.platform == "win32":
+                self.assertFalse(handlib.launch.inside_app_container(env={"APPDATA": tmp}))
+                self.assertEqual(list(Path(tmp).iterdir()), [])  # the folder it made to ask is gone again
 
     def test_minimize_switch(self):
         with tempfile.TemporaryDirectory() as tmp:

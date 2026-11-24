@@ -26,6 +26,9 @@
 - 보낼 때: 스냅샷으로 ref 확인 → `ch_export_objects(refs=[...], name="...")` → 결과의 `manifest_path`를 그대로 감독에게 돌려준다.
 - 받을 때: `ch_import_package(manifest=..., dry_run=true)`로 먼저 확인한다. `would_overwrite`, `same_guid_elsewhere`, `missing_packages`, `warnings` 중 하나라도 있으면 멈추고 감독에게 그대로 보고한다. 문제가 없으면 `dry_run` 없이 실행하고, 결과의 `placed` ref를 보고한다.
 - Blender가 보낸 모델(`claude-hand/model@1` manifest, FBX)을 받을 때: `ch_import_model(manifest=...)`. 결과의 `placed` ref와 `warnings`를 보고한다.
+  - 재질은 manifest가 적어 온 대로 이 프로젝트의 재질로 만들어져 모델 옆 `Materials/`, `Textures/`에 놓인다(결과의 `materials_made`). 결과의 `not_carried`에 글이 있으면 Blender에서 못 옮긴 재질 입력이니 그대로 보고한다. `baked`에 있는 것은 노드를 텍스처로 구워 온 입력이다(그때 모습으로 굳은 이미지). 이 프로젝트에서 고친 재질은 다시 받아도 덮어쓰지 않는다(`warnings`에 나온다).
+  - 결과의 `shape_check`는 가져온 모델이 Blender가 잰 자리 · 크기와 같은지다. `same`이 false면 `differing`(다르게 놓였거나 크기가 다른 부품)과 `missing`(안 온 부품)을 그대로 보고한다. 그냥 넘어가지 않는다.
+  - 사람 리그를 Humanoid로 받으라고 하면 `rig="humanoid"`. 맞추지 못해 Generic으로 받았으면 `warnings`에 나오니 그대로 보고한다.
   - 같은 .blend의 같은 오브젝트가 다시 오면 새로 넣지 않고, 프로젝트에 있던 모델 파일을 제자리에서 바꾼다(결과의 `updated`가 true). 씬과 프리팹에 놓인 것은 그 자리에서 새 모양이 된다. `asset_path`, `instance_count`, `instances`를 보고한다. 이 파일 교체도 되돌리기로 돌아간다(바꾸기 전 파일이 다시 놓인다). `previous_file`(바꾸기 전 파일이 보관된 곳)도 함께 보고한다.
   - 따로 한 벌이 더 필요하다고 했을 때만 `new_copy=true`를 쓴다.
   - 프로젝트에 있는 같은 이름의 머티리얼을 쓰라는 요청이나 이 프로젝트의 규칙이 있으면 `materials="project"`를 넣는다. 결과의 `materials`에서 `linked`(연결됨), `unmatched`(프로젝트에 없어 모델 것을 씀), `ambiguous`(같은 이름이 둘 이상이라 그대로 둠)를 보고한다. 모델 안의 머티리얼로 되돌리라는 요청이면 `materials="embedded"`를 넣고, 결과의 `unlinked`(풀린 연결)를 보고한다.

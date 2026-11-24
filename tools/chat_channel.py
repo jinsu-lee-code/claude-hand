@@ -114,6 +114,14 @@ SEEN_SECONDS = 90.0    # a panel asks for news every MAX_WAIT_SECONDS at the lat
 # How long a request's line of time and tokens waits for the supervisor's turn to end (see check_costs). In a real
 # session the end showed 6 seconds after the answer as a rule, and after 60 when the turn went on with another request.
 COST_WAIT = 90.0
+# A message for the supervisor waits while its turn goes on (see deliver). REST: how long its transcript must have
+# shown the turn over, so that a turn which starts right behind it (a subagent's report that was waiting) shows
+# first. ARRIVAL: how long something on its way to the supervisor (a message just handed over, the report of a
+# subagent that just stopped) counts as a turn going on before the transcript shows it. HOLD: the longest a message
+# waits whatever the transcript says; late and maybe mid-turn is better than never.
+REST_SECONDS = 1.5
+ARRIVAL_SECONDS = 20.0
+HOLD_SECONDS = 45.0
 OFFER_SECONDS = 24 * 3600.0  # how long a panel offers to undo, in the other windows too, a request that changed them
 UNDO_SECONDS = 90.0    # how long one window may take to undo a request (a Unity project reads its restored files again)
 
@@ -300,6 +308,11 @@ class ChatHub:
         self.ledger = None           # usage.Ledger over that transcript, from when this server started
         self.costs: dict[str, dict] = {}  # request id -> {"chat", "asked", "answered", "actions"}: answered, tokens still to come
         self.show_cost = True        # the line in the panel (config.json "show_cost": false leaves it to trace and usage)
+        # Messages for the supervisor that wait for its turn to end (deliver, check_held), oldest first.
+        self.held: list[dict] = []   # {"since", "notification"}
+        self.handed_at = 0.0         # when a message last went to the supervisor
+        self.agent_stop_at = 0.0     # when a subagent last stopped: its report is on its way to the supervisor
+        self.reading = threading.Lock()  # one reader of the transcripts at a time (the watcher, and whoever delivers)
 
     def _log(self, event: str, **fields) -> None:
         """One line in the event log, for `claude_hand.py trace`. Never in the way of the chat."""
@@ -385,7 +398,7 @@ class ChatHub:
             # until the subagent there stops, or shows no sign of life for as long as two subagents are kept apart.
             given = self._assignment(window, now)
             if given is not None and given["item"] is not item and now - given["ts"] <= LOCK_SECONDS:
-                other = " ".join(str((given["item"] or {}).get("text", "")).split())[:40]
+                other = " ".join(str((given["item"] or {}).get("text", "")).split())[:40].rstrip()
                 self._log("refused", request=request, chat_id=window, tool="(맡기기)", reason="그 창이 다른 요청으로 일하는 중" +
                           (f" ({other})" if other else ""))
                 return {"ours": True, "chat_id": window, "busy": True, "other": other}
@@ -576,7 +589,7 @@ class ChatHub:
         self._log("message", request=request, chat_id=chat_id, app=app, window=window, agent=agent or "none",
                   text=eventlog.short(text), delivered=ready)
         if ready:
-            self.emit(notification)
+            self.deliver(notification)
         return {"chat_id": chat_id, "agent": agent, "delivered": ready}
 
     def mark_initialized(self) -> None:
@@ -585,7 +598,70 @@ class ChatHub:
             self.initialized = True
             backlog, self.backlog = self.backlog, []
         for notification in backlog:
-            self.emit(notification)
+            self.deliver(notification)
+
+    def _supervisor_resting(self, now: float) -> bool:
+        """Whether a message handed to the supervisor now would start a turn of its own. Read from its transcript
+        (handlib/usage.py, Ledger.resting), plus what the channel knows is on its way there and the transcript does
+        not show yet. True when there is no transcript to go by. Called without the lock: it reads files."""
+        try:
+            ledger = self._ledger()
+            if ledger is None:
+                return True
+            with self.reading:
+                ledger.update()
+                over, at = ledger.resting()
+        except Exception as exc:  # a transcript that cannot be read must not keep the user's messages back
+            log("could not read the supervisor's transcript:", exc)
+            return True
+        coming = max(self.handed_at, self.agent_stop_at)
+        if not over or (coming > at and now - coming < ARRIVAL_SECONDS):
+            return False
+        return now - at >= REST_SECONDS
+
+    def deliver(self, notification: dict) -> bool:
+        """Hand a channel message to the supervisor: now when it is at rest, else once its turn is over (check_held).
+        Claude Code slips a message that arrives during a turn into that turn, next to whatever else arrives there
+        (a subagent's report, marked as no input of the user's), and the supervisor then does not take it for the
+        user's word: it answered "보낸 것으로 확인되지 않았다, 다시 보내 달라" to a request sent right after a result
+        (2026-11-24). Arriving between turns, the message starts a turn as the panel's own. Returns whether it went
+        now."""
+        now = time.time()
+        with self.cond:
+            waiting = bool(self.held)
+        resting = not waiting and self._supervisor_resting(now)
+        meta = notification["params"]["meta"]
+        with self.cond:
+            if self.held or not resting:  # behind the ones already waiting: in the order they were sent
+                self.held.append({"since": now, "notification": notification})
+                self._log("held", request=meta.get("request", ""), chat_id=meta.get("chat_id", ""),
+                          text="감독이 차례 중이라, 차례가 끝나면 넘김")
+                return False
+            self.handed_at = now
+        self.emit(notification)
+        return True
+
+    def check_held(self, now: float | None = None) -> int:
+        """Hand over the oldest message that waits for the supervisor's turn to end, once it has ended, or once the
+        message has waited HOLD_SECONDS. One at a time: the next waits for the turn this one starts. One pass (watch
+        repeats). Returns how many went (0 or 1)."""
+        now = now or time.time()
+        with self.cond:
+            if not self.held or not self.initialized:
+                return 0
+            waited = now - self.held[0]["since"]
+        if waited < HOLD_SECONDS and not self._supervisor_resting(now):
+            return 0
+        with self.cond:
+            if not self.held:
+                return 0
+            entry = self.held.pop(0)
+            self.handed_at = now
+            meta = entry["notification"]["params"]["meta"]
+            self._log("released", request=meta.get("request", ""), chat_id=meta.get("chat_id", ""),
+                      text=f"{now - entry['since']:.1f}초 기다림" + ("" if waited < HOLD_SECONDS else " (차례가 끝나지 않아 그냥 넘김)"))
+        self.emit(entry["notification"])
+        return 1
 
     def known_chat(self, chat_id: str) -> bool:
         """A chat a panel has used, or a window's subagent (so work asked in the Claude app can be recorded there)."""
@@ -771,7 +847,7 @@ class ChatHub:
                 self._log("reminder", request=request.get("request", ""), chat_id=chat_id,
                           text="하위 세션이 멈춘 뒤 답이 없음" if worked else "하위 세션이 일한 흔적이 없음")
         for notification in reminders:
-            self.emit(notification)
+            self.deliver(notification)
         return [n["params"]["meta"]["chat_id"] for n in reminders]
 
     def _ledger(self):
@@ -809,7 +885,8 @@ class ChatHub:
         try:
             ledger = self._ledger()
             if ledger is not None:
-                ledger.update()
+                with self.reading:
+                    ledger.update()
         except Exception as exc:  # a transcript that cannot be read costs the tokens, not the line
             log("could not read the transcripts:", exc)
             ledger = None
@@ -837,7 +914,7 @@ class ChatHub:
 
     def watch(self, interval: float = 2.0) -> None:
         while True:
-            for check in (self.check_dialogs, self.check_unanswered, self.check_costs):
+            for check in (self.check_held, self.check_dialogs, self.check_unanswered, self.check_costs):
                 try:
                     check()
                 except Exception as exc:  # never let the watcher die
@@ -1054,7 +1131,7 @@ class ChatHub:
                         self._bump_progress(asker)  # the asking panel now offers to undo this window as well
             entry.update(tool=tool[:80], detail=detail[:120], actions=entry["actions"] + 1, updated=now)
             self._bump_progress(agent.name)
-            label = " ".join(str(asked.get("text", "")).split())[:40] if asked is not None and first else ""
+            label = " ".join(str(asked.get("text", "")).split())[:40].rstrip() if asked is not None and first else ""
             key = str(asked.get("request") or f"item-{asked['seq']}") if known else f"bar-{int(entry['started'] * 1000)}"
             self._log("action", request=self._request_for(agent.name), chat_id=agent.name, pin=pin, tool=tool[:80], detail=detail[:120],
                       agent_id=agent_id, first=first or None)
@@ -1067,6 +1144,7 @@ class ChatHub:
         if agent is None:
             return None
         with self.cond:
+            self.agent_stop_at = time.time()  # the supervisor is about to be told: a turn of its own is starting
             worker = self.workers.get(agent.name)
             if worker and worker["agent_id"] in ("", agent_id) and not worker["stopped"]:
                 worker["stopped"] = time.time()
@@ -1119,7 +1197,7 @@ class ChatHub:
             if not ready:
                 self.backlog.append(notification)
         if ready:
-            self.emit(notification)
+            self.deliver(notification)
         return {"chat_id": chat_id, "stopping": True}
 
     def _stop_for(self, chat_id: str, now: float) -> str | None:
@@ -1163,7 +1241,7 @@ class ChatHub:
             others = [w for w in item.get("points") or [] if w != chat_id] if item.get("kind") == "user" else []
             if others:
                 names = item.get("point_names") or {}
-                return {"request": str(item.get("request", "")), "label": " ".join(str(item.get("text", "")).split())[:40],
+                return {"request": str(item.get("request", "")), "label": " ".join(str(item.get("text", "")).split())[:40].rstrip(),
                         "ts": item["ts"], "windows": [names.get(w) or self._window_name(w) for w in others]}
         return None
 
@@ -1198,7 +1276,7 @@ class ChatHub:
             if key in self.undoing:
                 return {"ok": False, "reason": "running"}
             self.undoing.add(key)
-            label = " ".join(str(item.get("text", "")).split())[:40]
+            label = " ".join(str(item.get("text", "")).split())[:40].rstrip()
             now, names = time.time(), item.get("point_names") or {}
             targets = [(window, names.get(window) or self._window_name(window),
                         self._state(window, now)["state"] in ("working", "stopping", "dialog"))
@@ -1276,7 +1354,7 @@ class ChatHub:
     def _open_request(self, chat_id: str) -> str:
         """The panel message still waiting for its result, in a few words ("" when the request came from elsewhere)."""
         item = self._asking(chat_id, time.time())
-        return " ".join(str(item.get("text", "")).split())[:40] if item else ""
+        return " ".join(str(item.get("text", "")).split())[:40].rstrip() if item else ""
 
     def _current_progress(self, chat_id: str) -> dict | None:
         entry = self.progress.get(chat_id)
@@ -1760,6 +1838,9 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", newline="\n")
         sys.stdin.reconfigure(encoding="utf-8")
+        # What is said on stderr holds Korean too. Left to the system's code page (cp949 here), whoever reads it as
+        # UTF-8 (Claude Code's log, the tests) gets bytes it cannot read.
+        sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
     if "--check" in argv:
         result = self_check()
         print(json.dumps(result, ensure_ascii=False))

@@ -128,6 +128,7 @@ namespace ClaudeHand.Editor
                     here,
                     // What Blender compares its own export with, to know whether there is anything to send.
                     file_hash = here && found.Value.follow ? FileHash(found.Key) : null,
+                    materials_hash = here && found.Value.follow ? found.Value.materials_hash ?? string.Empty : null,
                     instances = here ? ChImportModel.InstancesInOpenScenes(AssetDatabase.LoadAssetAtPath<GameObject>(found.Key)).Count : 0,
                 });
             }
@@ -181,22 +182,26 @@ namespace ClaudeHand.Editor
             {
                 return new ChSuccess($"{existing} does not follow its .blend; nothing was changed.", new { state = "off", asset_path = existing });
             }
-            if (ChCheckpoint.Same(incoming.ModelPath, Path.Combine(ChPaths.ProjectRoot, existing)))
+            var had = ChImportModel.ReadRecord(AssetImporter.GetAtPath(existing));
+            if (ChCheckpoint.Same(incoming.ModelPath, Path.Combine(ChPaths.ProjectRoot, existing)) &&
+                (incoming.MaterialsHash == null || incoming.MaterialsHash == had?.materials_hash))
             {
                 return new ChSuccess($"{existing} is what was sent already.", new { state = "unchanged", asset_path = existing });
             }
 
             var warnings = new List<string>();
             string previous;
+            object made;
             try
             {
-                previous = ChImportModel.ReplaceFollowed(incoming, existing, warnings);
+                previous = ChImportModel.ReplaceFollowed(incoming, existing, warnings, out made);
             }
             catch (Exception ex)
             {
                 return ChErrors.Make(ChErrors.Failed, "Could not replace the model: " + ex.Message, "check_first",
                     $"Look at {existing} before trying again.");
             }
+            var shape = ChModelLook.ShapeCheck(incoming, existing, warnings);
             int uses = ChImportModel.InstancesInOpenScenes(AssetDatabase.LoadAssetAtPath<GameObject>(existing)).Count;
             var blend = Path.GetFileName(incoming.Source ?? string.Empty);
             // Mostly a save; also the state after a 되돌리기 in Blender, or what was saved while this editor was closed.
@@ -206,7 +211,8 @@ namespace ClaudeHand.Editor
                 $"{blend} {why} → {Path.GetFileName(existing)} 반영" + (uses > 0 ? $" (씬 오브젝트 {uses}개)" : string.Empty),
                 $"[이 프로젝트의 모델 {existing}이(가) Blender의 {blend} 저장을 따라 바뀌었음 ({why}, Claude를 거치지 않음)]");
             return new ChSuccess($"Replaced {existing} with what {blend} holds now.",
-                new { state = "updated", asset_path = existing, instance_count = uses, previous_file = previous, warnings });
+                new { state = "updated", asset_path = existing, instance_count = uses, previous_file = previous, materials_made = made,
+                      shape_check = shape, warnings });
         }
 
         private static object Receive(Parameters p)

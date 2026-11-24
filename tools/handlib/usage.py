@@ -238,6 +238,7 @@ class Ledger:
         self.requests: dict[str, dict[str, dict]] = {}  # request id ("" for none) -> who -> blank()
         self._supervisor = (Tail(self.transcript, since), SupervisorReader(self.requests, self._agent_call))
         self._agents: dict[str, tuple[Tail, AgentReader]] = {}
+        self.turn_over, self.turn_at = True, 0.0  # see resting(): nothing read yet means nothing is going on
 
     def _meta(self, agent: str) -> dict:
         try:
@@ -272,6 +273,27 @@ class Ledger:
         tail, reader = self._supervisor
         for entry in tail.new_lines():
             reader.feed(entry)
+            self._note_turn(entry)
+
+    def _note_turn(self, entry: dict) -> None:
+        """Whether the supervisor is in the middle of a turn, as far as its transcript tells: an answer that ends the
+        turn puts it at rest; a message, a tool result, something queued for it or attached to its turn means it is
+        (or is about to be) at work again. Other lines (hook notes, snapshots) say nothing either way."""
+        kind = entry.get("type")
+        if kind == "assistant":
+            message = entry.get("message") if isinstance(entry.get("message"), dict) else {}
+            self.turn_over = message.get("stop_reason") == "end_turn"
+        elif (kind == "user" and starts_a_turn(entry)) or (kind == "queue-operation" and entry.get("operation") == "enqueue"):
+            self.turn_over = False
+        else:
+            return
+        self.turn_at = stamp(entry) or self.turn_at
+
+    def resting(self) -> tuple[bool, float]:
+        """(the supervisor's last turn is over, when the line that says so was written). A message handed to it while
+        a turn is going on does not start a turn of its own: it is slipped into the one going on, where the model
+        does not take it for the user's word (found 2026-11-24). True and 0.0 before anything was read."""
+        return self.turn_over, self.turn_at
 
     def cost(self, request: str) -> dict[str, dict]:
         """who -> {"calls", "output", "input", "cached", "seconds"} for one request; {} when the files say nothing."""

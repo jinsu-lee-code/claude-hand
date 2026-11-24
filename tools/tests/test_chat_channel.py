@@ -1909,5 +1909,115 @@ class CostTests(unittest.TestCase):
         self.assertIsNone(self.hub._ledger())
 
 
+class HeldTests(unittest.TestCase):
+    """A message for the supervisor waits while its turn goes on: Claude Code slips what arrives during a turn into that
+    turn, and the supervisor then does not take it for the user's word (it asked for a request sent right after a result
+    to be sent again, 2026-11-24). Whether a turn goes on is read from the supervisor's transcript."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.agents = Path(self.tmp.name) / "agents"
+        write_agents(self.agents)
+        self.emitted = Recorder()
+        self.hub = cc.ChatHub(self.emitted, self.agents)
+        self.hub.initialized = True
+        self.logged = []
+        self.hub.events = lambda event, **fields: self.logged.append((event, fields))
+        self.transcript = Path(self.tmp.name) / "projects" / "2bfcab59-32d4-4e90-8df7-37b79974a4e9.jsonl"
+        self.transcript.parent.mkdir()
+        self.hub.find_transcript = lambda: self.transcript
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def wrote(self, at, kind, stop=None, **more):
+        """A line of the supervisor's transcript, written `at` (seconds since the epoch); stop: how an answer ended."""
+        iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(at)) + f".{int(at * 1000) % 1000:03d}Z"
+        line = {"type": kind, "timestamp": iso, **more}
+        if kind == "assistant":
+            line["message"] = {"id": f"msg-{at}", "content": [{"type": "text", "text": "x"}], "stop_reason": stop,
+                               "usage": {"input_tokens": 1, "output_tokens": 1}}
+        with open(self.transcript, "a", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(line) + "\n")
+
+    def said(self):
+        return [m["params"]["content"].split("\n")[0] for m in self.emitted.messages]
+
+    def events_of(self, kind):
+        return [fields for event, fields in self.logged if event == kind]
+
+    def test_a_message_goes_at_once_when_nothing_says_a_turn_goes_on(self):
+        self.hub.post_user_message("unity", "MyGame", "큐브 만들어줘")  # the file is not there yet: nothing to go by
+        self.assertEqual((self.said(), self.hub.held), (["큐브 만들어줘"], []))
+        other = cc.ChatHub(Recorder(), self.agents)  # no transcript known at all: as it always was
+        other.initialized = True
+        other.post_user_message("unity", "MyGame", "하나 더")
+        self.assertEqual((len(other.emit.messages), other.held), (1, []))
+
+    def test_a_message_that_arrives_during_the_supervisors_turn_waits_for_its_end(self):
+        start = time.time()
+        self.hub.post_user_message("unity", "MyGame", "속도를 두 배로")
+        self.wrote(start + 0.1, "user", origin={"kind": "channel"}, message={"content": "<channel>x</channel>"})
+        self.wrote(start + 0.2, "assistant", stop="tool_use")  # at work: the reply call, a hand-out
+        self.hub.post_user_message("unity", "MyGame", "큐브 하나 만들어줘")
+        self.assertEqual((self.said(), len(self.hub.held)), (["속도를 두 배로"], 1))
+        self.assertEqual(self.hub.logs["unity-mygame"][-1]["text"], "큐브 하나 만들어줘")  # the panel shows it as sent all the same
+        self.assertEqual([e["text"] for e in self.events_of("held")], ["감독이 차례 중이라, 차례가 끝나면 넘김"])
+        self.assertEqual(self.hub.check_held(start + 5), 0)  # the turn still goes on
+        self.wrote(start + 6, "assistant", stop="end_turn")
+        self.wrote(start + 6.1, "system", subtype="turn_duration")  # says nothing either way
+        self.assertEqual(self.hub.check_held(start + 7), 0)  # just over: a turn that starts right behind it would show first
+        self.assertEqual(self.hub.check_held(start + 7.6), 1)
+        self.assertEqual((self.said(), self.hub.held), (["속도를 두 배로", "큐브 하나 만들어줘"], []))
+        self.assertRegex(self.events_of("released")[0]["text"], r"^\d+\.\d초 기다림$")
+        self.assertEqual(self.hub.check_held(start + 9), 0)  # nothing left
+
+    def test_messages_go_in_the_order_they_came_one_turn_each(self):
+        start = time.time()
+        self.wrote(start - 1, "user", origin={"kind": "peer"}, message={"content": "report"})  # a subagent's report is being read
+        self.hub.post_user_message("unity", "MyGame", "하나")
+        self.hub.post_user_message("unity", "MyGame", "둘")
+        self.assertEqual((self.said(), len(self.hub.held)), ([], 2))
+        self.wrote(start + 1, "assistant", stop="end_turn")
+        self.assertEqual((self.hub.check_held(start + 3), self.said()), (1, ["하나"]))
+        self.assertEqual(self.hub.check_held(start + 6), 0)  # handed over, not in the transcript yet: its turn is about to start
+        self.wrote(start + 6.5, "queue-operation", operation="enqueue")
+        self.wrote(start + 6.6, "user", origin={"kind": "channel"}, message={"content": "<channel>하나</channel>"})
+        self.assertEqual(self.hub.check_held(start + 9), 0)  # and now it goes on
+        self.wrote(start + 12, "assistant", stop="end_turn")
+        self.assertEqual((self.hub.check_held(start + 14), self.said()), (1, ["하나", "둘"]))
+
+    def test_a_subagent_that_just_stopped_means_a_turn_is_about_to_start(self):
+        start = time.time()
+        self.wrote(start - 30, "assistant", stop="end_turn")  # at rest, waiting for its subagent
+        self.hub.report_action("unity", "MyGame@aaaa1111", "manage_gameobject", "create Cube", "aaa")
+        self.hub.agent_stopped("unity", "MyGame@aaaa1111", "aaa")  # its report is on its way to the supervisor
+        self.hub.post_user_message("unity", "MyGame", "큐브 하나 더")
+        self.assertEqual((self.said(), len(self.hub.held)), ([], 1))
+        self.wrote(time.time() + 0.5, "user", origin={"kind": "task-notification"}, message={"content": "<task-id>aaa</task-id>"})
+        self.wrote(time.time() + 4, "assistant", stop="end_turn")  # the result went to the panel; the turn is over
+        self.assertEqual((self.hub.check_held(time.time() + 6), self.said()), (1, ["큐브 하나 더"]))
+        # A report that never shows in the transcript does not keep messages back for good.
+        self.hub.agent_stopped("unity", "MyGame@aaaa1111", "aaa")
+        self.hub.post_user_message("unity", "MyGame", "또 하나")
+        self.assertEqual(len(self.hub.held), 1)
+        coming = max(self.hub.handed_at, self.hub.agent_stop_at)
+        self.assertEqual(self.hub.check_held(coming + cc.ARRIVAL_SECONDS - 2), 0)
+        self.assertEqual(self.hub.check_held(coming + cc.ARRIVAL_SECONDS + 1), 1)
+
+    def test_no_message_waits_longer_than_the_longest_hold_and_stops_wait_like_the_rest(self):
+        start = time.time()
+        self.hub.post_user_message("unity", "MyGame", "큐브 서른 개")
+        self.hub.report_action("unity", "MyGame@aaaa1111", "manage_gameobject", "create Cube", "aaa")
+        self.wrote(start + 0.1, "user", origin={"kind": "channel"}, message={"content": "<channel>x</channel>"})
+        self.wrote(start + 0.2, "assistant", stop="tool_use")
+        self.assertTrue(self.hub.request_stop("unity", "MyGame")["stopping"])  # 중지: the block on the subagent's calls is at once ...
+        self.assertEqual((len(self.said()), len(self.hub.held)), (1, 1))        # ... the word to the supervisor waits for its turn
+        self.assertEqual(self.hub.check_held(start + cc.HOLD_SECONDS - 5), 0)
+        self.assertEqual(self.hub.check_held(start + cc.HOLD_SECONDS + 5), 1)   # a turn that does not end: late is better than never
+        self.assertIn("[중지]를 눌렀습니다", self.said()[-1])
+        self.assertIn("그냥 넘김", self.events_of("released")[0]["text"])
+
+
 if __name__ == "__main__":
     unittest.main()

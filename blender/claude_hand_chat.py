@@ -21,7 +21,7 @@ Install: `uv run tools/claude_hand.py blender-install-chat` (or Preferences > Ad
 bl_info = {
     "name": "Claude Hand Chat",
     "author": "claude-hand",
-    "version": (0, 16, 0),
+    "version": (0, 17, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar (N) > Claude Hand",
     "description": "Chat with this Blender window's claude-hand subagent",
@@ -37,6 +37,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -74,6 +75,12 @@ UNDO_KEPT = 20          # undo points kept for the newest requests
 UNDO_PROP = "claude_hand_undo"  # on every scene: "<this run>:<newest undo point set before this state>"
 SENT_AS = "claude_hand_sent_as"  # on an object that went to Unity: the name it went under, which Unity knows its model by
 FOLLOW_TOOL = "ch_model_follow"  # Claude Hand Tools' tool for models that follow their .blend (0.16 and later)
+REALIZE = "ClaudeHandRealize"    # the modifier and node group a Geometry Nodes object has while it is exported (_realized)
+TEXTURE_FORMATS = (".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff", ".exr", ".hdr", ".psd")  # image files Unity reads as they are
+BAKE_SIZE = 1024                 # pixels a side, of an image baked from a material's nodes
+BAKED = {"base_color_texture": "기본 색", "metallic_smoothness_texture": "금속 · 거칠기", "normal_texture": "노멀", "emission_texture": "발광"}
+TREE_LAYOUT = {"name", "label", "location", "location_absolute", "width", "height", "dimensions", "select", "parent", "hide", "color",
+               "use_custom_color", "rna_type", "type", "inputs", "outputs", "internal_links", "warning_propagation"}  # of a node: not what it does
 UNITY_LOOK_SECONDS = 5.0         # how often the panel looks whether another Unity editor has opened
 HEAVY_SECONDS = 1.0              # a model whose export took longer than this is exported on a save only when it was touched
 BUSY_TRIES, BUSY_WAIT = 8, 2.5   # how long a send waits for a Unity that is compiling or reloading its scripts
@@ -114,8 +121,9 @@ _follow = {
     "models": {},      # (hash, asset) -> {"seq", "snapshot", "took"}: as of the last time each was found in step
     "status": "",      # the panel's line about the last look
 }
-# Main thread only: what Blender said was changed, and when (a running count). "own": a look is exporting right now.
-_touched = {"seq": 0, "objects": {}, "other": 0, "own": False}
+# Main thread only: what Blender said was changed, and when (a running count): objects by name, meshes and materials
+# by (kind, name), and "other" for what cannot be told to be anybody's. "own": a look is exporting right now.
+_touched = {"seq": 0, "objects": {}, "data": {}, "other": 0, "own": False}
 
 
 # --------------------------------------------------------------------------- server access (any thread)
@@ -582,7 +590,7 @@ def mark_undo_point(label="", request=""):
     if _undo_op(bpy.ops.ed.undo_push, message=f"Claude Hand: {label or '요청'}"[:60]) != {"FINISHED"}:
         return "undo point not set: no undo history here"
     _mark_seq[0] = seq
-    _marks.append({"seq": seq, "label": " ".join(str(label).split())[:40], "time": time.strftime("%H:%M"),
+    _marks.append({"seq": seq, "label": " ".join(str(label).split())[:40].rstrip(), "time": time.strftime("%H:%M"),
                    "request": str(request or ""), "stamp": time.time()})
     del _marks[:-UNDO_KEPT]
     _redraw()
@@ -829,22 +837,147 @@ def _without_time(path):
         f.write(head)
 
 
+def _fcurves(action):
+    """An action's curves, whichever way this Blender keeps them (in layers since 4.4)."""
+    try:
+        return list(action.fcurves)
+    except AttributeError:
+        return [curve for layer in action.layers for strip in layer.strips for bag in strip.channelbags for curve in bag.fcurves]
+
+
+def _takes(objects):
+    """How the animation is to be cut into clips: (options for the exporter, the clips Unity is to keep or None for
+    all that come).
+      - One rig with actions and nothing else animated (a character): a clip for each of the rig's actions. The
+        exporter also tries every other action of the file on the rig ("Rig|SomeoneElsesAction"); the list names the
+        rig's own, by the action's name alone.
+      - Several things animated, or things that move with no action of their own (a rigid body, a shape key): the
+        scene's frame range as one clip, with everything in it as it is at each frame. Clip by clip per object, the
+        exporter would give every action tried on every object, none of them the scene as it plays.
+      - Nothing moves: no clip."""
+    def acts(thing):
+        return thing is not None and thing.animation_data is not None and thing.animation_data.action is not None
+
+    rigs = [o for o in objects if o.type == "ARMATURE" and acts(o)]
+    others = [o for o in objects if o.type != "ARMATURE" and acts(o)]
+    if len(rigs) == 1 and not others:
+        rig, bones = rigs[0], set(rigs[0].pose.bones.keys())
+
+        def own(action):
+            if action == rig.animation_data.action or any(strip.action == action for track in rig.animation_data.nla_tracks for strip in track.strips):
+                return True
+            posed = [c.data_path.split('"')[1] for c in _fcurves(action) if c.data_path.startswith('pose.bones["')]
+            return bool(posed) and all(name in bones for name in posed)
+
+        return {}, [{"take": f"{rig.name}|{action.name}", "name": action.name} for action in bpy.data.actions if own(action)]
+    moved = rigs or others or any(getattr(o, "rigid_body", None) is not None and o.rigid_body.type == "ACTIVE" for o in objects) or \
+        any(o.type == "MESH" and acts(o.data.shape_keys) for o in objects)
+    return (dict(bake_anim_use_all_actions=False, bake_anim_use_nla_strips=False) if moved else {}), None
+
+
+@contextlib.contextmanager
+def _realized(objects):
+    """While this is open, a mesh whose Geometry Nodes put out instances has them as real geometry: an FBX holds no
+    instances, and the mesh would arrive empty. One more modifier at the end of the stack does it, and is taken off
+    again (nothing of it stays in the file, nor in its undo history)."""
+    nodes = {o.name for o in objects if o.type == "MESH" and any(m.type == "NODES" for m in o.modifiers)}
+    makers = set()
+    if nodes and hasattr(bpy.types, "GeometryNodeRealizeInstances"):
+        for instance in bpy.context.evaluated_depsgraph_get().object_instances:
+            if instance.is_instance and instance.parent is not None and instance.parent.original.name in nodes:
+                makers.add(instance.parent.original.name)
+    if not makers:
+        yield
+        return
+    group = bpy.data.node_groups.new(REALIZE, "GeometryNodeTree")
+    added = []
+    try:
+        group.interface.new_socket("Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
+        group.interface.new_socket("Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+        taken, realize, given = (group.nodes.new(kind) for kind in ("NodeGroupInput", "GeometryNodeRealizeInstances", "NodeGroupOutput"))
+        group.links.new(taken.outputs[0], realize.inputs[0])
+        group.links.new(realize.outputs[0], given.inputs[0])
+        for obj in objects:
+            if obj.name in makers:
+                modifier = obj.modifiers.new(REALIZE, "NODES")
+                modifier.node_group = group
+                added.append((obj, modifier.name))
+        bpy.context.view_layer.update()
+        yield
+    finally:
+        for obj, name in added:
+            modifier = obj.modifiers.get(name)
+            if modifier is not None:
+                obj.modifiers.remove(modifier)
+        bpy.data.node_groups.remove(group)
+
+
+def _shape(objects):
+    """Where each object is and how far each mesh reaches, as the scene is now, in Unity's axes (Blender's x, y, z are
+    Unity's -x, z, -y): what Unity holds the model it imported against (ch_import_model's shape_check), so that a
+    model that arrives turned, moved or scaled is told of instead of being found by eye. A mesh's reach is that of
+    the corners of the box around it in its own space, which Unity can work out the same way without reading
+    vertices. That box is measured from the mesh as it is exported (modifiers applied), not read from
+    Object.bound_box: in an open window that can be the box of the mesh before subdivision (GPU subdivision), which
+    the exported mesh does not fill. A mesh that a rig or a shape key bends is checked by where it is only: its
+    shape depends on the pose."""
+    import numpy
+    from mathutils import Vector
+
+    def unity(v):
+        return [round(-v[0], 5), round(v[2], 5), round(-v[1], 5)]
+
+    def box(there):
+        """The corners of the box around the mesh's vertices, in the object's own space (None: no vertices)."""
+        mesh = there.to_mesh()
+        try:
+            if not len(mesh.vertices):
+                return None
+            at = numpy.empty(len(mesh.vertices) * 3, dtype=numpy.float32)
+            mesh.vertices.foreach_get("co", at)
+            low, high = at.reshape(-1, 3).min(axis=0), at.reshape(-1, 3).max(axis=0)
+            return [Vector((float(x), float(y), float(z))) for x in (low[0], high[0]) for y in (low[1], high[1]) for z in (low[2], high[2])]
+        finally:
+            there.to_mesh_clear()
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    parts = {}
+    for obj in objects:
+        there = obj.evaluated_get(depsgraph)
+        world = there.matrix_world
+        part = parts[obj.name] = {"at": unity(world.translation)}
+        bent = obj.type == "MESH" and (obj.data.shape_keys is not None or any(m.type == "ARMATURE" for m in obj.modifiers))
+        around = box(there) if obj.type == "MESH" and not bent else None
+        if around:
+            corners = [unity(world @ corner) for corner in around]
+            part["low"] = [min(c[i] for c in corners) for i in range(3)]
+            part["high"] = [max(c[i] for c in corners) for i in range(3)]
+    return {"parts": parts}
+
+
 def _write_fbx(objects, path):
-    """Write the objects as an FBX set up for Unity (Y up, -Z forward, textures embedded). Nothing in the scene is
-    touched: the exporter is handed what to take instead of having it selected, so the selection, the active object
-    and the mode stay as they are (also in the middle of editing a mesh). The same objects give the same file whenever
-    and in whichever Blender run they are written (_same_numbers, _without_time): the file itself tells whether Unity
-    has this already. One exception is a mesh with a Bevel modifier, whose UVs Blender works out a little differently
-    every time."""
+    """Write the objects as an FBX for Unity, and return what Unity is to check the model against (_shape).
+    The exporter turns nothing: the file only says that its axes are
+    Blender's own (-Y forward, Z up), and Unity bakes the conversion into the data when it imports (ch_import_model
+    does, for a manifest that says "axes": "blender"). That way no part arrives with a quarter turn of its own, however
+    deep it sits and whether it is animated or skinned; the exporter's own "apply transform" breaks from the third
+    level down. No bones are added at the ends. Images do not go inside: the materials and their images go next to the
+    file (_materials). Nothing in the scene is touched: the exporter is handed what to take instead of having it
+    selected, so the selection, the active object and the mode stay as they are (also in the middle of editing a
+    mesh). The same objects give the same file whenever and in whichever Blender run they are written (_same_numbers,
+    _without_time): the file itself tells whether Unity has this already. One exception is a mesh with a Bevel
+    modifier, whose UVs Blender works out a little differently every time."""
     layer = bpy.context.view_layer
     missing = [o.name for o in objects if o.name not in layer.objects]
     if missing:
         raise ValueError("지금 뷰 레이어에 없는 오브젝트는 내보낼 수 없습니다: " + ", ".join(missing))
-    options = dict(filepath=path, use_selection=True, apply_scale_options="FBX_SCALE_ALL", axis_forward="-Z", axis_up="Y",
-                   path_mode="COPY", embed_textures=True)
+    options = dict(filepath=path, use_selection=True, apply_scale_options="FBX_SCALE_ALL", axis_forward="-Y", axis_up="Z",
+                   use_space_transform=False, add_leaf_bones=False, path_mode="STRIP", embed_textures=False, **_takes(objects)[0])
     active = layer.objects.active
     mode = active.mode if active is not None else "OBJECT"
-    with _same_numbers():
+    shape = None
+    with _same_numbers(), _realized(objects):
+        shape = _shape(objects)
         if hasattr(bpy.context, "temp_override"):
             with bpy.context.temp_override(selected_objects=list(objects)):
                 bpy.ops.export_scene.fbx(**options)
@@ -860,6 +993,489 @@ def _write_fbx(objects, path):
     if active is not None and layer.objects.active == active and active.mode != mode:
         bpy.ops.object.mode_set(mode=mode)  # an older exporter leaves the mesh that was being edited in Object Mode
     _without_time(path)
+    return shape
+
+
+# What a material is made of does not get to Unity inside an FBX: Unity leaves the images in there alone, and reads
+# neither metallic nor roughness. So it is said next to the file, in the manifest: for each material the values and
+# images its Principled BSDF reads, in the terms every engine's standard material has (what glTF calls metallic-
+# roughness). Unity's ch_import_model makes its own kind of material of that. Only what is read straight from a value
+# or an image goes; an input fed through other nodes is named in the notes, for the user to know.
+
+
+def _link(socket):
+    """The link that feeds this input, looking through reroutes (None: nothing does)."""
+    while socket is not None and socket.is_linked:
+        link = socket.links[0]
+        if link.from_node.type != "REROUTE":
+            return link
+        socket = link.from_node.inputs[0]
+    return None
+
+
+def _reads(socket):
+    """What a shader input reads: ("value", its own value), ("image", the Image Texture node, channel: "" for its
+    colour, else one of "RGBA") or ("node", the node in between, which is more than can be said in a manifest)."""
+    link = _link(socket)
+    if link is None:
+        value = socket.default_value
+        return ("value", float(value) if isinstance(value, (int, float)) else [float(c) for c in value])
+    node, out = link.from_node, link.from_socket
+    if node.type == "TEX_IMAGE" and node.image is not None:
+        return ("image", node, "A" if out.identifier == "Alpha" else "")
+    if node.type in ("SEPARATE_COLOR", "SEPRGB") and getattr(node, "mode", "RGB") == "RGB":
+        inner = _link(node.inputs[0])
+        if inner is not None and inner.from_node.type == "TEX_IMAGE" and inner.from_node.image is not None and inner.from_socket.identifier != "Alpha":
+            return ("image", inner.from_node, "RGB"[min(list(node.outputs).index(out), 2)])
+    return ("node", node)
+
+
+def _image_stamp(image):
+    """What tells one state of an image from another without reading its pixels."""
+    path = bpy.path.abspath(image.filepath, library=image.library) if image.filepath else ""
+    try:
+        stat = os.stat(path)
+        on_disk = [stat.st_mtime_ns, stat.st_size]
+    except OSError:
+        on_disk = [0, 0]
+    return [image.name, path.replace("\\", "/"), *on_disk, bool(image.is_dirty), image.packed_file.size if image.packed_file else 0, *image.size]
+
+
+def _pixels(image):
+    """The image as rows of RGBA numbers (height, width, 4), as they are stored."""
+    import numpy
+
+    width, height = image.size
+    flat = numpy.empty(width * height * image.channels, dtype=numpy.float32)
+    image.pixels.foreach_get(flat)
+    flat = flat.reshape(height, width, image.channels)
+    if image.channels == 4:
+        return flat
+    full = numpy.ones((height, width, 4), dtype=numpy.float32)
+    full[:, :, :3] = flat[:, :, :3] if image.channels == 3 else flat[:, :, :1]
+    return full
+
+
+def _save_pixels(pixels, target, like=None):
+    """Write rows of RGBA numbers as a .png (or .exr for an image that holds more than 8 bits)."""
+    height, width = pixels.shape[:2]
+    made = bpy.data.images.new("claude_hand_texture", width, height, alpha=True, float_buffer=target.endswith(".exr"))
+    try:
+        if like is not None:
+            try:
+                made.colorspace_settings.name = like.colorspace_settings.name
+            except TypeError:
+                pass
+        made.pixels.foreach_set(pixels.ravel())
+        made.filepath_raw = target
+        made.file_format = "OPEN_EXR" if target.endswith(".exr") else "PNG"
+        made.save()
+    finally:
+        bpy.data.images.remove(made)
+
+
+def _file_name(stem, extension, files):
+    """A file name that none of the textures written so far has."""
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_") or "image"
+    taken = {entry["file"].lower() for entry in files.values() if entry}
+    name, n = stem + extension, 2
+    while name.lower() in taken:
+        name, n = f"{stem}_{n}{extension}", n + 1
+    return name
+
+
+def _texture(image, folder, files):
+    """The image as a file for Unity: {"file", "stamp"}, or None when it holds nothing (its file is gone). A file on
+    disk goes as it is; an image that is packed into the .blend, was made here and never saved, or was painted on
+    since, is written from what Blender holds. With `folder` the file is written there; without, only named."""
+    if image.name in files:
+        return files[image.name]
+    if not image.size[0] or not image.size[1]:
+        files[image.name] = None
+        return None
+    source = bpy.path.abspath(image.filepath, library=image.library) if image.filepath else ""
+    extension = os.path.splitext(source)[1].lower()
+    as_it_is = image.source == "FILE" and not image.is_dirty and extension in TEXTURE_FORMATS and \
+        (image.packed_file is not None or os.path.isfile(source))
+    name = _file_name(os.path.splitext(image.name)[0], extension if as_it_is else ".exr" if image.is_float else ".png", files)
+    entry = files[image.name] = {"file": name, "stamp": _image_stamp(image)}
+    if folder:
+        target = os.path.join(folder, name)
+        if as_it_is and image.packed_file is not None:
+            with open(target, "wb") as f:
+                f.write(image.packed_file.data)
+        elif as_it_is:
+            shutil.copyfile(source, target)
+        else:
+            _save_pixels(_pixels(image), target, image)
+    return entry
+
+
+def _tree_stamp(tree, seen=None):
+    """A node tree as a short hash that changes when anything that decides its look does: which nodes there are, how
+    each is set, what feeds what. Not where a node sits or how it is labelled. It stands in for an image that is
+    baked from the nodes: whether Unity has that image already can be told without baking it again."""
+    seen = set() if seen is None else seen
+    if tree.name in seen:
+        return ""
+    seen.add(tree.name)
+    told = []
+    for node in sorted(tree.nodes, key=lambda n: n.name):
+        said = [node.name, node.bl_idname]
+        for prop in node.bl_rna.properties:
+            key = prop.identifier
+            if key in TREE_LAYOUT or key.startswith("bl_") or key.startswith("show_"):
+                continue
+            value = getattr(node, key, None)
+            if prop.type in ("BOOLEAN", "INT", "FLOAT", "STRING", "ENUM"):
+                if isinstance(value, (set, frozenset)):
+                    value = sorted(value)
+                said.append(f"{key}={value if isinstance(value, (str, bool, int, float, list)) or value is None else tuple(value)}")
+            elif isinstance(value, bpy.types.Image):
+                said.append(f"{key}={_image_stamp(value)}")
+            elif isinstance(value, bpy.types.NodeTree):
+                said.append(f"{key}={_tree_stamp(value, seen)}")
+            elif isinstance(value, bpy.types.ColorRamp):
+                said.append(f"{key}={value.interpolation},{value.color_mode},{[(e.position, tuple(e.color)) for e in value.elements]}")
+            elif isinstance(value, bpy.types.CurveMapping):
+                said.append(f"{key}={[[tuple(p.location) for p in curve.points] for curve in value.curves]}")
+            elif isinstance(value, bpy.types.ID):
+                said.append(f"{key}={value.name}")
+        for inlet in node.inputs:
+            value = getattr(inlet, "default_value", None)
+            if value is not None and not isinstance(value, (str, bool, int, float)):
+                value = tuple(value)
+            said.append(f"{inlet.identifier}:{value}:{[(link.from_node.name, link.from_socket.identifier) for link in inlet.links]}")
+        told.append("|".join(said))
+    return hashlib.sha256("\n".join(told).encode("utf-8")).hexdigest()[:16]
+
+
+LATER = "오브젝트 모드가 아니라서 이번에는 굽지 않았습니다(Unity에 먼저 구운 이미지가 있으면 그것이 그대로 쓰입니다). 오브젝트 모드에서 저장하거나 보내면 구워집니다."
+
+
+def _bakes_now():
+    """Blender bakes in Object Mode only. In another mode a baked image is named but not written: Unity keeps the one
+    it has, and the image's stamp says "pending", so that it is sent once the mode allows."""
+    return bpy.context.mode == "OBJECT"
+
+
+def _why_not_baked(users):
+    """Why an input that is fed through nodes cannot be baked for these objects at all ("" when it can)."""
+    if not users:
+        return "이 재질을 쓰는 메시가 없어서"
+    hidden = [o.name for o in users if o.hide_render or o.hide_viewport]
+    if hidden:  # Blender bakes only what a render would show
+        return f"{', '.join(hidden[:3])}이(가) 렌더나 뷰포트에서 꺼져 있어서(아웃라이너의 카메라 · 모니터 아이콘)"
+    bare = [o.name for o in users if not o.data.uv_layers]
+    if bare:
+        return f"{', '.join(bare[:3])}에 UV 맵이 없어서"
+    if not hasattr(bpy.context.scene, "cycles"):
+        return "Cycles가 꺼져 있어서(굽는 데 씁니다)"
+    return ""
+
+
+def _bake_pixels(material, users, source, size, colour):
+    """What the nodes behind one shader input come to, over the UV maps of the objects that use the material, as rows
+    of RGBA numbers. `source` is the output socket that feeds the input; None bakes the surface normal instead (what a
+    Bump node or a mix of normals comes to). Blender bakes it: the value goes through an Emission shader for the
+    time of the bake, with Cycles. The selection and the active object are not touched; the render engine, the
+    material's nodes and the other materials of those objects (each needs somewhere to bake to) are put back as
+    they were."""
+    scene, tree = bpy.context.scene, material.node_tree
+    output = next(n for n in tree.nodes if n.type == "OUTPUT_MATERIAL" and n.is_active_output)
+    surface = output.inputs["Surface"].links[0].from_socket
+    # What is active and selected is noted before any node is made here: a new node is selected as it is made, and
+    # one that has been taken away again must not be written to (Blender dies of that, some of the time).
+    active, chosen = tree.nodes.active, [n for n in tree.nodes if n.select]
+    image = bpy.data.images.new("claude_hand_bake", size, size, alpha=False, is_data=not colour)
+    spare = bpy.data.images.new("claude_hand_bake_spare", 4, 4)
+    target = tree.nodes.new("ShaderNodeTexImage")
+    target.image = image
+    engine, samples = scene.render.engine, scene.cycles.samples
+    others, emit = [], None
+    try:
+        for obj in users:
+            for slot in obj.material_slots:
+                other = slot.material
+                if other is None or other == material or other.node_tree is None or any(other == o for o, _, _ in others):
+                    continue
+                was = other.node_tree.nodes.active
+                node = other.node_tree.nodes.new("ShaderNodeTexImage")
+                node.image = spare
+                others.append((other, node, was))
+                other.node_tree.nodes.active = node
+        scene.render.engine = "CYCLES"
+        scene.cycles.samples = 4
+        for node in tree.nodes:
+            node.select = False
+        target.select = True
+        tree.nodes.active = target
+        if source is not None:
+            emit = tree.nodes.new("ShaderNodeEmission")
+            tree.links.new(source, emit.inputs["Color"])
+            tree.links.new(emit.outputs[0], output.inputs["Surface"])
+        with bpy.context.temp_override(active_object=users[0], object=users[0], selected_objects=list(users)):
+            bpy.ops.object.bake(type="EMIT" if source is not None else "NORMAL", use_clear=True)
+        return _pixels(image).copy()
+    finally:
+        tree.links.new(surface, output.inputs["Surface"])
+        if emit is not None:
+            tree.nodes.remove(emit)
+        tree.nodes.remove(target)
+        for node in chosen:
+            node.select = True
+        tree.nodes.active = active
+        for other, node, was in others:
+            other.node_tree.nodes.remove(node)
+            other.node_tree.nodes.active = was
+        scene.cycles.samples = samples
+        scene.render.engine = engine
+        bpy.data.images.remove(image)
+        bpy.data.images.remove(spare)
+
+
+def _metallic_smoothness(material, metallic, roughness, folder, files, bake=None):
+    """Metallic and roughness as the one image Unity's standard materials read them from: metallic in red, smoothness
+    (one minus roughness) in alpha. Each of the two is ("image", node, channel), ("value", number) or ("baked", the
+    shader input that is fed through nodes: baked for `bake`'s objects at its size)."""
+    import numpy
+
+    sources = [(kind[1].image, kind[2] or "R") if kind[0] == "image" else None for kind in (metallic, roughness)]
+    key = "metallic-smoothness:" + material.name
+    name = _file_name(material.name + "_MetallicSmoothness", ".png", files)
+    baked = any(kind[0] == "baked" for kind in (metallic, roughness))
+    stamp = [[_image_stamp(s[0]), s[1]] if s else [_tree_stamp(material.node_tree), bake["size"]] if kind[0] == "baked" else kind[1]
+             for s, kind in zip(sources, (metallic, roughness))] + (["pending"] if baked and not _bakes_now() else [])
+    entry = files[key] = {"file": name, "stamp": stamp, **({"baked": True, "later": not _bakes_now()} if baked else {})}
+    if folder and not (baked and not _bakes_now()):
+        sizes = [tuple(s[0].size) for s in sources if s] + [(bake["size"], bake["size"]) for kind in (metallic, roughness) if kind[0] == "baked"]
+        width, height = (max(size[i] for size in sizes) for i in (0, 1))
+
+        def plane(source, kind):
+            if kind[0] == "value":
+                return numpy.full((height, width), kind[1], dtype=numpy.float32)
+            if kind[0] == "baked":
+                rows = _bake_pixels(material, bake["users"], _link(kind[1]).from_socket, bake["size"], False)[:, :, 0]
+            else:
+                rows = _pixels(source[0])[:, :, "RGBA".index(source[1])]
+            if rows.shape != (height, width):  # the two differ in size: the smaller one's nearest pixel
+                rows = rows[(numpy.arange(height) * rows.shape[0] // height)[:, None], (numpy.arange(width) * rows.shape[1] // width)[None, :]]
+            return rows
+
+        packed = numpy.empty((height, width, 4), dtype=numpy.float32)
+        packed[:, :, :3] = plane(sources[0], metallic)[:, :, None]
+        packed[:, :, 3] = 1.0 - plane(sources[1], roughness)
+        _save_pixels(packed, os.path.join(folder, name), next((s[0] for s in sources if s), None))
+    return entry
+
+
+def _laid_on_uv(node):
+    """Whether an Image Texture node lays its picture over the UV map as it is, or through a Mapping node that only
+    scales and shifts it: what a Unity material can do as well. Anything else (object or generated coordinates, a
+    turn, other nodes in front) is a picture only Blender can lay that way."""
+    def uv(link):
+        return link is None or link.from_node.type == "UVMAP" or (link.from_node.type == "TEX_COORD" and link.from_socket.identifier == "UV")
+
+    link = _link(node.inputs["Vector"])
+    if uv(link):
+        return True
+    mapping = link.from_node
+    return mapping.type == "MAPPING" and mapping.vector_type == "POINT" and not any(mapping.inputs[i].is_linked for i in ("Location", "Rotation", "Scale")) and \
+        not any(abs(c) > 1e-6 for c in mapping.inputs["Rotation"].default_value) and uv(_link(mapping.inputs["Vector"]))
+
+
+def _uv(node, notes, what):
+    """How an Image Texture node's picture is laid over the UV map ({"scale", "offset"}; None: as it is). A picture
+    that is laid another way (see _laid_on_uv) and was not baked goes laid on the UV map, and that is noted."""
+    link = _link(node.inputs["Vector"])
+    if not _laid_on_uv(node):
+        notes.append(f"{what}: 이미지가 UV가 아닌 좌표({link.from_socket.name})에 놓여 있어서, UV 그대로 놓은 것으로 갔습니다." if link.from_node.type == "TEX_COORD"
+                     else f"{what}: 이미지를 놓는 좌표가 '{link.from_node.bl_label}' 노드를 거쳐서, UV 그대로 놓은 것으로 갔습니다.")
+        return None
+    if link is None or link.from_node.type != "MAPPING":
+        return None
+    scale, offset = link.from_node.inputs["Scale"].default_value, link.from_node.inputs["Location"].default_value
+    return {"scale": [float(scale[0]), float(scale[1])], "offset": [float(offset[0]), float(offset[1])]}
+
+
+def _material(material, folder, files, bake=None):
+    """One material for the manifest ("notes": what of it could not be carried). `bake`: {"users": the meshes that
+    use it, "size"}: an input that is fed through other nodes (a noise, a colour ramp, a bump) is baked for those
+    objects into an image of that size, which then goes like any image; None: such an input is not carried, and
+    noted. A baked image is as the nodes are at the time: it does not move or change in Unity as nodes would."""
+    described = {"name": material.name, "base_color": [float(c) for c in material.diffuse_color], "metallic": float(material.metallic),
+                 "roughness": float(material.roughness), "two_sided": not material.use_backface_culling, "notes": []}
+    notes = described["notes"]
+    tree = material.node_tree if material.use_nodes else None
+    if tree is None:
+        return described
+    output = next((n for n in tree.nodes if n.type == "OUTPUT_MATERIAL" and n.is_active_output), None)
+    surface = _link(output.inputs["Surface"]) if output is not None else None
+    shader = surface.from_node if surface is not None and surface.from_node.type == "BSDF_PRINCIPLED" else None
+    if shader is None:
+        notes.append("Principled BSDF 하나로 된 재질이 아니라서, 뷰포트에 보이는 색 · 금속 · 거칠기 값만 갔습니다.")
+        return described
+
+    def through(what, read):
+        notes.append(f"{what}: '{read[1].bl_label}' 노드를 거쳐서 못 옮겼습니다.")
+
+    def unbakeable(what, read):
+        """Notes why this node-fed input is not baked, when it is not."""
+        why = "굽기가 꺼져 있어서" if bake is None else _why_not_baked(bake["users"])
+        if why:
+            notes.append(f"{what}: '{read[1].bl_label}' 노드를 거치는데 {why} 못 옮겼습니다.")
+        return bool(why)
+
+    def cooked(what, role, source, read, colour):
+        """The input as an image baked from the nodes that feed it ({"file", "stamp", "baked"}); None, with a note why,
+        when that cannot be. `source`: the socket that feeds it (None: the surface normal)."""
+        if unbakeable(what, read):
+            return None
+        key = f"baked:{material.name}:{role}"
+        entry = files[key] = {"file": _file_name(f"{material.name}_{role}", ".png", files), "baked": True,
+                              "stamp": [_tree_stamp(tree), bake["size"]] + ([] if _bakes_now() else ["pending"])}
+        if folder and not _bakes_now():
+            notes.append(f"{what}: {LATER}")
+        elif folder:
+            try:
+                _save_pixels(_bake_pixels(material, bake["users"], source, bake["size"], colour), os.path.join(folder, entry["file"]))
+            except RuntimeError as exc:
+                files[key] = None
+                notes.append(f"{what}: 굽지 못했습니다({(str(exc).strip().splitlines() or ['?'])[-1][:120]}).")
+                return None
+        return dict(entry)
+
+    def picture(read, what):
+        entry = _texture(read[1].image, folder, files)
+        if entry is None:
+            notes.append(f"{what}: 이미지 '{read[1].image.name}'의 파일이 없어서 못 옮겼습니다.")
+            return None
+        placed = _uv(read[1], notes, what)
+        return {"file": entry["file"], "stamp": entry["stamp"], **({"uv": placed} if placed else {}),
+                **({"filter": "point"} if read[1].interpolation == "Closest" else {})}  # pixels kept as squares (pixel art)
+
+    def skewed(read):
+        """An image that is not laid on the UV map, where it can be baked: then it is, like any input fed through nodes."""
+        return read[0] == "image" and bake is not None and not _laid_on_uv(read[1]) and not _why_not_baked(bake["users"])
+
+    base = _reads(shader.inputs["Base Color"])
+    if base[0] == "value":
+        described["base_color"] = base[1]
+    else:
+        if base[0] == "image" and not base[2] and not skewed(base):
+            described["base_color_texture"] = picture(base, "기본 색")
+        else:
+            feed = _link(shader.inputs["Base Color"])
+            described["base_color_texture"] = cooked("기본 색", "BaseColor", feed.from_socket, ("node", feed.from_node), True)
+        if described["base_color_texture"] is not None:  # else the viewport colour stands in
+            described["base_color"] = [1.0, 1.0, 1.0, 1.0]
+
+    pair = []
+    for inlet, key, what in (("Metallic", "metallic", "금속"), ("Roughness", "roughness", "거칠기")):
+        read = _reads(shader.inputs[inlet])
+        if read[0] == "value":
+            described[key] = read[1]
+        elif skewed(read):
+            read = ("baked", shader.inputs[inlet])
+        elif read[0] == "node":
+            read = ("value", described[key]) if unbakeable(what, read) else ("baked", shader.inputs[inlet])
+        elif not read[1].image.size[0]:
+            notes.append(f"{what}: 이미지 '{read[1].image.name}'의 파일이 없어서 못 옮겼습니다.")
+            read = ("value", described[key])
+        pair.append(read)
+    if any(read[0] != "value" for read in pair):
+        try:
+            entry = _metallic_smoothness(material, pair[0], pair[1], folder, files, bake)
+            if folder and entry.get("later"):
+                notes.append(f"금속 · 거칠기: {LATER}")
+            described["metallic_smoothness_texture"] = {key: value for key, value in entry.items() if key in ("file", "stamp", "baked")}
+            described["metallic"], described["roughness"] = (1.0 if read[0] != "value" else read[1] for read in pair)
+        except RuntimeError as exc:
+            files["metallic-smoothness:" + material.name] = None
+            notes.append(f"금속 · 거칠기: 굽지 못했습니다({(str(exc).strip().splitlines() or ['?'])[-1][:120]}).")
+
+    normal = _link(shader.inputs["Normal"])
+    if normal is not None:
+        read = _reads(normal.from_node.inputs["Color"]) if normal.from_node.type == "NORMAL_MAP" else None
+        if read is not None and read[0] == "image" and not read[2] and not normal.from_node.inputs["Strength"].is_linked and not skewed(read):
+            described["normal_texture"] = picture(read, "노멀")
+            described["normal_strength"] = float(normal.from_node.inputs["Strength"].default_value)
+        else:  # a bump, a mix of normal maps: the normal the surface ends up with
+            described["normal_texture"] = cooked("노멀", "Normal", None, ("node", normal.from_node), False)
+            if described["normal_texture"] is not None:
+                described["normal_strength"] = 1.0
+
+    colour, strength = shader.inputs.get("Emission Color") or shader.inputs.get("Emission"), shader.inputs.get("Emission Strength")
+    power = _reads(strength) if strength is not None else ("value", 1.0)
+    glow = _reads(colour) if colour is not None else ("value", [0.0, 0.0, 0.0, 1.0])
+    if power[0] != "value":
+        through("발광 세기", power if power[0] == "node" else ("node", _link(strength).from_node))
+    elif power[1] > 0 and (glow[0] != "value" or any(c > 0 for c in glow[1][:3])):
+        lit = None
+        if glow[0] == "image" and not glow[2] and not skewed(glow):
+            lit = picture(glow, "발광")
+        elif glow[0] != "value":
+            feed = _link(colour)
+            lit = cooked("발광", "Emission", feed.from_socket, ("node", feed.from_node), True)
+        if glow[0] == "value" or lit is not None:
+            described["emission_strength"] = power[1]
+            described["emission_color"] = glow[1][:3] if glow[0] == "value" else [1.0, 1.0, 1.0]
+            if glow[0] != "value":
+                described["emission_texture"] = lit
+
+    alpha = _reads(shader.inputs["Alpha"])
+    cut = getattr(material, "blend_method", "BLEND") in ("CLIP", "HASHED") or getattr(material, "surface_render_method", "") == "DITHERED"
+    if alpha[0] == "value" and alpha[1] < 1.0:
+        described["alpha"] = alpha[1]
+        described["blend"] = "clip" if cut and getattr(material, "blend_method", "") == "CLIP" else "blend"
+    elif alpha[0] == "image" and alpha[2] == "A" and base[0] == "image" and alpha[1].image == base[1].image and \
+            not (described.get("base_color_texture") or {"baked": True}).get("baked"):  # a baked picture has no alpha of its own
+        described["alpha_from_base_color_texture"] = True
+        described["blend"] = "clip" if cut else "blend"
+    elif alpha[0] != "value":
+        through("투명도", alpha if alpha[0] == "node" else ("node", alpha[1]))
+    if described.get("blend") == "clip":
+        described["alpha_clip"] = float(getattr(material, "alpha_threshold", 0.5))
+    return {key: value for key, value in described.items() if value is not None}
+
+
+def _materials(objects, folder=None, bake=False, size=BAKE_SIZE):
+    """(the manifest's "materials", the notes on what could not be carried, a hash of the lot). With `folder` the
+    image files are written there; without, they are only named, which is enough to tell whether anything changed
+    since Unity got them (the hash covers each image's file time and size, not its pixels: an image that was painted
+    on and not saved yet counts as changed once; and for an image baked from nodes, the nodes as they are set).
+    `bake`: inputs that are fed through other nodes are baked into images `size` pixels a side (see _material)."""
+    names, users = [], {}
+    for obj in objects:
+        for slot in getattr(obj, "material_slots", ()):
+            if slot.material is None:
+                continue
+            if slot.material.name not in names:
+                names.append(slot.material.name)
+            if obj.type == "MESH" and obj not in users.setdefault(slot.material.name, []):
+                users[slot.material.name].append(obj)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    files, found, notes = {}, [], []
+    for name in names:
+        described = _material(bpy.data.materials[name], folder, files, {"users": users.get(name, []), "size": size} if bake else None)
+        notes += [f"{name}: {note}" for note in described.pop("notes")]
+        found.append(described)
+    return found, notes, hashlib.sha256(json.dumps(found, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _beside(objects, transfer_id, write, humanoid=False, bake=True):
+    """What the manifest says besides the model file: how the file's axes lie, the materials, where their images are,
+    which of those images were baked from nodes, and whether the rig is a person's (Unity's Humanoid). `write`: also
+    write the images (and bake the ones that are to be baked: without it they are only named)."""
+    folder = os.path.join(exchange_dir(), transfer_id + ".textures")
+    materials, notes, digest = _materials(objects, folder if write else None, bake)
+    clips = _takes(objects)[1]
+    # Baked this time: one that waits for Object Mode ("pending") is among the notes instead, and is not said to be baked.
+    baked = [f"{material['name']}: {what}" for material in materials for key, what in BAKED.items()
+             if (material.get(key) or {}).get("baked") and (material[key].get("stamp") or [None])[-1] != "pending"]
+    return {"axes": "blender", "materials": materials, "materials_hash": digest, "textures_dir": transfer_id + ".textures",
+            "not_carried": notes, "baked": baked, **({"rig": "humanoid"} if humanoid else {}), **({"clips": clips} if clips is not None else {})}
 
 
 def sent_as(obj):
@@ -902,20 +1518,25 @@ def _mark_sent(obj):
     return key
 
 
-def export_fbx(roots, name="model"):
-    """Export the named objects and their children as an FBX in the exchange folder, set up for Unity (Y up, -Z
-    forward, textures embedded). Returns {"manifest": path for Unity's ch_import_model, "objects": names exported}.
-    The selection, the active object and the mode are left as they are. Sending the same objects of the same saved
-    .blend again makes Unity replace the model it already has in place, also after they were renamed here: each
-    object sent keeps the name it went under as a custom property (claude_hand_sent_as). From a file that was never
-    saved Unity cannot tell, and adds a new model."""
+def export_fbx(roots, name="model", humanoid=False, bake=True):
+    """Export the named objects and their children as an FBX in the exchange folder, for Unity, with what their
+    materials are made of next to it (values and image files; see _materials). Returns {"manifest": path for Unity's
+    ch_import_model, "objects": names exported, "not_carried": what of the materials could not go, "baked": which
+    material inputs went as an image baked from their nodes; both for the user to know}. `humanoid`: the rig is a
+    person's, and Unity is to set it up as Humanoid. `bake=False`: inputs fed through nodes are not baked (and so
+    not carried). The selection, the active object
+    and the mode are left as they are. Sending the same objects of the same saved .blend again makes Unity replace the
+    model it already has in place, also after they were renamed here: each object sent keeps the name it went under
+    as a custom property (claude_hand_sent_as). From a file that was never saved Unity cannot tell, and adds a new
+    model."""
     roots, objects = _with_children(roots)
     name, transfer_id = _transfer_id(name)
-    _write_fbx(objects, os.path.join(exchange_dir(), transfer_id + ".fbx"))
+    shape = _write_fbx(objects, os.path.join(exchange_dir(), transfer_id + ".fbx"))
     keys = [_mark_sent(bpy.data.objects[root]) for root in roots]
+    look = _beside(objects, transfer_id, True, humanoid, bake)
     manifest = _write_manifest(name, transfer_id, {"format": "claude-hand/model@1", "model_file": transfer_id + ".fbx", "roots": keys,
-                                                   "objects": sorted(o.name for o in objects)})
-    result = {"manifest": manifest, "objects": sorted(o.name for o in objects)}
+                                                   "objects": sorted(o.name for o in objects), "check": shape, **look})
+    result = {"manifest": manifest, "objects": sorted(o.name for o in objects), "not_carried": look["not_carried"], "baked": look["baked"]}
     if not bpy.data.filepath:
         result["note"] = "이 .blend는 저장된 적이 없어, 같은 것을 다시 보내면 Unity에 새 모델이 하나 더 생깁니다. 저장한 뒤 보내면 제자리에서 바뀝니다."
     return result
@@ -1071,7 +1692,7 @@ def _on_saved(*args):
 def _on_loaded(*_args):
     """Another file: nothing known of the one before holds, and what is saved in it may be news to Unity."""
     _follow.update(path=bpy.data.filepath, moved_from="", due=None, rows=[], seen=set(), models={}, status="")
-    _touched.update(seq=0, objects={}, other=0)
+    _touched.update(seq=0, objects={}, data={}, other=0)
     _follow_due("open")
 
 
@@ -1083,13 +1704,18 @@ def _on_touched(scene, depsgraph):
     makes Blender work out anew."""
     if not _follow["models"] or _touched["own"]:
         return
-    for update in depsgraph.updates:
-        if not (update.is_updated_geometry or update.is_updated_transform or update.is_updated_shading):
-            continue
+    updates = [u for u in depsgraph.updates if u.is_updated_geometry or u.is_updated_transform or u.is_updated_shading]
+    material_named = any(type(u.id).__name__ == "Material" for u in updates)
+    for update in updates:
+        kind = type(update.id).__name__
+        if kind == "ShaderNodeTree" and material_named and getattr(update.id, "is_embedded_data", False):
+            continue  # a material's own nodes, told of along with the material: the material stands for them
         _touched["seq"] += 1
         if isinstance(update.id, bpy.types.Object):
             _touched["objects"][update.id.name] = _touched["seq"]
-        else:  # a mesh, a material: whose it is does not show here, so it counts for every model
+        elif kind in ("Mesh", "Material"):  # whose it is shows when a model is looked at (_made_of)
+            _touched["data"][(kind, update.id.name)] = _touched["seq"]
+        else:  # a node group, a shape key, an action: whose it is does not show here, so it counts for every model
             _touched["other"] = _touched["seq"]
 
 
@@ -1189,6 +1815,20 @@ def _snapshot(objects):
     return tuple(sorted(o.name for o in objects)), tuple(sorted(images))
 
 
+def _made_of(objects):
+    """The meshes and materials these objects are made of, as _on_touched names them: a change to another model's
+    material is not a change to this one (it used to count for every model, which sent a mesh with a Bevel again
+    each time, and exported a heavy one for nothing)."""
+    parts = set()
+    for obj in objects:
+        if obj.type == "MESH" and obj.data is not None:
+            parts.add(("Mesh", obj.data.name))
+        for slot in getattr(obj, "material_slots", ()):
+            if slot.material is not None:
+                parts.add(("Material", slot.material.name))
+    return parts
+
+
 def _file_hash(path):
     digest = hashlib.sha256()
     with open(path, "rb") as f:
@@ -1197,27 +1837,33 @@ def _file_hash(path):
     return digest.hexdigest()
 
 
-def _export_followed(row, objects):
+def _export_followed(row, objects, textures=False):
     """Export a model that follows this file, under a name of its own in the exchange folder (always the same name:
-    the file is not kept, and its name gets into the FBX). Returns (manifest, the files written)."""
+    the file is not kept, and its name gets into the FBX). Returns (manifest, the files written, the hash of its
+    materials). The materials' images are written only with `textures`: to tell whether Unity has this already, the
+    model file and that hash are enough."""
     stem = re.sub(r"[^A-Za-z0-9_-]+", "_", os.path.splitext(os.path.basename(row["asset"]))[0]).strip("_") or "model"
     transfer_id = f"follow_{row['hash']}_{stem}"[:80]
     model = os.path.join(exchange_dir(), transfer_id + ".fbx")
     _touched["own"] = True
     try:
-        _write_fbx(objects, model)
+        shape = _write_fbx(objects, model)
         bpy.context.view_layer.update()  # what the export itself stirred up is told now, and passed over (_on_touched)
     finally:
         _touched["own"] = False
-    manifest = _write_manifest(row["name"], transfer_id, {"format": "claude-hand/model@1", "model_file": transfer_id + ".fbx",
-                                                         "roots": row["roots"], "objects": sorted(o.name for o in objects)})
-    return manifest, [model, manifest]
+    look = _beside(objects, transfer_id, textures)
+    manifest = _write_manifest(row["name"], transfer_id, {"format": "claude-hand/model@1", "model_file": transfer_id + ".fbx", "check": shape,
+                                                         "roots": row["roots"], "objects": sorted(o.name for o in objects), **look})
+    return manifest, [model, manifest, os.path.join(exchange_dir(), look["textures_dir"])], look["materials_hash"]
 
 
 def _discard(files):
     for path in files:
         try:
-            os.remove(path)
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                os.remove(path)
         except OSError:
             pass
 
@@ -1234,23 +1880,32 @@ def _compare(row, model, first_look):
     _, objects = _with_children(row["objects"])
     snapshot, seq = _snapshot(objects), _touched["seq"]
     touched = first_look or known["seq"] < 0 or snapshot != known["snapshot"] or _touched["other"] > known["seq"] or \
-        any(_touched["objects"].get(o.name, 0) > known["seq"] for o in objects)
+        any(_touched["objects"].get(o.name, 0) > known["seq"] for o in objects) or \
+        any(_touched["data"].get(part, 0) > known["seq"] for part in _made_of(objects))
     if not touched and known["took"] > HEAVY_SECONDS:
         return None
     started = time.perf_counter()
-    manifest, files = _export_followed(row, objects)
+    manifest, files, look = _export_followed(row, objects)
     known["took"] = time.perf_counter() - started
     written = _file_hash(files[0])
-    if written == model.get("file_hash"):
+    same_look = look == model.get("materials_hash", look)  # a Unity side from before 0.17 says nothing of materials
+    if written == model.get("file_hash") and same_look:
         known.update(seq=seq, snapshot=snapshot)
         _discard(files)
         return None
-    if not touched:
+    if not touched and same_look:
         _export_followed(row, objects)
         if _file_hash(files[0]) != written:  # never twice the same: what Unity has is as good as this
             _discard(files)
             return None
-    return {"row": row, "manifest": manifest, "files": files, "seq": seq, "snapshot": snapshot}
+    _touched["own"] = True
+    try:
+        sent = _beside(objects, os.path.splitext(os.path.basename(files[0]))[0], True)  # now the images too
+        bpy.context.view_layer.update()
+    finally:
+        _touched["own"] = False
+    later = any(str(note).endswith(LATER) for note in sent["not_carried"])  # a bake that waits for Object Mode
+    return {"row": row, "manifest": manifest, "files": files, "seq": seq, "snapshot": snapshot, "later": later}
 
 
 def _follow_listed(payload):
@@ -1325,11 +1980,32 @@ def _follow_sent(payload):
             uses = int(data.get("instance_count") or 0)
             _tell(f"follow:{row['hash']}:{row['asset']}",
                   f"{why} → {row['project']}: {row['label']} 반영" + (f" (씬 오브젝트 {uses}개)" if uses else ""))
+            check = data.get("shape_check") or {}
+            if check.get("same") is False:  # Unity measured the model it imported, and it is not what was sent
+                odd = [str(part.get("name")) for part in check.get("differing") or []] + [str(name) for name in check.get("missing") or []]
+                _tell(f"follow-shape:{row['hash']}:{row['asset']}",
+                      f"{row['project']}: {row['label']}이(가) Unity에 보낸 것과 다르게 들어갔어요({_names(odd)}). Claude에게 알려 주세요.")
+            if _kept_there(data):  # else a material changed here and saved looks as if it had not arrived
+                _tell(f"follow-kept:{row['hash']}:{row['asset']}", _kept_line(row["project"], _kept_there(data)))
+            if job.get("later"):  # else nodes changed here and saved look as if they had not arrived
+                _tell(f"follow-later:{row['hash']}:{row['asset']}",
+                      f"{row['project']}: {row['label']}의 노드로 만든 재질은 오브젝트 모드에서 저장하면 구워서 갑니다(지금은 Unity에 있던 이미지 그대로).")
         elif state == "unchanged":
             known.update(seq=job["seq"], snapshot=job["snapshot"])
         elif state == "missing":
             _tell(f"follow-gone:{row['hash']}:{row['asset']}", f"{row['project']}에 {row['label']} 모델이 더 없어서 보내지 않았어요.")
     _worker_over()
+
+
+def _kept_there(data):
+    """The materials of a model that Unity left as they are, by its answer: they were edited there since they were made."""
+    made = data.get("materials_made")
+    return [str(name) for name in (made.get("kept") if isinstance(made, dict) else None) or []]
+
+
+def _kept_line(project, names):
+    return (f"{project}에서 고친 재질은 Unity 것 그대로 뒀어요({_names(names)}). Blender 재질대로 다시 만들려면 Unity에서 그 .mat 파일을 지우고 "
+            "다시 보내세요.")
 
 
 def _tell(key, text):
@@ -1469,6 +2145,18 @@ def _follow_done(payload, received=False):
         asset = str(data.get("asset_path") or "")
         _notice(f"{row['project']}에 {row['label']}을(를) 보냈어요" + ("(있던 모델을 바꿈)" if data.get("updated") else "(씬에 놓음)") +
                 ". 저장할 때마다 다시 갑니다. Unity 채팅창의 되돌리기로 뺄 수 있어요.")
+        # No Claude reads this answer: what a subagent would report of it is said here.
+        baked, lost, check = data.get("baked") or [], data.get("not_carried") or [], data.get("shape_check") or {}
+        if baked:
+            _notice("노드로 만든 재질 입력은 텍스처로 구워 보냈어요(그때 모습으로 굳은 이미지): " + ", ".join(str(b) for b in baked[:6]) +
+                    (f" 외 {len(baked) - 6}개" if len(baked) > 6 else ""))
+        for line in lost[:6]:
+            _notice("못 옮긴 것 · " + str(line))
+        if _kept_there(data):
+            _notice(_kept_line(row["project"], _kept_there(data)))
+        if check.get("same") is False:
+            odd = [str(part.get("name")) for part in check.get("differing") or []] + [str(name) for name in check.get("missing") or []]
+            _notice(f"Unity에 보낸 것과 다르게 들어갔어요({_names(odd)}). Claude에게 알려 주세요.")
         _note_for_claude(f"[사용자가 Blender 패널에서 '{row['label']}'을(를) Unity {row['project']}에 직접 보냈음: {asset} "
                          "(Claude를 거치지 않음, 저장할 때마다 다시 감)]")
     _follow_due("look")

@@ -36,7 +36,30 @@ class Check:
     fix: str = ""
 
 
-def doctor_checks(projects: list[Path], blender_ports: list[int], version=install.tool_version, progress=None) -> list[Check]:
+def unity_server_starts(cfg, run=subprocess.run, contained=launch.inside_app_container) -> tuple[bool, str, str]:
+    """Whether the MCP for Unity server comes up at all: (ok, what was seen, what to do). Each Unity subagent starts
+    one for itself with the registered command; when that cannot start, the subagent is left with the ch_* tools
+    only and nothing says why (a supervisor spent five minutes finding out, 2026-11-24). Asked with --help, which
+    sets the server's environment up as a real start does and talks to no Unity."""
+    command = [cfg.command, *[a for a in cfg.args if a != "--help"], "--help"]
+    shown = " ".join(command)
+    try:
+        done = run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"실행하지 못함: {exc}", f"터미널에서 직접 실행해 오류를 보세요: {shown}"
+    if done.returncode == 0:
+        return True, "뜸", ""
+    seen = ((done.stderr or done.stdout or "").strip().splitlines() or ["오류 내용 없음"])[-1].strip()[:200]
+    if contained():
+        return False, seen, ("이 세션은 Claude 데스크톱 앱이 띄운 것이라 uv가 실행 환경을 새로 만들지 못합니다(앱이 AppData를 따로 보여 줍니다). "
+                             f"시작 메뉴에서 연 터미널에서 한 번 실행하세요: {shown}  (한 번 만들어지면 여기서도 됩니다)")
+    return False, seen, f"터미널에서 직접 실행해 오류를 보세요: {shown}"
+
+
+def doctor_checks(projects: list[Path], blender_ports: list[int], version=install.tool_version, progress=None,
+                  server_starts=None) -> list[Check]:
+    """server_starts: unity_server_starts when the MCP for Unity server is to be started for real (the doctor
+    command); left out, that check is skipped."""
     checks: list[Check] = []
     progress = progress or (lambda message: None)
 
@@ -95,6 +118,10 @@ def doctor_checks(projects: list[Path], blender_ports: list[int], version=instal
     add("Unity", "연결된 Unity 에디터", bool(unity_running) or None,
         ", ".join(i.id for i in unity_running) or "없음",
         "" if unity_running else "Unity 프로젝트를 열고 Window > MCP for Unity 가 Connected인지 확인")
+    if server_starts is not None and unity_configured and unity_cfg.transport == "stdio" and versions["uv"] is not None:
+        progress("MCP for Unity 서버가 뜨는지 확인 중...")
+        starts, seen, fix = server_starts(unity_cfg)
+        add("Unity", "MCP for Unity 서버 실행 (하위 세션이 띄우는 것)", starts, seen, fix)
     try:
         via_bridge = [i for i in discovery.discover_bridge() if i.alive]
     except Exception:

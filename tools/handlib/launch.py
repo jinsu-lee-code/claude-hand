@@ -222,9 +222,40 @@ def shortcut_files(platform=sys.platform, home: Path | None = None) -> dict[Path
         f"Exec={script}\nTerminal=true\nComment=Start the Claude Hand supervisor\n")}
 
 
-def open_start_window(script: Path = constants.START_SCRIPT, platform=sys.platform, popen=subprocess.Popen) -> list[str]:
-    """Open start-supervisor in a new, visible terminal window (the first-start questions are answered there)."""
-    if platform == "win32":
+def inside_app_container(env=os.environ) -> bool:
+    """Windows: this process was started by a packaged app (the Claude desktop app is one) and sees AppData through
+    that app's own copy: a folder it newly makes there lands in the app's private folder
+    (AppData/Local/Packages/<app>/LocalCache/...). From in here uv cannot build an environment in its own folders
+    (it fails to remove a folder it just made, os error 32), so a tool that uvx has to set up anew never starts: an
+    MCP for Unity server did not, for every subagent of a Claude Hand that was started from the desktop app
+    (found 2026-11-24). Told by making a folder in AppData and asking where it really is."""
+    if sys.platform != "win32" or not env.get("APPDATA"):
+        return False
+    probe = Path(env["APPDATA"]) / f"claude-hand-probe-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    try:
+        probe.mkdir()
+    except OSError:
+        return False
+    try:  # against where AppData itself really is: a profile reached through a link is not a container
+        expected = os.path.join(os.path.realpath(probe.parent), probe.name)
+        return os.path.normcase(os.path.realpath(probe)) != os.path.normcase(expected)
+    except OSError:
+        return False
+    finally:
+        try:
+            probe.rmdir()
+        except OSError:
+            pass
+
+
+def open_start_window(script: Path = constants.START_SCRIPT, platform=sys.platform, popen=subprocess.Popen, contained=None) -> list[str]:
+    """Open start-supervisor in a new, visible terminal window (the first-start questions are answered there).
+    contained: whether this process is inside an app's container (inside_app_container; asked when not given)."""
+    if platform == "win32" and (inside_app_container() if contained is None else contained):
+        # Opened by the shell, as a double click on the file would: a child of this process would be in the app's
+        # container too, and so would the supervisor, its subagents and every server they start.
+        cmd, flags = ["explorer.exe", str(script)], 0
+    elif platform == "win32":
         cmd = ["cmd.exe", "/c", "start", "Claude Hand", str(script)]
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     elif platform == "darwin":

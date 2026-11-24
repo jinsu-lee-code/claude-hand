@@ -106,7 +106,39 @@ namespace ClaudeHand.Editor
             var meshBefore = instance != null ? instance.GetComponentInChildren<MeshFilter>()?.sharedMesh : null;
             int verticesBefore = meshBefore != null ? meshBefore.vertexCount : 0;
             var embedded = instance != null ? instance.GetComponentInChildren<Renderer>()?.sharedMaterial : null;
-            bool hasMaterial = embedded != null && AssetDatabase.GetAssetPath(embedded) == assetPath;
+            // The model's own material: inside the file, or (from Blender, 0.17 and later) made next to it from the manifest.
+            var ownMaterial = embedded != null ? AssetDatabase.GetAssetPath(embedded) : null;
+            var madeHere = Path.GetDirectoryName(assetPath).Replace('\\', '/') + "/Materials/";
+            bool hasMaterial = ownMaterial == assetPath || (ownMaterial != null && ownMaterial.StartsWith(madeHere));
+            if (fromBlender)
+            {
+                var settings = AssetImporter.GetAtPath(assetPath) as ModelImporter;
+                Check("from Blender: the axis conversion is baked in (no part gets a quarter turn)", settings != null && settings.bakeAxisConversion,
+                    settings != null ? $"bakeAxisConversion {settings.bakeAxisConversion}" : "no model importer");
+                Check("from Blender: its material is made as this project's kind, next to the model",
+                    ownMaterial != null && ownMaterial.StartsWith(madeHere) && first["data"]["materials_made"].HasValues,
+                    $"{ownMaterial}; {first["data"]["materials_made"]}");
+                var measured = first["data"]["shape_check"];
+                Check("from Blender: the model is where and as large as Blender measured it", measured != null && measured.HasValues && measured.Value<bool>("same"),
+                    $"{measured}");
+                // The same file with a wrong measure next to it: said, not passed over.
+                var wrong = JObject.Parse(File.ReadAllText(manifestA));
+                var part = (wrong["check"]?["parts"] as JObject)?.Properties().FirstOrDefault();
+                if (part != null)
+                {
+                    part.Value["at"][0] = (float)part.Value["at"][0] + 0.5f;
+                    var wrongManifest = Path.Combine(Path.GetDirectoryName(manifestA), "ch_selftest_off.claudehand.json");
+                    File.WriteAllText(wrongManifest, wrong.ToString());
+                    var off = Call(ChImportModel.HandleCommand, new { manifest = wrongManifest, new_copy = true, place = false, name = Name + "_off" });
+                    var seen = off["data"]?["shape_check"];
+                    Check("from Blender: a model that is not where Blender measured it is told of",
+                        Ok(off) && seen != null && seen.HasValues && !seen.Value<bool>("same") && seen["differing"].HasValues &&
+                        off["data"]["warnings"].Values<string>().Any(w => w.Contains("not what Blender sent")), Describe(off));
+                    var offPath = off["data"]?.Value<string>("asset_path");
+                    if (!string.IsNullOrEmpty(offPath)) AssetDatabase.DeleteAsset(offPath.Substring(0, offPath.LastIndexOf('/')));
+                    File.Delete(wrongManifest);
+                }
+            }
 
             // A project material with the name the model's own material has.
             string projectMaterial = null;
@@ -144,7 +176,7 @@ namespace ClaudeHand.Editor
                       AssetDatabase.GetAssetPath(instance.GetComponentInChildren<Renderer>().sharedMaterial) == projectMaterial, Describe(third));
                 var back = Call(ChImportModel.HandleCommand, new { manifest = manifestB, materials = "embedded" });
                 Check("materials=embedded: back to the model's own material", Ok(back) &&
-                      AssetDatabase.GetAssetPath(instance.GetComponentInChildren<Renderer>().sharedMaterial) == assetPath,
+                      AssetDatabase.GetAssetPath(instance.GetComponentInChildren<Renderer>().sharedMaterial) == ownMaterial,
                     AssetDatabase.GetAssetPath(instance.GetComponentInChildren<Renderer>().sharedMaterial));
                 Check("materials=embedded: the answer says which links went", Ok(back) && back["data"]["materials"].HasValues &&
                       back["data"]["materials"].Value<string>("mode") == "embedded" &&
@@ -206,7 +238,7 @@ namespace ClaudeHand.Editor
             Check("undo: the replaced model file is back, with the import settings it had",
                 Ok(undone) && File.ReadAllBytes(modelFile).SequenceEqual(bytesBefore) && AssetDatabase.AssetPathToGUID(assetPath) == guid &&
                 AssetImporter.GetAtPath(assetPath).userData == recordBefore && undone["data"]["restored"].Values<string>().Contains(assetPath) &&
-                (!hasMaterial || AssetDatabase.GetAssetPath(instance.GetComponentInChildren<Renderer>().sharedMaterial) == assetPath),
+                (!hasMaterial || AssetDatabase.GetAssetPath(instance.GetComponentInChildren<Renderer>().sharedMaterial) == ownMaterial),
                 Describe(undone) + " / " + AssetImporter.GetAtPath(assetPath).userData);
             Check("undo: the scene object shows the earlier mesh again", meshBack != null && meshBack.vertexCount == verticesNow,
                 $"{verticesNow} -> {(meshBack != null ? meshBack.vertexCount : 0)} vertices");
