@@ -805,7 +805,7 @@ class SelftestTests(unittest.TestCase):
         blender = lambda port, command, timeout: {"status": "success", "result": {"result": json.dumps({"enabled": True, "version": [0, 1, 0]})}}
         checks = handlib.checks.selftest_checks([9876], run_tests=False, registry=[gone, live], unity_request=unity, blender=blender,
                                     blenders=[handlib.discovery.BlenderInstance(port=9876, filepath="C:/Art/props.blend")],
-                                    supervisor_on=False, stale=[], hooks=[])
+                                    supervisor_on=False, stale=[], hooks=[], tokens=[])
         by_item = {c.item: c for c in checks}
         self.assertFalse(by_item["MyGame: Claude Hand Tools"].ok)  # compiled before ch_capture existed
         self.assertIn("ch_capture", by_item["MyGame: Claude Hand Tools"].detail)
@@ -819,7 +819,7 @@ class SelftestTests(unittest.TestCase):
         current = {**live, "tools": [{"name": t} for t in wanted], "version": handlib.constants.VERSION}
         older = {**current, "name": "Older", "hash": "cccc3333", "version": "0.0.1"}
         checks = handlib.checks.selftest_checks([], run_tests=False, registry=[current, older], unity_request=unity, blenders=[],
-                                                supervisor_on=False, stale=[], hooks=[])
+                                                supervisor_on=False, stale=[], hooks=[], tokens=[])
         by_item = {c.item: c for c in checks}
         self.assertTrue(by_item["MyGame: Claude Hand Tools"].ok)
         self.assertIn(handlib.constants.VERSION, by_item["MyGame: Claude Hand Tools"].detail)
@@ -911,8 +911,32 @@ class SelftestTests(unittest.TestCase):
             self.assertEqual([c.ok for c in skipped], [None])
             ran.clear()
             handlib.checks.selftest_checks([], run_tests=False, registry=[], blenders=[], supervisor_on=False, stale=[], hooks=[],
-                                           unity_projects=[project], unity_batch=lambda p, progress=None: ran.append(p) or [])
+                                           tokens=[], unity_projects=[project], unity_batch=lambda p, progress=None: ran.append(p) or [])
             self.assertEqual(ran, [project])
+
+    def test_says_whether_the_supervisors_transcript_still_gives_tokens(self):
+        """The line that says what a request took reads Claude Code's transcripts, a format written down nowhere."""
+        skipped = handlib.checks.token_record_check(config={})  # Claude Hand was never started here: nothing to read yet
+        self.assertEqual((skipped.ok, skipped.area), (None, "시간·토큰"))
+        lines = [{"type": "user", "origin": {"kind": "channel"}, "timestamp": "2026-11-23T03:00:00.000Z",
+                  "message": {"content": '<channel source="claude-hand" request="1123-120000-1">x</channel>'}},
+                 {"type": "assistant", "timestamp": "2026-11-23T03:00:02.000Z",
+                  "message": {"id": "m1", "content": [], "stop_reason": "end_turn", "usage": {"output_tokens": 5}}},
+                 {"type": "user", "origin": {"kind": "human"}, "timestamp": "2026-11-23T03:01:00.000Z", "message": {"content": "터미널에서"}},
+                 {"type": "assistant", "timestamp": "2026-11-23T03:01:02.000Z",
+                  "message": {"id": "m2", "content": [], "stop_reason": "end_turn", "usage": {"output_tokens": 5}}}]
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript = Path(tmp) / "2bfcab59-32d4-4e90-8df7-37b79974a4e9.jsonl"
+            transcript.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+            read = handlib.checks.token_record_check(transcript)
+            self.assertEqual((read.ok, read.detail), (True, "응답 2개, 요청 번호로 갈린 요청 1개"))
+            transcript.write_text("".join(json.dumps(line) + "\n" for line in lines[2:]), encoding="utf-8")
+            self.assertEqual(handlib.checks.token_record_check(transcript).detail, "응답 1개, 요청 번호가 붙은 것은 아직 없음")
+            # A Claude Code that writes its answers another way: said here, and the panels' line goes on with the time alone.
+            transcript.write_text(json.dumps({"kind": "answer", "tokens": 5}) + "\n", encoding="utf-8")
+            changed = handlib.checks.token_record_check(transcript)
+            self.assertIs(changed.ok, False)
+            self.assertIn("기록 형식이 바뀐 것 같습니다", changed.fix)
 
     def test_ci_reports_a_failure_as_an_annotation(self):
         """tools/tests/ci.py (what GitHub Actions runs): a job's log needs a sign-in, an annotation does not."""

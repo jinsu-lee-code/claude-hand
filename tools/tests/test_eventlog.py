@@ -138,11 +138,7 @@ class TraceTests(unittest.TestCase):
         self.hub.reply("unity-mygame", "만들었어요")
         self.hub.post_user_message("unity", "MyGame", "하나 더")
 
-        def run(*argv):
-            out = io.StringIO()
-            with unittest.mock.patch.dict(os.environ, {"CLAUDE_HAND_HOME": str(self.home)}), contextlib.redirect_stdout(out):
-                code = ch.build_parser().parse_args(["trace", *argv]).func(ch.build_parser().parse_args(["trace", *argv]))
-            return code, out.getvalue()
+        run = lambda *argv: run_cli(self.home, "trace", *argv)
         code, listing = run()
         self.assertEqual(code, 0)
         self.assertIn("큐브 만들어줘", listing)
@@ -157,6 +153,80 @@ class TraceTests(unittest.TestCase):
         self.assertIn("아직 답이 없습니다", last)
         self.assertEqual(run("unity-nobody")[0], 1)
         self.assertEqual([e["event"] for e in json.loads(run("--request", first, "--json")[1])], ["message", "action", "reply"])
+
+    def test_what_a_request_took_in_trace_and_usage(self):
+        """The channel writes it down when a request is answered (handlib/usage.py reads the tokens from Claude Code's
+        transcripts): `trace` shows it as the request's last line, `usage` adds the requests up."""
+        hub = self.hub
+        self.assertIn("시간·토큰 기록이 없습니다", run_cli(self.home, "usage")[1])
+        cost = {"감독": {"calls": 4, "output": 200, "input": 77, "cached": 4900, "seconds": 6.0},
+                "unity-mygame": {"calls": 2, "output": 250, "input": 4310, "cached": 4300, "seconds": 16.5}}
+        ledger = type("Ledger", (), {"update": lambda self: None, "settled": lambda self, request, after: True,
+                                     "cost": lambda self, request: cost})()
+        hub._ledger = lambda: ledger
+        hub.post_user_message("unity", "MyGame", "큐브 만들어줘")
+        first = hub.logs["unity-mygame"][-1]["request"]
+        hub.report_action("unity", "MyGame@aaaa1111", "manage_gameobject", "create Cube", "aaa")
+        hub.reply("unity-mygame", "만들었어요")
+        hub.costs[first]["asked"] = hub.costs[first]["answered"] - 32.4
+        self.assertEqual(hub.check_costs(), [first])
+        hub._ledger = lambda: None  # a request with no transcript to read: the time alone
+        hub.post_user_message("unity", "MyGame", "지금 씬 이름이 뭐야?")
+        second = hub.logs["unity-mygame"][-1]["request"]
+        hub.reply("unity-mygame", "Main이에요")
+        hub.costs[second]["asked"] = hub.costs[second]["answered"] - 4
+        self.assertEqual(hub.check_costs(), [second])
+        yesterday = time.time() - 86400  # and one from the day before, as the log keeps it
+        eventlog.write("message", self.home, yesterday, request="1109-090000-1", chat_id="blender-props", text="의자 만들어줘")
+        eventlog.write("cost", self.home, yesterday + 70, request="1109-090000-1", chat_id="blender-props", seconds=70.2, actions=3,
+                       tokens={"감독": {"calls": 3, "output": 1000, "input": 2000, "cached": 300000, "seconds": 9.0},
+                               "blender-props": {"calls": 5, "output": 3000, "input": 9000, "cached": 360000, "seconds": 55.0}}, text="x")
+
+        events = eventlog.read(self.home)
+        self.assertEqual([e["event"] for e in eventlog.trace(events, first)], ["message", "action", "reply", "cost"])
+        code, detail = run_cli(self.home, "trace", "--request", first)
+        took = detail.splitlines()[-1]
+        self.assertIn("시간·토큰", took)
+        self.assertIn("unity-mygame  32.4초 · 동작 1번  감독 6초 API 4번 출력 200 · 새 입력 77 · 다시 읽기 4.9천 / "
+                      "unity-mygame 16초 API 2번 출력 250 · 새 입력 4.3천 · 다시 읽기 4.3천", took)
+        self.assertIn("4.0초  (토큰 기록 없음)", run_cli(self.home, "trace", "--request", second)[1].splitlines()[-1])
+        listed = {r["request"]: r for r in eventlog.requests(events)}
+        self.assertEqual((listed[first]["actions"], listed[first]["refused"]), (1, 0))  # the line counts as neither
+
+        code, text = run_cli(self.home, "usage")
+        self.assertEqual(code, 0)
+        rows, sums = text.split("\n\n합계: ")
+        rows = rows.splitlines()
+        self.assertEqual(len(rows), 3)
+        self.assertIn('blender-props            1분 10초 · 동작 3번 · 출력 4.0천 · 새 입력 1.1만 · 다시 읽기 66만  "의자 만들어줘"', rows[0])
+        self.assertIn('unity-mygame             32초 · 동작 1번 · 출력 450 · 새 입력 4.4천 · 다시 읽기 9.2천  "큐브 만들어줘"', rows[1])
+        self.assertIn('4초 · 동작 0번 · 토큰 기록 없음  "지금 씬 이름이 뭐야?"', rows[2])
+        sums = sums.splitlines()
+        self.assertEqual(sums[0], "요청 3개 · 기다린 시간 1분 47초 · 출력 4.5천 · 새 입력 1.5만 · 다시 읽기 67만")
+        self.assertEqual([line.split()[0] for line in sums[1:4]], ["감독", "blender-props", "unity-mygame"])  # the supervisor first
+        self.assertIn("API 7번 · 출력 1.2천 · 새 입력 2.1천 · 다시 읽기 30만", sums[1])
+        self.assertEqual(sums[4], "날짜별:")
+        self.assertRegex(sums[5], r"^  \d\d-\d\d  요청 1개 · 1분 10초 · 출력 4.0천 · 새 입력 1.1만 · 다시 읽기 66만$")
+        self.assertRegex(sums[6], r"^  \d\d-\d\d  요청 2개 · 36초 · 출력 450 · 새 입력 4.4천 · 다시 읽기 9.2천$")
+        self.assertIn("다시 읽기: 캐시에서 다시 읽은 토큰", text)
+        short = run_cli(self.home, "usage", "--last", "1")[1]
+        self.assertNotIn("큐브 만들어줘", short)       # the list is cut
+        self.assertIn("합계: 요청 3개", short)         # the sums are of all
+        self.assertNotIn("날짜별", run_cli(self.home, "usage", "--days", "1")[1])  # one day: nothing to compare
+        data = json.loads(run_cli(self.home, "usage", "--json")[1])
+        self.assertEqual([(row["request"], row["asked"]) for row in data],
+                         [("1109-090000-1", "의자 만들어줘"), (first, "큐브 만들어줘"), (second, "지금 씬 이름이 뭐야?")])
+        self.assertEqual(data[1]["tokens"]["unity-mygame"]["output"], 250)
+        self.assertNotIn("tokens", data[2])
+
+
+def run_cli(home: Path, *argv):
+    """A claude_hand.py command against the log in `home`: (exit code, what it printed)."""
+    out = io.StringIO()
+    with unittest.mock.patch.dict(os.environ, {"CLAUDE_HAND_HOME": str(home)}), contextlib.redirect_stdout(out):
+        args = ch.build_parser().parse_args(list(argv))
+        code = args.func(args)
+    return code, out.getvalue()
 
 
 if __name__ == "__main__":

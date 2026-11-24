@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from handlib import agents, chatsetup, constants, discovery, install, keeps, launch, link
+from handlib import agents, chatsetup, constants, discovery, install, keeps, launch, link, usage
 
 # The Unity self-test writes over this file directly, the way MCP for Unity writes a script: Unity is told nothing
 # beforehand, so only the copy the guard hook makes can bring it back (ChSelfTest.FileChecks has the same two names).
@@ -431,9 +431,30 @@ def unity_batch_checks(project: Path, run=subprocess.run, editor=None, blender_e
     return checks
 
 
+def token_record_check(transcript: Path | None = None, config: dict | None = None) -> Check:
+    """Whether the supervisor session's transcript still reads the way handlib/usage.py takes it: the line that says
+    what a request took has tokens only then. The format is Claude Code's own and written down nowhere, so a new
+    Claude Code may change it; this is where that shows."""
+    area, item = "시간·토큰", "감독 세션 기록에서 토큰 읽기"
+    if transcript is None:
+        config = launch.read_user_config() if config is None else config
+        transcript = launch.session_transcript(str(config.get("supervisor_session") or ""))
+    if transcript is None:
+        return Check(area, item, None, "감독 세션 기록이 아직 없어 건너뜀 (Claude Hand를 한 번 쓴 뒤 다시 돌리면 확인)")
+    ledger = usage.Ledger(transcript)
+    ledger.update()
+    answers = sum(one["calls"] for who in ledger.requests.values() for one in who.values())
+    if not answers:
+        return Check(area, item, False, f"{transcript.name}: 토큰이 적힌 응답을 하나도 찾지 못함",
+                     "Claude Code의 기록 형식이 바뀐 것 같습니다. 채팅창의 '이 요청' 줄에는 시간만 나옵니다 (tools/handlib/usage.py)")
+    numbered = sum(bool(request) for request in ledger.requests)
+    return Check(area, item, True, f"응답 {answers}개" + (f", 요청 번호로 갈린 요청 {numbered}개" if numbered else
+                                                         ", 요청 번호가 붙은 것은 아직 없음"))
+
+
 def selftest_checks(blender_ports: list[int], run_tests: bool = True, run=subprocess.run, progress=None,
                     registry=None, unity_request=None, blender=None, blenders=None, chat_lines=None,
-                    supervisor_on=None, stale=None, hooks=None, unity_projects=(), unity_batch=None) -> list[Check]:
+                    supervisor_on=None, stale=None, hooks=None, unity_projects=(), unity_batch=None, tokens=None) -> list[Check]:
     checks: list[Check] = []
     progress = progress or (lambda message: None)
     add = lambda *a: checks.append(Check(*a))
@@ -521,6 +542,8 @@ def selftest_checks(blender_ports: list[int], run_tests: bool = True, run=subpro
         for line in chat_lines if chat_lines is not None else chatsetup.chat_status_report():
             if line.startswith(("OK ", "!! ")):
                 add("채팅", "채널 서버", line.startswith("OK "), line[3:].strip())
+
+    checks += tokens if tokens is not None else [token_record_check()]
 
     progress("하위 세션의 안전장치 훅 확인 중...")
     checks += hooks if hooks is not None else hook_checks(Path.home() / ".claude" / "agents")

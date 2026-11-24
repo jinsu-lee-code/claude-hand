@@ -27,7 +27,9 @@ First-time setup helpers (used by the claude-hand-setup skill, safe to run by ha
   status               Show every open window and what goes on in it: at work and on whose request, waiting
                        for an answer, stopped by a dialog, idle (the chat panels show the same of the others).
   trace                Show what happened to a chat panel request, step by step: the message, each tool
-                       call and refusal, the ch_* calls and how long they took, the reply.
+                       call and refusal, the ch_* calls and how long they took, the reply, what it took.
+  usage                Show what the chat panel requests took: time, actions and tokens of each, and the sums
+                       by who spent them and by day.
   update               After `git pull`: refresh everything an earlier version set up.
 
 Everyday start (so nobody has to open a terminal):
@@ -63,7 +65,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import guard  # noqa: E402
-from handlib import agents, chatsetup, checks, constants, discovery, eventlog, install, launch, link, overview, settings  # noqa: E402
+from handlib import agents, chatsetup, checks, constants, discovery, eventlog, install, launch, link, overview, settings, usage  # noqa: E402
 
 
 def cmd_chat_setup(args: argparse.Namespace) -> int:
@@ -259,6 +261,47 @@ def cmd_trace(args: argparse.Namespace) -> int:
         print("  " + eventlog.describe(event, since=chosen["ts"]))
     if chosen["answered"] is None:
         print("  (아직 답이 없습니다)")
+    return 0
+
+
+def cmd_usage(args: argparse.Namespace) -> int:
+    """What the chat panel requests took, from the lines the chat channel writes to the event log when a request is
+    answered (the same that a panel shows under the result, here with who spent what)."""
+    events = eventlog.read(days=args.days)
+    asked = {e["request"]: e for e in events if e["event"] == "message" and e.get("request")}
+    rows = sorted({e["request"]: e for e in events if e["event"] == "cost" and e.get("request")}.values(), key=lambda e: e["ts"])
+    if args.json:
+        print(json.dumps([{**row, "asked": asked.get(row["request"], {}).get("text", "")} for row in rows], ensure_ascii=False, indent=2))
+        return 0
+    if not rows:
+        print(f"{eventlog.log_dir()}: 최근 {args.days}일 동안 시간·토큰 기록이 없습니다. Claude Hand가 켜져 있을 때 채팅창 요청에 "
+              "결과 답이 오면 남습니다.")
+        return 0
+    spent = lambda row: {who: {**usage.blank(), **one} for who, one in (row.get("tokens") or {}).items() if isinstance(one, dict)}
+    for row in rows[-args.last:]:
+        cost = spent(row)
+        tokens = usage.tokens_text(usage.together(cost)) if cost else "토큰 기록 없음"
+        print(f"{time.strftime('%m-%d %H:%M:%S', time.localtime(row['ts']))}  {row.get('chat_id', ''):<24} "
+              f"{usage.duration(row.get('seconds', 0))} · 동작 {row.get('actions', 0)}번 · {tokens}  "
+              f"\"{asked.get(row['request'], {}).get('text', '')[:40]}\"")
+    by_who, by_day = {}, {}
+    for row in rows:
+        day = by_day.setdefault(time.strftime("%m-%d", time.localtime(row["ts"])), {"requests": 0, "seconds": 0.0, **usage.blank()})
+        day["requests"] += 1
+        day["seconds"] += row.get("seconds", 0)
+        for who, one in spent(row).items():
+            for key in ("calls", "output", "input", "cached"):
+                by_who.setdefault(who, usage.blank())[key] += one[key]
+                day[key] += one[key]
+    print(f"\n합계: 요청 {len(rows)}개 · 기다린 시간 {usage.duration(sum(row.get('seconds', 0) for row in rows))} · "
+          f"{usage.tokens_text(usage.together(by_who))}")
+    for who in sorted(by_who, key=lambda who: (who != usage.SUPERVISOR, who)):
+        print(f"  {who:<24} API {by_who[who]['calls']}번 · {usage.tokens_text(by_who[who])}")
+    if len(by_day) > 1:
+        print("날짜별:")
+        for name, day in by_day.items():
+            print(f"  {name}  요청 {day['requests']}개 · {usage.duration(day['seconds'])} · {usage.tokens_text(day)}")
+    print("\n출력: 써낸 토큰. 새 입력: 새로 읽은 토큰(캐시에 새로 쓴 것 포함). 다시 읽기: 캐시에서 다시 읽은 토큰(대부분이고 쌉니다).")
     return 0
 
 
@@ -739,6 +782,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_tr.add_argument("--last", type=int, default=20, help="how many requests the list shows (default %(default)s)")
     p_tr.add_argument("--json", action="store_true", help="machine-readable output")
     p_tr.set_defaults(func=cmd_trace)
+
+    p_us = sub.add_parser("usage", help="show what the chat panel requests took: time, actions, tokens (from the event log)")
+    p_us.add_argument("--days", type=int, default=2, help="how many days of the log to read (default %(default)s)")
+    p_us.add_argument("--last", type=int, default=20, help="how many requests the list shows (default %(default)s); the sums are of all")
+    p_us.add_argument("--json", action="store_true", help="machine-readable output")
+    p_us.set_defaults(func=cmd_usage)
 
     p_mode = sub.add_parser("mode", help="(earlier versions) there is one mode now; clears an old setting")
     p_mode.add_argument("mode", nargs="?")

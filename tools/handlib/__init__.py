@@ -10,6 +10,7 @@ Each module uses only the ones above it in this list, and other modules' names t
   overview    what goes on in each open window, in words (the panels' other windows, status)
   looks       whether a tool, or code about to run in Blender, can only look (it needs no undo point then)
   keeps       the files a Unity call names, copied before it runs so that undoing the request puts them back
+  usage       what a request took in tokens and working time, read from Claude Code's transcripts
   settings    the small JSON files claude-hand keeps or edits
   discovery   finding the open Unity editors and Blender windows
   capture     a picture of what a window shows now

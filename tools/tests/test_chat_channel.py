@@ -1170,7 +1170,9 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(note["params"]["content"].startswith("[claude-hand] 사용자가 이 채팅창에서 [중지]를 눌렀습니다"))
         self.assertIn("큐브 백 개 만들어줘", note["params"]["content"])
         self.assertEqual(note["params"]["meta"], {"chat_id": "unity-mygame", "app": "unity", "window": "MyGame", "agent": "unity-mygame",
-                                                  "stop": "requested", "agent_id": "aaa"})
+                                                  "stop": "requested", "agent_id": "aaa",
+                                                  # the request it stops: that turn's tokens are the request's too
+                                                  "request": next(i["request"] for i in self.hub.logs["unity-mygame"] if i["kind"] == "user")})
         self.assertTrue(all(key.isidentifier() for key in note["params"]["meta"]))
         poll = self.hub.poll("unity-mygame", 0, 0)
         self.assertTrue(poll["progress"]["stopping"])  # the panel says so instead of offering the button again
@@ -1699,6 +1701,211 @@ class UndoInWindowTests(unittest.TestCase):
         self.assertEqual(blender(printed("something else"))["state"], "failed")
         self.assertEqual(blender(ConnectionRefusedError()), {"state": "unreachable"})
         self.assertEqual(blender(None)["state"], "failed")
+
+
+class CostTests(unittest.TestCase):
+    """What a request took: a line under its result in the panel and one in the event log, once the supervisor's turn
+    that answered is over (the tokens of that turn's last answer are in its transcript only then)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.agents = Path(self.tmp.name) / "agents"
+        write_agents(self.agents)
+        self.hub = cc.ChatHub(Recorder(), self.agents)
+        self.hub.initialized = True
+        self.logged = []
+        self.hub.events = lambda event, **fields: self.logged.append((event, fields))
+        self.transcript = Path(self.tmp.name) / "projects" / "2bfcab59-32d4-4e90-8df7-37b79974a4e9.jsonl"
+        self.transcript.parent.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def ask(self, text="큐브 만들어줘"):
+        self.hub.post_user_message("unity", "MyGame", text)
+        return self.hub.logs["unity-mygame"][-1]["request"]
+
+    def act(self, times=1):
+        for _ in range(times):
+            self.hub.report_action("unity", "MyGame@aaaa1111", "manage_gameobject", "create Cube", "aaa")
+        self.hub.agent_stopped("unity", "MyGame@aaaa1111", "aaa")
+
+    def waited(self, request, seconds):
+        """As if the answer had come that long after the message."""
+        self.hub.costs[request]["asked"] = self.hub.costs[request]["answered"] - seconds
+
+    def turn(self, request, *answers):
+        """The supervisor's turn for a panel message as Claude Code writes it to its transcript (see test_usage.py):
+        answers are (seconds from now, tokens written, how it ended)."""
+        iso = lambda t: time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t)) + f".{int(t * 1000) % 1000:03d}Z"
+        now = time.time()
+        lines = [{"type": "user", "origin": {"kind": "channel"}, "timestamp": iso(now - 5),
+                  "message": {"content": f'<channel source="claude-hand" chat_id="unity-mygame" request="{request}">x</channel>'}}]
+        lines += [{"type": "assistant", "timestamp": iso(now + after),
+                   "message": {"id": f"msg-{after}", "content": [{"type": "text", "text": "x"}], "stop_reason": stop,
+                               "usage": {"input_tokens": 10, "cache_creation_input_tokens": 20, "cache_read_input_tokens": 46000,
+                                         "output_tokens": output}}} for after, output, stop in answers]
+        with open(self.transcript, "a", encoding="utf-8", newline="\n") as f:
+            f.write("".join(json.dumps(line) + "\n" for line in lines))
+
+    def notices(self):
+        return [i["text"] for i in self.hub.logs["unity-mygame"] if i["kind"] == "notice"]
+
+    def costs_logged(self):
+        return [fields for event, fields in self.logged if event == "cost"]
+
+    def test_a_line_under_the_result_once_the_supervisors_turn_is_over(self):
+        request = self.ask()
+        self.assertNotIn("busy", self.hub.assign("unity-mygame", request, transcript=str(self.transcript)))  # the hook names the file
+        self.assertEqual(self.hub.transcript, self.transcript)
+        self.act(times=2)
+        self.hub.reply("unity-mygame", "만들었어요")
+        self.waited(request, 32.4)
+        self.assertEqual(self.hub.check_costs(), [])  # nothing written yet: the turn is still going
+        self.turn(request, (1, 100, "tool_use"))
+        self.assertEqual((self.hub.check_costs(), self.notices()), ([], []))  # the reply call is in the file, the turn's end is not
+        self.turn(request, (2, 20, "end_turn"))
+        self.assertEqual(self.hub.check_costs(), [request])
+        self.assertEqual(self.notices(), ["이 요청: 32초 · 동작 2번 · 토큰 출력 120 · 새 입력 60 · 다시 읽기 9.2만"])
+        self.assertEqual((self.hub.check_costs(), len(self.notices()), self.hub.costs), ([], 1, {}))  # said once
+        logged, = self.costs_logged()
+        self.assertEqual({k: logged[k] for k in ("request", "chat_id", "seconds", "actions")},
+                         {"request": request, "chat_id": "unity-mygame", "seconds": 32.4, "actions": 2})
+        self.assertEqual(sorted(logged["tokens"]), ["감독"])
+        self.assertEqual({k: logged["tokens"]["감독"][k] for k in ("calls", "output", "input", "cached")},
+                         {"calls": 2, "output": 120, "input": 60, "cached": 92000})
+        self.assertTrue(logged["text"].startswith("감독 "))
+        self.assertIn("API 2번 출력 120 · 새 입력 60 · 다시 읽기 9.2만", logged["text"])
+        json.dumps(logged)  # as the event log writes it
+
+    def test_without_a_transcript_the_line_says_the_time_alone(self):
+        request = self.ask()
+        self.act()
+        self.hub.reply("unity-mygame", "만들었어요")
+        self.waited(request, 5)
+        self.assertEqual(self.hub.check_costs(), [request])  # no file to wait for
+        self.assertEqual(self.notices(), ["이 요청: 5초 · 동작 1번"])
+        logged, = self.costs_logged()
+        self.assertEqual((logged["tokens"], logged["text"], logged["seconds"]), (None, "", 5.0))
+        # A transcript that cannot be found or read costs the tokens, never the line.
+        self.hub.find_transcript = lambda: 1 / 0
+        again = self.ask("하나 더")
+        self.hub.reply("unity-mygame", "여기 있어요")
+        self.waited(again, 61)
+        with unittest.mock.patch.object(cc, "log", lambda *a: None):
+            self.assertEqual(self.hub.check_costs(), [again])
+        self.assertEqual(self.notices()[-1], "이 요청: 1분 1초")  # nothing was done in a window: no "동작"
+
+    def test_a_turn_that_never_shows_its_end_is_not_waited_for_forever(self):
+        self.hub.find_transcript = lambda: self.transcript  # where start-supervisor's session keeps it, before any hook said so
+        request = self.ask()
+        self.hub.reply("unity-mygame", "만들었어요")
+        self.waited(request, 3)
+        self.turn(request, (1, 100, "tool_use"))
+        answered = self.hub.costs[request]["answered"]
+        self.assertEqual(self.hub.check_costs(answered + cc.COST_WAIT - 1), [])
+        self.assertEqual(self.hub.check_costs(answered + cc.COST_WAIT + 1), [request])
+        self.assertEqual(self.notices(), ["이 요청: 3초 · 토큰 출력 100 · 새 입력 30 · 다시 읽기 4.6만"])  # what the file had by then
+
+    def test_the_line_can_be_kept_out_of_the_panels(self):
+        self.hub.show_cost = False  # config.json "show_cost": false
+        request = self.ask()
+        self.hub.reply("unity-mygame", "만들었어요")
+        self.assertEqual((self.hub.check_costs(), self.notices()), ([request], []))
+        self.assertEqual(len(self.costs_logged()), 1)  # trace and usage still have it
+
+    def test_on_it_sent_as_if_it_were_the_result_gets_no_line_of_its_own(self):
+        request = self.ask()
+        self.hub.reply("unity-mygame", "지금 만들게요")  # no `working`, and nothing done yet: the channel takes it for "on it"
+        self.hub.assign("unity-mygame", request)
+        self.assertEqual(self.hub.check_costs(time.time() + cc.COST_WAIT + 1), [])  # handed out: the result is yet to come
+        self.act(times=3)
+        self.assertEqual(self.hub.check_costs(time.time() + cc.COST_WAIT + 1), [])  # worked and stopped: still no result
+        self.hub.reply("unity-mygame", "만들었어요")
+        self.waited(request, 40)
+        self.assertEqual(self.hub.check_costs(), [request])
+        self.assertEqual(self.notices(), ["이 요청: 40초 · 동작 3번"])
+        # The result never comes (the supervisor was interrupted): once the channel stops waiting for it, the line says
+        # what there is instead of staying behind for good.
+        again = self.ask("하나 더")
+        self.hub.reply("unity-mygame", "지금 만들게요")
+        self.act()
+        self.assertEqual(self.hub.check_costs(), [])
+        self.assertEqual(self.hub.check_costs(time.time() + cc.PROGRESS_TTL + 1), [again])
+
+    def test_a_line_that_comes_after_the_panels_next_message_says_which_request_it_is_about(self):
+        self.hub.find_transcript = lambda: self.transcript
+        first = self.ask("빨간 큐브를 원점에 하나 만들고 이름을 Box로 바꿔줘")
+        self.act()
+        self.hub.reply("unity-mygame", "만들었어요")
+        self.waited(first, 12)
+        self.assertEqual(self.hub.check_costs(), [])  # the supervisor's turn goes on (with another window's request, say)
+        second = self.ask("하나 더")
+        self.turn(first, (1, 100, "end_turn"))
+        self.assertEqual(self.hub.check_costs(), [first])
+        line, = self.notices()
+        self.assertTrue(line.startswith("앞 요청 “빨간 큐브를 원점에 하나 만들고"), line)
+        self.assertTrue(line.endswith("…”: 12초 · 동작 1번 · 토큰 출력 100 · 새 입력 30 · 다시 읽기 4.6만"), line)  # a few words of it, not all
+        self.hub.reply("unity-mygame", "여기 있어요")
+        self.waited(second, 3)
+        self.turn(second, (2, 10, "end_turn"))
+        self.assertEqual(self.hub.check_costs(), [second])
+        self.assertTrue(self.notices()[-1].startswith("이 요청: 3초 · 토큰 출력 10 "))
+
+    def test_only_a_panels_result_is_counted(self):
+        self.hub.reply("unity-mygame", "Props 씬을 저장했어요", origin="desktop", request="씬 저장")  # asked in the Claude app
+        self.assertEqual(self.hub.costs, {})
+        request = self.ask()
+        self.hub.reply("unity-mygame", "하는 중이에요", working=True)
+        self.assertEqual((self.hub.costs, self.hub.check_costs()), ({}, []))
+        self.hub.reply("unity-mygame", "만들었어요")
+        self.assertEqual(list(self.hub.costs), [request])
+
+    def test_an_answer_that_comes_while_the_files_are_read_is_the_one_to_wait_for(self):
+        request = self.ask()
+        self.hub.reply("unity-mygame", "만들었어요")
+        hub = self.hub
+
+        class Ledger:  # reading takes a moment, and meanwhile the supervisor answers the request anew
+            def update(self):
+                hub.costs[request] = dict(hub.costs[request])
+
+            settled = lambda self, request, after: True
+            cost = lambda self, request: {}
+        self.hub._ledger = lambda: Ledger()
+        self.assertEqual((self.hub.check_costs(), self.notices(), list(self.hub.costs)), ([], [], [request]))
+
+    def test_the_watcher_says_it_without_being_asked(self):
+        self.ask()
+        self.hub.reply("unity-mygame", "만들었어요")
+        said = threading.Event()
+
+        def until_said():  # in check_dialogs' place: ends the watcher once the line is in the panel
+            if self.notices():
+                said.set()
+                raise SystemExit
+            return []
+        self.hub.check_dialogs = until_said
+        watcher = threading.Thread(target=self.hub.watch, args=(0.01,), daemon=True)
+        watcher.start()
+        self.assertTrue(said.wait(10))
+        watcher.join(10)
+        self.assertEqual((len(self.notices()), self.hub.poll("unity-mygame", 0, 0)["items"][-1]["cost"]), (1, True))
+
+    def test_the_hook_says_where_the_transcript_is(self):
+        self.assertEqual(self.hub.assign("Explore", None, transcript=str(self.transcript)), {"ours": False})  # any hand-out will do
+        self.assertEqual(self.hub.transcript, self.transcript)
+        self.hub.assign("Explore", None, transcript="C:/somewhere/else")  # not a transcript
+        self.hub.assign("Explore", None)                                  # a hook from before this
+        self.assertEqual(self.hub.transcript, self.transcript)
+        self.turn("1123-120000-1", (1, 7, "end_turn"))
+        first = self.hub._ledger()
+        self.assertIs(self.hub._ledger(), first)  # one ledger: the files are read on from where it stopped
+        other = self.transcript.with_name("3cfcab59-32d4-4e90-8df7-37b79974a4e9.jsonl")
+        self.hub.assign("Explore", None, transcript=str(other))  # a supervisor that was started anew
+        self.assertEqual(self.hub._ledger().transcript, other)
+        self.hub.transcript, self.hub.find_transcript = None, None
+        self.assertIsNone(self.hub._ledger())
 
 
 if __name__ == "__main__":

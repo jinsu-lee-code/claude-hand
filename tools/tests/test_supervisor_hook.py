@@ -58,9 +58,9 @@ class DecisionTests(unittest.TestCase):
     def test_tells_the_channel_and_lets_the_call_through(self):
         reason, asked = self.decide(agent_call("[요청 1111-052233-12] 큐브"), {"ours": True, "chat_id": "unity-mygame", "asker": "unity-mygame"})
         self.assertIsNone(reason)
-        self.assertEqual(asked, [("/v1/assign", {"target": "unity-mygame", "agent": "", "request": "1111-052233-12"})])
+        self.assertEqual(asked, [("/v1/assign", {"target": "unity-mygame", "agent": "", "request": "1111-052233-12", "transcript": ""})])
         reason, asked = self.decide(send_message("[요청 없음] 이어서"), {"ours": True, "chat_id": "unity-mygame", "asker": ""})
-        self.assertEqual((reason, asked), (None, [("/v1/assign", {"target": "a0e1826e13107d88f", "agent": "", "request": ""})]))
+        self.assertEqual((reason, asked), (None, [("/v1/assign", {"target": "a0e1826e13107d88f", "agent": "", "request": "", "transcript": ""})]))
 
     def test_an_agent_resumed_by_its_id_is_named_from_the_sessions_files(self):
         """A resumed supervisor goes on with the subagents of days ago, by id. Claude Code keeps what each one is next
@@ -76,7 +76,8 @@ class DecisionTests(unittest.TestCase):
             event = {**send_message("이어서", to="aab83db2fc71cb6c4"), "transcript_path": str(transcript)}
             self.assertEqual(hook.agent_type(event, "aab83db2fc71cb6c4"), "unity-mygame")
             _, asked = self.decide(event, {"ours": True, "chat_id": "unity-mygame", "missing": True})
-            self.assertEqual(asked, [("/v1/assign", {"target": "aab83db2fc71cb6c4", "agent": "unity-mygame", "request": None})])
+            self.assertEqual(asked, [("/v1/assign", {"target": "aab83db2fc71cb6c4", "agent": "unity-mygame", "request": None,
+                                                     "transcript": str(transcript)})])  # where the channel reads the tokens from
             for unknown in ("ffff", "broken", "list", "../../x", ""):
                 self.assertEqual(hook.agent_type(event, unknown), "", unknown)
             self.assertEqual(hook.agent_type({"transcript_path": ""}, "aab83db2fc71cb6c4"), "")
@@ -184,6 +185,7 @@ class ProcessTests(unittest.TestCase):
         proc = self.run_hook({**event, "tool_input": {**event["tool_input"], "message": f"[요청 {request}]\n큐브를 만들어라"}})
         self.assertEqual((proc.returncode, proc.stdout), (0, b""))
         self.assertEqual(self.hub.assigned["unity-mygame"]["asker"], "unity-mygame")
+        self.assertEqual(self.hub.transcript, transcript)  # where the channel reads each request's tokens from
         self.hub.assigned.clear()
         proc = self.run_hook(send_message("큐브를 만들어라", to="aab83db2fc71cb6c4"))  # no such files: none of the channel's business
         self.assertEqual((proc.returncode, proc.stdout, self.hub.assigned), (0, b"", {}))

@@ -401,6 +401,10 @@ class BlenderChatAddonTests(unittest.TestCase):
         self.assertTrue(want({"kind": "notice", "alert": True, "ts": now}, now))  # a dialog stopped the other window
         self.assertFalse(want({"kind": "notice", "ts": now}, now))  # this panel's own 되돌리기 note
         self.assertEqual(self.addon.entry_rows({"kind": "notice", "alert": True, "text": "멈춤"}, None)[0][0][1], "ERROR")
+        took = {"kind": "notice", "cost": True, "text": "이 요청: 32초 · 동작 2번", "ts": now}
+        self.assertFalse(want(took, now))  # what the request took, under its result: nothing to call anybody for
+        self.assertEqual(self.addon.entry_rows(took, None)[0][0], (took["text"], "TIME"))  # a clock, not the undo arrow
+        self.assertIn("TIME", bpy.types.UILayout.bl_rna.functions["label"].parameters["icon"].enum_items)  # this Blender has it
 
     def test_lines_fit_the_sidebar(self):
         """Korean is about twice as wide as Latin text; a fixed character count overflowed into "..."."""

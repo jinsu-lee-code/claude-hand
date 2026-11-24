@@ -18,7 +18,7 @@ Install: `uv run tools/claude_hand.py blender-install-chat` (or Preferences > Ad
 bl_info = {
     "name": "Claude Hand Chat",
     "author": "claude-hand",
-    "version": (0, 14, 0),
+    "version": (0, 15, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar (N) > Claude Hand",
     "description": "Chat with this Blender window's claude-hand subagent",
@@ -1254,9 +1254,9 @@ def entry_rows(entry, width):
     kind = entry.get("kind")
     if kind not in SHOWN_KINDS:
         return [], 0
-    if kind == "notice":  # from this panel (되돌리기) or the channel (a dialog stopped the window doing the work)
+    if kind == "notice":  # from this panel (되돌리기) or the channel (a dialog stopped the window doing the work, what a request took)
         lines = wrap(entry_text(entry), width)[:ENTRY_LINES]
-        first = "ERROR" if entry.get("alert") else "LOOP_BACK"
+        first = "ERROR" if entry.get("alert") else "TIME" if entry.get("cost") else "LOOP_BACK"
         return [(line, first if i == 0 else "NONE") for i, line in enumerate(lines)], 0
     if kind == "image":  # the picture itself is drawn after these rows (draw_image)
         return [(entry.get("caption") or "결과 미리보기", "IMAGE_DATA")], 0

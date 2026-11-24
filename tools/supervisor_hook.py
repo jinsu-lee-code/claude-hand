@@ -79,7 +79,9 @@ def decision(event: dict, post) -> str | None:
     if handed is None or not handed[0]:
         return None
     target, text = handed
-    answer = post("/v1/assign", {"target": target, "agent": agent_type(event, target), "request": tag_of(text)}) or {}
+    answer = post("/v1/assign", {"target": target, "agent": agent_type(event, target), "request": tag_of(text),
+                                 # this session's transcript: the channel reads each request's tokens from it
+                                 "transcript": str(event.get("transcript_path") or "")}) or {}
     if not answer.get("ours"):
         return None  # not a window's subagent (or no Claude Hand to ask)
     window = answer.get("chat_id") or target

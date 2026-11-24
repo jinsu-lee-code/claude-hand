@@ -51,10 +51,11 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from handlib import eventlog, overview  # noqa: E402
+from handlib import eventlog, overview, usage  # noqa: E402
 from handlib.agents import AgentInfo, installed_agents, prompt_template, refresh_agents, slug  # noqa: E402
 from handlib.capture import capture_window  # noqa: E402
 from handlib.constants import VERSION  # noqa: E402
+from handlib.launch import read_user_config, session_transcript  # noqa: E402
 from handlib.link import blender_request, claude_hand_home, supervisor_running  # noqa: E402
 from handlib.looks import LOOKING_TOOLS, tool_only_looks as only_looks  # noqa: E402,F401  (tools that leave a window as it was)
 from unity_bridge import BridgeError, describe_dialogs, find_project, waiting_dialogs  # noqa: E402
@@ -110,6 +111,9 @@ STALL_SECONDS = 300.0  # when no subagent work was seen at all: how long a panel
 STOP_SECONDS = 180.0   # a panel's 중지 holds until its request is answered, but never longer than this
 EARLY_SECONDS = 120.0  # an answer sent before any work was seen: how long that work may still take to start (see _asking)
 SEEN_SECONDS = 90.0    # a panel asks for news every MAX_WAIT_SECONDS at the latest: one silent for this long has been closed
+# How long a request's line of time and tokens waits for the supervisor's turn to end (see check_costs). In a real
+# session the end showed 6 seconds after the answer as a rule, and after 60 when the turn went on with another request.
+COST_WAIT = 90.0
 OFFER_SECONDS = 24 * 3600.0  # how long a panel offers to undo, in the other windows too, a request that changed them
 UNDO_SECONDS = 90.0    # how long one window may take to undo a request (a Unity project reads its restored files again)
 
@@ -289,6 +293,13 @@ class ChatHub:
         self.undo_window = None  # callable(app, pin, request id) -> what became of it there; None: undo_in_window
         self.undoing: set[str] = set()  # request ids being undone right now (a second press waits for the first)
         self.undo_notes: dict[str, str] = {}  # chat_id -> what was undone from its panel, told to the supervisor with its next message
+        # What a request took: the time the channel sees itself, the tokens are in Claude Code's transcripts
+        # (handlib/usage.py). Said in the panel under the result and written to the event log (check_costs).
+        self.transcript: Path | None = None  # the supervisor's transcript, as its hook says when it hands work out (assign)
+        self.find_transcript = None  # callable() -> Path | None: where it is when no hook has said so yet
+        self.ledger = None           # usage.Ledger over that transcript, from when this server started
+        self.costs: dict[str, dict] = {}  # request id -> {"chat", "asked", "answered", "actions"}: answered, tokens still to come
+        self.show_cost = True        # the line in the panel (config.json "show_cost": false leaves it to trace and usage)
 
     def _log(self, event: str, **fields) -> None:
         """One line in the event log, for `claude_hand.py trace`. Never in the way of the chat."""
@@ -337,7 +348,7 @@ class ChatHub:
         waiting = [(chat, item) for chat in self.logs if chat != chat_id for item in [self._asking(chat, now)] if item is not None]
         return waiting[0] if len(waiting) == 1 else ("", None)
 
-    def assign(self, target: str, request: str | None, agent: str = "") -> dict:
+    def assign(self, target: str, request: str | None, agent: str = "", transcript: str = "") -> dict:
         """The supervisor is about to hand work to a subagent (its hook on Agent and SendMessage says so, see
         tools/supervisor_hook.py). target: the subagent's name, or the id of one that worked before (SendMessage);
         agent: for such an id, the subagent's name when the hook could tell it.
@@ -345,10 +356,14 @@ class ChatHub:
         app), None when the prompt has no tag. From here until that subagent stops, the work in its window belongs
         to that request: previews, 중지 and the event log need not guess. The answer tells the hook what to do:
         ours false (not a window's subagent: none of its business), missing or unknown (refuse, the tag is wrong),
-        stop (refuse: 중지 was pressed on that request), busy (refuse: the window is at work for another request)."""
+        stop (refuse: 중지 was pressed on that request), busy (refuse: the window is at work for another request).
+        transcript: the supervisor's own transcript file, which the hook knows; the tokens of each request are read
+        from it (check_costs)."""
         agents = {a.name for a in installed_agents(self.agents_dir)}
         with self.cond:
             now = time.time()
+            if transcript.endswith(".jsonl") and Path(transcript) != self.transcript:
+                self.transcript = Path(transcript)
             window = next((name for name in (target, agent) if name in agents), "") or next(
                 (chat for chat, known in self.agent_ids.items() if target and known == target and chat in agents), "")
             if not window:
@@ -607,6 +622,11 @@ class ChatHub:
                       working=working or None, origin="desktop" if origin == "desktop" else None)
             if working:
                 return True
+            if asked is not None and asked.get("request"):
+                # What it took is said once the supervisor's turn is over (check_costs). A later answer to the same
+                # request takes this one's place: then this was "on it" sent as if it were the result.
+                self.costs[asked["request"]] = {"chat": chat_id, "asked": asked["ts"], "answered": now, "actions": asked.get("actions", 0),
+                                                "item": asked}
             # The answer is in: the bar goes away. Not while the window is at work for somebody else's request (its
             # own panel was told "after this one"): the bar would flicker, and the work going on would look like the
             # start of a new request and get a second undo point.
@@ -754,9 +774,70 @@ class ChatHub:
             self.emit(notification)
         return [n["params"]["meta"]["chat_id"] for n in reminders]
 
+    def _ledger(self):
+        """The tokens of this run's requests, read from the supervisor's transcript and its subagents' (None when no
+        transcript is known). Called without the lock: it reads files."""
+        path = self.transcript
+        if path is None and self.find_transcript is not None:
+            path = self.find_transcript()
+        if path is None:
+            return None
+        if self.ledger is None or self.ledger.transcript != Path(path):
+            self.ledger = usage.Ledger(Path(path), since=self.started - 60.0)
+        return self.ledger
+
+    def check_costs(self, now: float | None = None) -> list[str]:
+        """Say what each answered request took: under its result in the panel ("이 요청: 32초 · 동작 2번 · 토큰 …") and
+        in the event log, where `trace` and `usage` read it. The time is the channel's own (panel message to result);
+        the tokens are in Claude Code's transcripts (handlib/usage.py), and the last answer of the supervisor's turn
+        is written there only when the turn is over. So a request waits until the transcript shows that, COST_WAIT at
+        most; without a transcript to read, the line says the time alone. One pass (watch repeats). Returns the
+        requests told."""
+        now = now or time.time()
+        with self.cond:
+            due = {}
+            for request, entry in self.costs.items():
+                early = self.early.get(entry["chat"])
+                # Answered, but the channel still takes it for "on it" with work under way: the result is yet to come
+                # (for as long as _asking waits for it).
+                if early is not None and early["item"] is entry["item"] and self._asking(entry["chat"], now) is early["item"] and (
+                        early["worked"] or any(given["item"] is early["item"] for given in self.assigned.values())):
+                    continue
+                due[request] = entry
+        if not due:
+            return []
+        try:
+            ledger = self._ledger()
+            if ledger is not None:
+                ledger.update()
+        except Exception as exc:  # a transcript that cannot be read costs the tokens, not the line
+            log("could not read the transcripts:", exc)
+            ledger = None
+        told = []
+        for request, entry in due.items():
+            if ledger is not None and not ledger.settled(request, entry["answered"]) and now - entry["answered"] < COST_WAIT:
+                continue
+            cost = ledger.cost(request) if ledger is not None else {}
+            seconds = max(0.0, entry["answered"] - entry["asked"])
+            with self.cond:
+                if self.costs.get(request) is not entry:
+                    continue  # answered anew meanwhile: that answer's turn is the one to wait for
+                del self.costs[request]
+                if self.show_cost:
+                    # The panel has moved on to its next message meanwhile: the line says which request it is about.
+                    item = entry["item"]
+                    newest = next((i for i in reversed(self.logs.get(entry["chat"], [])) if i.get("kind") == "user"), item)
+                    which = "이 요청" if newest is item else f"앞 요청 “{eventlog.short(item.get('text', ''), 20)}”"
+                    # "cost": the panels draw it as a quiet line (a clock in Blender), not as the box their other notices get
+                    self._append(entry["chat"], {"kind": "notice", "cost": True, "text": f"{which}: " + usage.line(seconds, entry["actions"], cost)})
+                self._log("cost", request=request, chat_id=entry["chat"], seconds=round(seconds, 1), actions=entry["actions"],
+                          tokens=cost or None, text=usage.detail(cost))
+            told.append(request)
+        return told
+
     def watch(self, interval: float = 2.0) -> None:
         while True:
-            for check in (self.check_dialogs, self.check_unanswered):
+            for check in (self.check_dialogs, self.check_unanswered, self.check_costs):
                 try:
                     check()
                 except Exception as exc:  # never let the watcher die
@@ -945,6 +1026,8 @@ class ChatHub:
             asker, asked = self._work_for(agent.name, now)
             if agent.name in self.assigned:
                 self.assigned[agent.name]["ts"] = now
+            if asked is not None:
+                asked["actions"] = asked.get("actions", 0) + 1  # for the line that says what the request took
             if asker:
                 if asker != agent.name and not looks:  # asked in another window, whose reply may show this one
                     self.acted.setdefault(agent.name, {})[asker] = self.seq
@@ -1020,6 +1103,8 @@ class ChatHub:
                 self._bump_progress(chat_id)
             self._append(chat_id, {"kind": "notice", "text": "중지를 요청했어요. 지금 하던 동작 하나는 끝까지 갈 수 있어요."})
             meta = {"chat_id": chat_id, "app": app, "window": window, "agent": agent or "none", "stop": "requested"}
+            if item and item.get("request"):
+                meta["request"] = item["request"]  # the supervisor's turn that sees to the stop is that request's doing too
             worker = self.workers.get(chat_id)
             if worker and worker["agent_id"] and not worker["stopped"]:
                 meta["agent_id"] = worker["agent_id"]
@@ -1408,7 +1493,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         elif path == "/v1/assign":  # the supervisor's hook, just before it hands work to a subagent
             request = body.get("request")
             self._json(200, {"ok": True, **self.hub.assign(str(body.get("target", ""))[:200], None if request is None else str(request)[:80],
-                                                           str(body.get("agent") or "")[:200])})
+                                                           str(body.get("agent") or "")[:200], str(body.get("transcript") or "")[:1000])})
         elif path == "/v1/stopped":  # a subagent's Stop hook: it finished its turn
             result = self.hub.agent_stopped(str(body.get("app", "")), str(body.get("pin", ""))[:200], str(body.get("agent_id", ""))[:80])
             self._json(200 if result else 404, {"ok": result is not None, **(result or {})})
@@ -1701,6 +1786,10 @@ def main(argv: list[str] | None = None) -> int:
     mcp.hub.capture = lambda app, pin, path: capture_window(app, pin, path, PREVIEW_SIZE)
     mcp.hub.images_dir = home / "chat" / "images"
     mcp.hub.find_dialogs = lambda app, pin: waiting_dialogs(find_project(hash_=pin.rpartition("@")[2])) if app == "unity" else []
+    # The tokens of each request are read from the supervisor's transcript: the one start-supervisor opened, until
+    # the supervisor's hook names it. "show_cost": false in config.json keeps the line out of the panels.
+    mcp.hub.find_transcript = lambda: session_transcript(str(read_user_config(home).get("supervisor_session") or ""))
+    mcp.hub.show_cost = read_user_config(home).get("show_cost", True) is not False
     threading.Thread(target=mcp.hub.watch, name="watch", daemon=True).start()
     if sys.platform == "win32" and minimize_after_start(home):
         # Not at start: Claude Code may still be showing its development-channel confirmation in that window.

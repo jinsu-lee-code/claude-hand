@@ -77,6 +77,7 @@ namespace ClaudeHand.Editor
             public string ImagePath;  // "image": a result preview of another window, made by the chat channel
             public string Caption;
             public bool Alert;        // "notice" from the channel: a dialog stopped the window doing the work
+            public bool Cost;         // "notice" from the channel: what the request took, a quiet line under its result
         }
 
         private readonly Dictionary<string, Texture2D> _images = new Dictionary<string, Texture2D>();  // by file; null = gone
@@ -292,6 +293,7 @@ namespace ClaudeHand.Editor
                     ImagePath = item.Value<string>("path"),
                     Caption = item.Value<string>("caption"),
                     Alert = item.Value<bool?>("alert") ?? false,
+                    Cost = item.Value<bool?>("cost") ?? false,
                 });
             }
             if (_entries.Count > KeptEntries) _entries.RemoveRange(0, _entries.Count - KeptEntries);
@@ -572,8 +574,9 @@ namespace ClaudeHand.Editor
                     case "permission":
                         DrawPermission(entry);
                         break;
-                    case "notice":  // from this window (되돌리기) or the channel (a dialog stopped another window)
-                        EditorGUILayout.HelpBox(entry.Text, entry.Alert ? MessageType.Warning : MessageType.Info);
+                    case "notice":  // from this window (되돌리기) or the channel (a dialog stopped another window, what a request took)
+                        if (entry.Cost) EditorGUILayout.LabelField(entry.Text, EditorStyles.wordWrappedMiniLabel);
+                        else EditorGUILayout.HelpBox(entry.Text, entry.Alert ? MessageType.Warning : MessageType.Info);
                         break;
                     case "image":
                         DrawImage(entry);

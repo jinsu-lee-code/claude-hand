@@ -1,7 +1,8 @@
 """What happened to each request, one line per event, in ~/.claude-hand/logs/<date>.jsonl.
 
 A panel message gets a request id from the chat channel. From then on the channel writes what it sees for that
-request (each tool call a subagent's guard reports, a call it refuses, the subagent stopping, the reply, a reminder),
+request (each tool call a subagent's guard reports, a call it refuses, the subagent stopping, the reply, a reminder,
+and at the end what the request took in time and tokens),
 the guard writes the calls it refuses by itself, and the Unity bridge writes how each ch_* call ended and how long it
 took. They are three kinds of process, so every writer appends one whole line and none keeps the file open.
 `claude_hand.py trace` puts the lines of one request back together.
@@ -121,7 +122,7 @@ def trace(events: list[dict], request: str) -> list[dict]:
 
 LABELS = {"message": "요청", "assigned": "맡김", "action": "동작", "refused": "막음", "call": "ch 호출", "stopped": "멈춤", "reply": "답",
           "reminder": "다시 알림", "dialog": "대화상자", "stop": "중지 누름", "permission": "허락 요청", "verdict": "허락 답",
-          "undo": "되돌림"}
+          "undo": "되돌림", "cost": "시간·토큰"}
 
 
 def describe(event: dict, since: float | None = None) -> str:
@@ -149,6 +150,9 @@ def describe(event: dict, since: float | None = None) -> str:
         parts = [who, event.get("tool", ""), f"{result} {event.get('ms', 0)} ms"]
     elif kind in ("permission", "verdict"):
         parts = [event.get("tool", ""), event.get("behavior", "")]
+    elif kind == "cost":  # what the request took: the wait in the panel, then who spent what (handlib/usage.py wrote the words)
+        waited = f"{event.get('seconds', 0):.1f}초" + (f" · 동작 {event['actions']}번" if event.get("actions") else "")
+        parts = [who, waited, event.get("text") or "(토큰 기록 없음)"]
     else:
         parts = [who, event.get("text", "")]
     return f"{stamp}  {LABELS.get(kind, kind):<8}  " + "  ".join(p for p in parts if p)
