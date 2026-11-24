@@ -239,13 +239,36 @@ def blender_open_command(exe: Path, blend_file: Path | None, port: int) -> list[
     return cmd + ["--python-expr", blender_port_expr(port)]
 
 
-def launch_detached(cmd: list[str]) -> None:
+def outside_script(cmd: list[str], folder: Path | None = None, python: str = sys.executable) -> Path:
+    """A .cmd that starts `cmd` and ends, for the shell to open (see launch_detached). The command is kept beside it
+    as JSON and started by Python, so that nothing in it (a --python-expr full of quotes) has to get through cmd."""
+    import tempfile
+    folder = Path(folder or tempfile.mkdtemp(prefix="claude-hand-launch-"))  # the temp folder is the real one, also from inside an app
+    (folder / "argv.json").write_text(json.dumps([str(part) for part in cmd]), encoding="utf-8")
+    starts = ("import json,subprocess,sys;subprocess.Popen(json.load(open(sys.argv[1],encoding='utf-8')),creationflags=0x208,"
+              "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)")  # 0x208: detached, a group of its own
+    script = folder / "launch.cmd"
+    script.write_text(f'@echo off\r\n"{python}" -c "{starts}" "{folder / "argv.json"}"\r\n', encoding="utf-8")
+    return script
+
+
+def launch_detached(cmd: list[str], contained=None, popen=None) -> None:
+    """Start a program that goes on after this one has ended (a Blender, a Unity editor). From inside a packaged
+    app's container (launch.inside_app_container: a session of the Claude desktop app) the shell starts it, through
+    a small script: as a child of this process it would be in the container too, see AppData through the app's own
+    copy, and so would a Claude Hand started from its panel. contained: asked when not given."""
     kwargs: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     if sys.platform == "win32":
+        if contained is None:
+            from handlib import launch
+            contained = launch.inside_app_container()
+        if contained:
+            (popen or subprocess.Popen)(["explorer.exe", str(outside_script(cmd))], **kwargs)
+            return
         kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
-    subprocess.Popen(cmd, **kwargs)  # noqa: S603 - fixed argv, no shell
+    (popen or subprocess.Popen)(cmd, **kwargs)  # noqa: S603 - fixed argv, no shell
 
 
 def blender_answers(port: int) -> bool:

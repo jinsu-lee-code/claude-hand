@@ -279,6 +279,8 @@ class ReadingTests(unittest.TestCase):
         self.assertFalse(usage.starts_a_turn(result("t1", 0)))
         self.assertFalse(usage.starts_a_turn({"type": "user", "isMeta": True, "message": {"content": "note"}}))
         self.assertFalse(usage.starts_a_turn({"type": "user", "message": {"content": " <system-reminder>x</system-reminder>"}}))
+        self.assertFalse(usage.starts_a_turn({"type": "user", "isCompactSummary": True,  # Claude Code compacted the conversation
+                                              "message": {"content": "This session is being continued from a previous conversation"}}))
         self.assertFalse(usage.starts_a_turn(answer("s1", 0)[0]))
         self.assertEqual(usage.said({"message": {"content": [{"type": "text", "text": "a"}, {"type": "image"}, "b", {"type": "text", "text": "c"}]}}), "a c")
         self.assertEqual(usage.said({"message": None}), "")

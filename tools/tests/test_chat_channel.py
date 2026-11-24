@@ -1873,6 +1873,7 @@ class CostTests(unittest.TestCase):
 
             settled = lambda self, request, after: True
             cost = lambda self, request: {}
+            resting = lambda self: (True, 0.0)
         self.hub._ledger = lambda: Ledger()
         self.assertEqual((self.hub.check_costs(), self.notices(), list(self.hub.costs)), ([], [], [request]))
 
@@ -1971,6 +1972,25 @@ class HeldTests(unittest.TestCase):
         self.assertEqual((self.said(), self.hub.held), (["속도를 두 배로", "큐브 하나 만들어줘"], []))
         self.assertRegex(self.events_of("released")[0]["text"], r"^\d+\.\d초 기다림$")
         self.assertEqual(self.hub.check_held(start + 9), 0)  # nothing left
+
+    def test_a_conversation_compacted_while_at_rest_keeps_nothing_back(self):
+        """Claude Code writes the summary as a user line. Taken for a message, it left the supervisor "in a turn" until
+        its next answer: the first request after it waited the whole HOLD_SECONDS (two hours after a compaction)."""
+        start = time.time()
+        self.wrote(start - 9000, "user", origin={"kind": "channel"}, message={"content": "<channel>x</channel>"})
+        self.wrote(start - 8990, "assistant", stop="end_turn")
+        self.wrote(start - 8000, "system", subtype="compact_boundary")
+        self.wrote(start - 8000, "user", isCompactSummary=True, message={"content": "This session is being continued from a previous conversation"})
+        self.hub.post_user_message("unity", "MyGame", "큐브 만들어줘")
+        self.assertEqual((self.said(), self.hub.held), (["큐브 만들어줘"], []))
+
+    def test_a_conversation_compacted_in_the_middle_of_a_turn_is_still_in_it(self):
+        start = time.time()
+        self.wrote(start - 20, "user", origin={"kind": "channel"}, message={"content": "<channel>x</channel>"})
+        self.wrote(start - 15, "assistant", stop="tool_use")
+        self.wrote(start - 10, "user", isCompactSummary=True, message={"content": "This session is being continued from a previous conversation"})
+        self.hub.post_user_message("unity", "MyGame", "큐브 만들어줘")
+        self.assertEqual((self.said(), len(self.hub.held)), ([], 1))
 
     def test_messages_go_in_the_order_they_came_one_turn_each(self):
         start = time.time()

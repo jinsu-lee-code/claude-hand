@@ -235,6 +235,31 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual([body.get("looks") for body in sent], [True, None, None, None, None])
         self.assertEqual(sent[0]["detail"], 'print(bpy.data.filepath, bpy.app.version_string, "dirty", bpy.data.is_dirty)')
 
+    def test_blender_code_that_only_exports_for_unity_does_not_count_as_a_change(self):
+        """A request that sent a model as it is left an undo point in Blender with nothing to undo, and its 되돌리기
+        said "이 창 +" (found with the windows open, 0.17.0)."""
+        looks = lambda code: guard.only_looks("blender", {"code": code})
+        for code in ('print(claude_hand_chat.export_fbx(["Capsule"], "capsule"))',
+                     'import claude_hand_chat\nresult = claude_hand_chat.export_fbx(["Hull", "Deck"], "ship", humanoid=True, bake=False)\nprint(result)',
+                     "from claude_hand_chat import export_fbx\nexport_fbx(['Rock'], 'rock')\n",
+                     "import claude_hand_chat as chat\nprint(chat.export_fbx(['Rock'], 'rock'))",
+                     'print(claude_hand_chat.export_fbx([o.name for o in bpy.data.objects], "all"))',  # names read, nothing called
+                     # as a subagent wrote it, with the window open: it looks at what it sent afterwards
+                     'import bpy, claude_hand_chat\nprint(claude_hand_chat.export_fbx(["Cube"], "cube"))\no = bpy.data.objects["Cube"]\n'
+                     'print("after", tuple(o.location), tuple(o.scale), "selected", [x.name for x in bpy.context.scene.objects '
+                     'if x.select_get()], "dirty", bpy.data.is_dirty)'):
+            self.assertTrue(looks(code), code)
+        for code in ('import bpy\nbpy.data.objects["Capsule"].scale *= 2\nprint(claude_hand_chat.export_fbx(["Capsule"], "capsule"))',  # changed first
+                     'print(claude_hand_chat.export_fbx(["Capsule"], grow("capsule")))',  # a call among its values
+                     'print(claude_hand_chat.export_fbx(["Capsule"], "capsule")); bpy.ops.wm.save_mainfile()',
+                     'print(claude_hand_chat.export_fbx(["Capsule"], "capsule"))\nbpy.data.objects.remove(bpy.data.objects["Capsule"])',
+                     'import claude_hand_chat\nprint(claude_hand_chat.follow_set(0, True))',  # the add-on's other functions do change things
+                     'import claude_hand_chat\nprint(claude_hand_chat.undo_last_request())',
+                     'claude_hand_chat = bpy.data\nclaude_hand_chat.export_fbx(["Capsule"], "capsule")',  # a name of the code's own
+                     'from claude_hand_chat import export_fbx, mark_undo_point\nexport_fbx(["Rock"], "rock")'):
+            self.assertFalse(looks(code), code)
+        self.assertFalse(guard.only_looks("unity", {"code": 'print(claude_hand_chat.export_fbx(["Capsule"], "capsule"))'}))
+
     def test_a_subagents_own_undo_point_is_refused_while_claude_hand_sets_them(self):
         with tempfile.TemporaryDirectory() as tmp:
             home, marks = self.home(tmp), []

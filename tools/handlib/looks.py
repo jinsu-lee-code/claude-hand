@@ -24,6 +24,10 @@ MODULES = {"bpy", "bmesh", "mathutils", "math", "json", "re", "os", "os.path", "
 PURE_MODULES = {"math", "json", "re", "os.path", "time", "datetime", "collections", "itertools", "textwrap", "statistics",
                 "mathutils", "mathutils.geometry", "bpy.path"}
 FROM_BPY = {"data", "context", "app", "path"}
+# The chat add-on's export for Unity: it writes a file elsewhere and puts back what it touches here (selection, mode,
+# what it bakes). A request that sent a model as it is must not count as one that changed this Blender: its 되돌리기
+# said "이 창 +" with nothing to undo here (2026-11-24).
+EXPORTERS = {"claude_hand_chat": {"export_fbx"}}
 
 FUNCS = {"print", "len", "str", "repr", "int", "float", "bool", "round", "abs", "min", "max", "sum", "sorted", "reversed",
          "enumerate", "zip", "range", "list", "tuple", "dict", "set", "frozenset", "isinstance", "issubclass", "hasattr",
@@ -102,7 +106,7 @@ class Code:
                     name, full = alias.asname or alias.name, f"{node.module}.{alias.name}"
                     if full in PURE_MODULES:
                         self.modules[name] = full       # from os import path
-                    elif node.module in PURE_MODULES:
+                    elif node.module in PURE_MODULES or alias.name in EXPORTERS.get(node.module, ()):
                         self.pure_names.add(name)       # from math import degrees
                     else:
                         values.setdefault(name, []).append(None)
@@ -133,8 +137,9 @@ class Code:
                 values.setdefault(node.arg, []).append(None)
             elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store) and isinstance(node.value, ast.Name):
                 puts.setdefault(node.value.id, []).append(None)
+        self.set_names = set(values)  # every name the code sets itself, in whatever way
         # The code's own containers and plain values: every `name = ...` of the name makes a new one.
-        self.containers = {name for name, found in values.items() if all(self.makes_container(v) for v in found)}
+        self.containers ={name for name, found in values.items() if all(self.makes_container(v) for v in found)}
         self.scalars = {name for name, found in values.items() if all(self.makes_scalar(v) for v in found)}
         # ... and the containers that hold nothing but what the code made itself: what is in rows[key] is its own too.
         self.all_own = {name for name in self.containers
@@ -181,6 +186,13 @@ class Code:
             path = path.rpartition(".")[0]
         return path
 
+    def exports(self, func) -> bool:
+        """`claude_hand_chat.export_fbx`, by the add-on's own name (imported, or as MCP for Blender's code finds it
+        when the add-on put it there) or the name it was imported as."""
+        root, _, rest = dotted(func).partition(".")
+        module = self.modules.get(root) or ("" if root in self.set_names else root)
+        return rest in EXPORTERS.get(module, ())
+
     def own(self, node) -> bool:
         """A container the code made itself, or an item of one that holds nothing else: rows, seen[key],
         seen.setdefault(key, [])."""
@@ -202,8 +214,10 @@ class Code:
         if not isinstance(node, NODES):
             return False  # del, global, class, async, match, ...: not looked into
         if isinstance(node, ast.Import):
-            return all(alias.name in MODULES for alias in node.names)
+            return all(alias.name in MODULES or alias.name in EXPORTERS for alias in node.names)
         if isinstance(node, ast.ImportFrom):
+            if node.level == 0 and node.module in EXPORTERS:
+                return all(a.name in EXPORTERS[node.module] for a in node.names)
             return node.level == 0 and node.module in MODULES and (node.module != "bpy" or all(a.name in FROM_BPY for a in node.names))
         if isinstance(node, ast.FunctionDef):
             return not node.decorator_list
@@ -236,7 +250,8 @@ class Code:
                 return False
             return func.id in FUNCS | self.pure_names | self.defs
         if isinstance(func, ast.Attribute):
-            return bool(self.module_of(func)) or func.attr in METHODS or (func.attr in OWN_METHODS and self.own(func.value))
+            return bool(self.module_of(func)) or func.attr in METHODS or (func.attr in OWN_METHODS and self.own(func.value)) \
+                or self.exports(func)
         return False  # the result of a call, called: getattr(obj, "select_set")(True)
 
 

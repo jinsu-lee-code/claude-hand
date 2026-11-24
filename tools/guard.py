@@ -127,8 +127,8 @@ def action_summary(tool_input: dict) -> str:
 
 def only_looks(app: str, tool_input: dict) -> bool:
     """Blender code that can only look (handlib.looks reads it): it needs no undo point and leaves the window as it
-    was. False for anything else, and for Unity, whose own package tells afterwards whether a point has anything to
-    undo (ChCheckpoint)."""
+    was. Exporting for Unity with the chat add-on counts as looking there. False for anything else, and for Unity,
+    whose own package tells afterwards whether a point has anything to undo (ChCheckpoint)."""
     code = tool_input.get("code")
     if app != "blender" or not isinstance(code, str):
         return False

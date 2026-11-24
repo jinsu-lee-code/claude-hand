@@ -1550,6 +1550,25 @@ class StartCommandTests(unittest.TestCase):
                 self.assertFalse(handlib.launch.inside_app_container(env={"APPDATA": tmp}))
                 self.assertEqual(list(Path(tmp).iterdir()), [])  # the folder it made to ask is gone again
 
+    def test_a_blender_or_unity_opened_from_inside_a_packaged_app_is_started_by_the_shell(self):
+        """Else it lives in the app's container too (blender-open, unity-open from a session of the Claude desktop app)."""
+        calls = []
+        popen = lambda cmd, **kw: calls.append((cmd, kw.get("creationflags")))
+        cmd = ["C:/Program Files/Blender/blender.exe", "--python-expr", 'import bpy; print("a & b", 100 % 7)']
+        if sys.platform == "win32":
+            handlib.install.launch_detached(cmd, contained=True, popen=popen)
+            (started, flags), = calls
+            self.assertEqual((started[0], flags), ("explorer.exe", None))
+            script = Path(started[1])
+            self.addCleanup(lambda: __import__("shutil").rmtree(script.parent, ignore_errors=True))
+            self.assertEqual(json.loads((script.parent / "argv.json").read_text(encoding="utf-8")), cmd)  # as it is, not through cmd
+            text = script.read_text(encoding="utf-8")
+            self.assertIn(str(script.parent / "argv.json"), text)
+            self.assertNotIn("a & b", text)
+            calls.clear()
+        handlib.install.launch_detached(cmd, contained=False, popen=popen)
+        self.assertEqual(calls[0][0], cmd)  # outside one: its own child, as before
+
     def test_minimize_switch(self):
         with tempfile.TemporaryDirectory() as tmp:
             with unittest.mock.patch.dict("os.environ", {"CLAUDE_HAND_HOME": tmp}), unittest.mock.patch("sys.stdout", io.StringIO()):

@@ -57,8 +57,11 @@ def said(entry: dict) -> str:
 
 
 def starts_a_turn(entry: dict) -> bool:
-    """A user line that somebody sent, as opposed to the result of a tool call or a note Claude Code adds by itself."""
-    if entry.get("type") != "user":
+    """A user line that somebody sent, as opposed to the result of a tool call or a note Claude Code adds by itself.
+    The summary Claude Code writes when it compacts the conversation is such a note too, though it is not marked as
+    one: taken for a message, it left the supervisor "in a turn" until its next answer, and the channel kept the next
+    request back for 45 seconds (found 2026-11-24, two hours after a compaction)."""
+    if entry.get("type") != "user" or entry.get("isCompactSummary"):
         return False
     content = (entry.get("message") or {}).get("content")
     if isinstance(content, list) and any(isinstance(block, dict) and block.get("type") == "tool_result" for block in content):
