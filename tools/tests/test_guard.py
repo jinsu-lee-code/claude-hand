@@ -347,6 +347,17 @@ class ProgressTests(unittest.TestCase):
              {"claude_hand_chat": type("Addon", (), {"mark_undo_point": staticmethod(lambda label: namespace.update(label=label))}),
               "print": lambda *_: None})
         self.assertEqual(namespace["label"], "의자를 '빨갛게'")  # the request text arrives as it was, quotes and all
+        # With the request's name (the channel gives it): the point carries it, so the request can be undone by name
+        # in every window it changed. An add-on from before points had names still gets its point.
+        guard.mark_checkpoint("blender", "props@9876", "의자", request=lambda port, command, timeout: sent.append((port, command)),
+                              key="1123-101500-7")
+        code = sent[1][1]["params"]["code"].replace("import claude_hand_chat\n", "")
+        named, plain = {}, {}
+        exec(code, {"claude_hand_chat": type("Addon", (), {"mark_undo_point": staticmethod(
+            lambda label="", request="": named.update(label=label, request=request))}), "print": lambda *_: None})
+        exec(code, {"claude_hand_chat": type("Addon", (), {"mark_undo_point": staticmethod(lambda label="": plain.update(label=label))}),
+                    "print": lambda *_: None})
+        self.assertEqual((named, plain), ({"label": "의자", "request": "1123-101500-7"}, {"label": "의자"}))
 
     def test_as_the_stop_hook_it_says_in_the_project_that_the_work_is_over(self):
         with tempfile.TemporaryDirectory() as tmp:

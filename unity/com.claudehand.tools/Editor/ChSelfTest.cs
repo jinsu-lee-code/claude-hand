@@ -327,6 +327,7 @@ namespace ClaudeHand.Editor
                       EditorSceneManager.GetActiveScene().rootCount == _rootsBefore && ChCheckpoint.Marks.Count == _marksBefore, Describe(undone));
                 if (_sceneCube != null) UnityEngine.Object.DestroyImmediate(_sceneCube);
                 FileChecks();
+                RequestChecks();
             }
             catch (Exception ex)
             {
@@ -441,6 +442,52 @@ namespace ClaudeHand.Editor
                 !File.Exists(Path.Combine(ChPaths.ProjectRoot, prefab)) && EditorSceneManager.GetActiveScene().rootCount == _rootsBefore &&
                 undone["data"]["removed"].HasValues && undone["data"]["removed"].Values<string>().All(KeptOutside) &&
                 undone["data"]["problems"].Count() == 0, Describe(undone));
+        }
+
+        /// <summary>
+        /// 10. A request is undone by its name, and only when its point is the newest one with something to undo. That
+        /// is what the chat channel asks of every window a request changed (the 되돌리기 of the panel it was asked in):
+        /// a window that a later request changed since says so instead of taking that later request back with it.
+        /// </summary>
+        private static void RequestChecks()
+        {
+            ChPaths.EnsureAssetFolder(Work);
+            var shader = Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard");
+            string first = $"{Work}/ChSelfTestFirst.mat", second = $"{Work}/ChSelfTestSecond.mat";
+            Func<string, string> file = path => Path.Combine(ChPaths.ProjectRoot, path);
+            Func<string, JObject> undo = request => Call(ChCheckpoint.HandleCommand, new { action = "undo_request", request });
+            Func<JObject, string> state = result => result["data"]?.Value<string>("state");
+            Action<string, string> change = (request, asset) =>
+            {
+                try
+                {
+                    ChCheckpoint.SetWork(request);
+                    Call(ChCheckpoint.HandleCommand, new { action = "mark", label = request, request });
+                    AssetDatabase.CreateAsset(new Material(shader), asset);  // noted with the mark: it has something to undo
+                }
+                finally
+                {
+                    ChCheckpoint.SetWork(null);
+                }
+            };
+
+            var before = undo("selftest-first");
+            change("selftest-first", first);
+            change("selftest-second", second);
+            var blocked = undo("selftest-first");
+            Check("by name: a request that a later one came after is not undone, and the answer says what is on top",
+                Ok(before) && state(before) == "nothing" && Ok(blocked) && state(blocked) == "blocked" &&
+                (blocked["data"].Value<string>("top") ?? "").StartsWith("selftest-second") && File.Exists(file(first)) && File.Exists(file(second)),
+                Describe(before) + " / " + Describe(blocked));
+            var newest = undo("selftest-second");
+            var again = undo("selftest-second");
+            Check("by name: the newest request is undone, once",
+                state(newest) == "undone" && !File.Exists(file(second)) && File.Exists(file(first)) && state(again) == "nothing" &&
+                (newest["data"].Value<string>("summary") ?? "").Contains(ChCheckpoint.RemovedFolder), Describe(newest) + " / " + Describe(again));
+            var then = undo("selftest-first");
+            Check("by name: then the one before it", state(then) == "undone" && !File.Exists(file(first)), Describe(then));
+            var unnamed = undo("");
+            Check("by name: no name, nothing undone", !Ok(unnamed), Describe(unnamed));
         }
 
         /// <summary>An asset that an undo took out of the project lies in Library/ClaudeHand/removed, with its .meta.</summary>

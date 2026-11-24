@@ -18,7 +18,7 @@ Install: `uv run tools/claude_hand.py blender-install-chat` (or Preferences > Ad
 bl_info = {
     "name": "Claude Hand Chat",
     "author": "claude-hand",
-    "version": (0, 13, 0),
+    "version": (0, 14, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar (N) > Claude Hand",
     "description": "Chat with this Blender window's claude-hand subagent",
@@ -81,7 +81,9 @@ _identity = {"window": None, "pin": None}  # written on the main thread, read by
 _identity_lock = threading.Lock()
 _stop = threading.Event()
 _poller = [None]
-_marks = []               # main thread only: undo points of Claude's requests, newest last ({"seq", "label", "time"})
+_marks = []               # main thread only: undo points of Claude's requests, newest last
+#                           ({"seq", "label", "time", "request": the request's name, "stamp": when it was set})
+_offer = [None]           # main thread only: a request asked here that changed other windows too, as the channel tells it
 _mark_seq = [0]           # main thread only
 _undo_note = [""]         # main thread only: goes along with the next message after "되돌리기"
 _undo_run = f"{os.getpid()}-{int(time.time())}"  # undo points of another Blender run never match
@@ -145,6 +147,7 @@ def call(server, method, path, body=None, timeout=10):
 def poll_loop():
     """Background thread: long-polls the channel for this window's replies and permission prompts."""
     chat_id, agent, after, server_pid, progress_rev, others_rev = None, None, 0, None, -1, -1
+    offer = None
     while not _stop.is_set():
         server = read_server()
         with _identity_lock:
@@ -156,6 +159,7 @@ def poll_loop():
             continue
         if server.get("pid") != server_pid:  # a new supervisor session starts with an empty history
             server_pid, chat_id, agent, after, progress_rev, others_rev = server.get("pid"), None, None, 0, -1, -1
+            offer = None
             _inbox.put(("reset", None))
         try:
             if chat_id is None or agent is None:
@@ -184,6 +188,9 @@ def poll_loop():
             if "others_rev" in updates and updates["others_rev"] != others_rev:  # another window's state changed
                 others_rev = updates["others_rev"]
                 _inbox.put(("others", updates.get("others") or []))
+            if updates.get("undo") != offer:  # a request asked here that changed other windows (or no longer does)
+                offer = updates.get("undo")
+                _inbox.put(("offer", offer))
             after = updates.get("next", after)
         except (OSError, ValueError) as exc:
             _inbox.put(("missing", True))
@@ -538,16 +545,18 @@ def describe_mark(mark):
     return f"{mark['label']} ({mark['time']})" if mark["label"] else f"{mark['time']} 요청"
 
 
-def mark_undo_point(label=""):
+def mark_undo_point(label="", request=""):
     """Set an undo point for a new request. The subagent's guard hook calls this through MCP for Blender's execute_code
-    just before the request's first Blender action."""
+    just before the request's first Blender action. request: the request's name as the chat channel knows it (its
+    id), so that a request which changed several windows can be undone in each of them by that name (undo_request)."""
     seq = _mark_seq[0] + 1
     for scene in bpy.data.scenes:
         setattr(scene, UNDO_PROP, f"{_undo_run}:{seq}")
     if _undo_op(bpy.ops.ed.undo_push, message=f"Claude Hand: {label or '요청'}"[:60]) != {"FINISHED"}:
         return "undo point not set: no undo history here"
     _mark_seq[0] = seq
-    _marks.append({"seq": seq, "label": " ".join(str(label).split())[:40], "time": time.strftime("%H:%M")})
+    _marks.append({"seq": seq, "label": " ".join(str(label).split())[:40], "time": time.strftime("%H:%M"),
+                   "request": str(request or ""), "stamp": time.time()})
     del _marks[:-UNDO_KEPT]
     _redraw()
     return f"undo point {seq} set"
@@ -571,22 +580,65 @@ def walk_back(seq, current, undo, redo, limit):
 def undo_last_request(note=False):
     """Revert everything done in this Blender since the newest undo point. Shows the outcome in the panel and returns
     it. note: also tell the supervisor with the next message (the panel's button; a subagent knows already)."""
+    return _undo_newest(note)[1]
+
+
+def _undo_newest(note=False):
+    """(whether it went back, what the panel shows)."""
     if not _marks:
-        return _notice("되돌릴 Claude 요청이 없습니다.")
+        return False, _notice("되돌릴 Claude 요청이 없습니다.")
     mark = _marks[-1]
     if state_seq() < mark["seq"]:  # Blender's own undo already went back past it
         _marks.pop()
-        return _notice(f"'{describe_mark(mark)}' 요청은 이미 되돌려져 있습니다.")
+        return False, _notice(f"'{describe_mark(mark)}' 요청은 이미 되돌려져 있습니다.")
     _undo_op(bpy.ops.ed.undo_push, message="Claude Hand: 되돌리기 전")  # so Ctrl+Shift+Z can bring the work back
     limit = bpy.context.preferences.edit.undo_steps + 2
     steps = walk_back(mark["seq"], state_seq, lambda: _undo_op(bpy.ops.ed.undo), lambda: _undo_op(bpy.ops.ed.redo), limit)
     if steps is None:
-        return _notice(f"'{describe_mark(mark)}' 요청을 되돌리지 못했습니다. 그 뒤로 실행 취소 단계가 너무 많아 "
-                       "Blender의 실행 취소 기록에서 밀려났습니다.")
+        return False, _notice(f"'{describe_mark(mark)}' 요청을 되돌리지 못했습니다. 그 뒤로 실행 취소 단계가 너무 많아 "
+                              "Blender의 실행 취소 기록에서 밀려났습니다.")
     _marks.pop()
     if note:
         _undo_note[0] = f"[사용자가 채팅창에서 '{describe_mark(mark)}' 요청 이후의 Blender 변경을 실행 취소로 되돌렸음]"
-    return _notice(f"되돌렸어요: '{describe_mark(mark)}' 이후의 변경")
+    return True, _notice(f"되돌렸어요: '{describe_mark(mark)}' 이후의 변경")
+
+
+def undo_request(request):
+    """Undo the request of this name here, but only when its undo point is the newest one: the chat channel calls
+    this in every window a request changed (the 되돌리기 of the panel it was asked in, or the supervisor's
+    undo_request tool). A point of another request on top is left alone: undoing goes back in order, and that newer
+    request would go with it. Returns {"state": "undone" | "nothing" | "blocked" | "failed", ...} for the channel."""
+    request = str(request or "")
+    while _marks and state_seq() < _marks[-1]["seq"]:  # Blender's own undo already went back past these
+        _marks.pop()
+    if not request or all(mark.get("request") != request for mark in _marks):
+        return {"state": "nothing"}
+    top = _marks[-1]
+    if top.get("request") != request:
+        return {"state": "blocked", "top": describe_mark(top)}
+    done, text = _undo_newest()
+    return {"state": "undone" if done else "failed", "detail": text}
+
+
+def undo_plan():
+    """What the panel's 되돌리기 takes back now: (this window's newest undo point or None, the channel's offer or
+    None). The offer is a request asked in this panel that changed other windows too; it comes first unless this
+    window's newest point is of a later request (that one is undone here first, as before)."""
+    mark, offer = (_marks[-1] if _marks else None), _offer[0]
+    if not offer:
+        return mark, None
+    here = mark is not None and bool(mark.get("request")) and mark["request"] == offer.get("request")
+    if mark is None or here or mark.get("stamp", 0.0) <= float(offer.get("ts") or 0.0):
+        return (mark if here else None), offer
+    return mark, None
+
+
+def describe_plan(mark, offer):
+    """What the button says: the request, and for one that reached other windows, where it goes back."""
+    if offer is None:
+        return describe_mark(mark)
+    others = ", ".join(str(w) for w in offer.get("windows") or [])
+    return f"{offer.get('label') or '요청'} ({'이 창 + ' if mark is not None else ''}{others})"
 
 
 def _notice(text):
@@ -597,7 +649,15 @@ def _notice(text):
 
 
 def _undo_from_button():
-    undo_last_request(note=True)
+    mark, offer = undo_plan()
+    window, pin = window_identity()
+    if mark is not None:
+        done, _ = _undo_newest(note=True)
+        if done and offer is None and mark.get("request"):  # so no other panel still offers this window with that request
+            post_in_background("/v1/undone", {"app": "blender", "window": window, "pin": pin, "request": mark["request"]}, "undone_sent")
+    if offer is not None:  # the other windows: the channel undoes the request in each, and says here how it went
+        post_in_background("/v1/undo", {"app": "blender", "window": window, "pin": pin, "request": offer.get("request", ""),
+                                        "skip_own": True}, "undo_sent")
     return None
 
 
@@ -771,10 +831,18 @@ def apply_event(event, payload):
         _entries.clear()
         _progress[0] = None
         _others.clear()
+        _offer[0] = None
     elif event == "progress":
         _progress[0] = (payload, time.time()) if payload else None
     elif event == "others":
         _others[:] = [str(line) for line in payload]
+    elif event == "offer":
+        _offer[0] = payload if isinstance(payload, dict) and payload.get("request") else None
+    elif event == "undo_sent":
+        if not payload.get("ok"):
+            _notice("다른 창은 되돌리지 못했습니다: " + str(payload.get("error", "Claude Hand가 받지 않았습니다")))
+    elif event == "undone_sent":
+        pass  # telling the channel is a nicety
     elif event == "native_text":
         if not send_text(payload, bpy.context.window_manager.claude_hand_chat_context):  # the box is empty again by now
             _notice("보내지 못했습니다. 앞 메시지가 Claude Hand가 켜지기를 기다리는 중이니 잠시 뒤 다시 보내 주세요.")
@@ -933,12 +1001,20 @@ class CLAUDEHAND_OT_native_input(bpy.types.Operator):
 class CLAUDEHAND_OT_undo(bpy.types.Operator):
     bl_idname = "claude_hand.chat_undo"
     bl_label = "되돌리기"
-    bl_description = "Undo everything changed in this Blender since Claude's last request started (Blender's own undo history)"
+    bl_description = ("Undo everything changed in this Blender since Claude's last request started (Blender's own undo "
+                      "history). A request asked here that changed other windows too is undone there as well")
 
     def invoke(self, context, event):
-        if not _marks:
+        mark, offer = undo_plan()
+        if mark is None and offer is None:
             return {"CANCELLED"}
-        message = f"'{describe_mark(_marks[-1])}' 이후 바뀐 것을 모두 되돌립니다. 그 뒤에 직접 고친 것도 함께 되돌아갑니다."
+        if offer is None:
+            message = f"'{describe_mark(mark)}' 이후 바뀐 것을 모두 되돌립니다. 그 뒤에 직접 고친 것도 함께 되돌아갑니다."
+        else:
+            others = ", ".join(str(w) for w in offer.get("windows") or [])
+            message = f"'{offer.get('label') or '요청'}' 요청이 바꾼 것을 되돌립니다. " + (
+                "이 Blender에서는 그 뒤에 직접 고친 것도 함께 되돌아갑니다. " if mark is not None else "") + (
+                f"다른 창({others})은 그 창에 더 새 요청이 있거나 작업 중이면 건너뛰고, 그렇게 알려 줍니다.")
         try:
             return context.window_manager.invoke_confirm(self, event, title="Claude Hand 되돌리기", message=message,
                                                          confirm_text="되돌리기")
@@ -1019,8 +1095,9 @@ class CLAUDEHAND_PT_chat(bpy.types.Panel):
                 layout.label(text=line)
         draw_others(layout, width)
         draw_progress(layout, width)
-        if _marks and _progress[0] is None:
-            layout.operator(CLAUDEHAND_OT_undo.bl_idname, text=f"되돌리기: {describe_mark(_marks[-1])}", icon="LOOP_BACK")
+        mark, offer = undo_plan()
+        if (mark is not None or offer is not None) and _progress[0] is None:
+            layout.operator(CLAUDEHAND_OT_undo.bl_idname, text=f"되돌리기: {describe_plan(mark, offer)}", icon="LOOP_BACK")
         wm = context.window_manager
         row = layout.row(align=True)
         row.prop(wm, "claude_hand_chat_input", text="")

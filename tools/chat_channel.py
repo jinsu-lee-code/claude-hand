@@ -55,9 +55,10 @@ from handlib import eventlog, overview  # noqa: E402
 from handlib.agents import AgentInfo, installed_agents, prompt_template, refresh_agents, slug  # noqa: E402
 from handlib.capture import capture_window  # noqa: E402
 from handlib.constants import VERSION  # noqa: E402
-from handlib.link import claude_hand_home, supervisor_running  # noqa: E402
+from handlib.link import blender_request, claude_hand_home, supervisor_running  # noqa: E402
 from handlib.looks import LOOKING_TOOLS, tool_only_looks as only_looks  # noqa: E402,F401  (tools that leave a window as it was)
-from unity_bridge import describe_dialogs, find_project, waiting_dialogs  # noqa: E402
+from unity_bridge import BridgeError, describe_dialogs, find_project, waiting_dialogs  # noqa: E402
+from unity_bridge import request as unity_request  # noqa: E402
 
 SERVER_NAME = "claude-hand-chat"
 SERVER_VERSION = VERSION
@@ -109,6 +110,72 @@ STALL_SECONDS = 300.0  # when no subagent work was seen at all: how long a panel
 STOP_SECONDS = 180.0   # a panel's 중지 holds until its request is answered, but never longer than this
 EARLY_SECONDS = 120.0  # an answer sent before any work was seen: how long that work may still take to start (see _asking)
 SEEN_SECONDS = 90.0    # a panel asks for news every MAX_WAIT_SECONDS at the latest: one silent for this long has been closed
+OFFER_SECONDS = 24 * 3600.0  # how long a panel offers to undo, in the other windows too, a request that changed them
+UNDO_SECONDS = 90.0    # how long one window may take to undo a request (a Unity project reads its restored files again)
+
+UNDO_TOOL = {
+    "name": "undo_request",
+    "description": "Undo a chat panel's request in every window it changed: what the panel's 되돌리기 button does. Use it when "
+                   "the user asks in a chat panel to cancel or undo what was just done; do not hand the undo to subagents "
+                   "(a subagent undoes its window's newest request, which need not be the one meant). Each window undoes "
+                   "that request only when nothing newer changed it since. Returns what happened window by window; tell "
+                   "the user exactly that.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "chat_id": {"type": "string", "description": "The chat the request was asked in, from the channel tag"},
+            "request": {"type": "string", "description": "The request id to undo (the `request` of that message's channel tag). "
+                                                          "Leave out for the newest request of that chat that changed something."},
+        },
+        "required": ["chat_id"],
+    },
+}
+
+UNDO_WORDS = {  # what became of a request in one window, for the people reading it in a chat panel
+    "undone": "되돌렸어요",
+    "nothing": "되돌릴 것이 없었어요",
+    "blocked": "그 뒤에 다른 요청이 이 창을 바꿔서 건너뛰었어요. 그 창에서 먼저 되돌려 주세요",
+    "busy": "지금 작업 중이라 건너뛰었어요. 끝난 뒤 다시 눌러 주세요",
+    "unreachable": "창이 응답하지 않아 건너뛰었어요",
+    "failed": "되돌리지 못했어요",
+}
+
+
+def undo_in_window(app: str, pin: str, key: str) -> dict:
+    """Ask one window to undo the request `key` (its id): Unity through Claude Hand Tools' bridge (ch_checkpoint
+    undo_request), Blender through MCP for Blender's execute_code into the chat add-on (undo_request). Each undoes
+    only when that request's point is its newest one. Returns {"state": one of UNDO_WORDS, "top", "summary",
+    "detail"}; a package or add-on from before this existed answers with an error, which is "failed", never an undo
+    of whatever happens to be on top."""
+    if app == "unity":
+        entry = find_project(hash_=pin.rpartition("@")[2])
+        if entry is None:
+            return {"state": "unreachable"}
+        try:
+            result = unity_request(entry, "ch_checkpoint", {"action": "undo_request", "request": key}, timeout=UNDO_SECONDS) or {}
+        except BridgeError as exc:
+            return {"state": "unreachable" if exc.code in ("UNREACHABLE", "DIALOG") else "failed", "detail": exc.message[:300]}
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        if result.get("success") is not True or data.get("state") not in UNDO_WORDS:
+            return {"state": "failed", "detail": str(data.get("message") or result.get("message") or result.get("code") or
+                                                      "Claude Hand Tools가 예전 버전입니다")[:300]}
+        return {"state": data["state"], "top": str(data.get("top") or ""), "summary": str(data.get("summary") or "")}
+    code = f"import claude_hand_chat, json\nprint('CH_UNDO ' + json.dumps(claude_hand_chat.undo_request({key!r})))"
+    try:
+        reply = blender_request(int(pin.rpartition("@")[2]), {"type": "execute_code", "params": {"code": code}}, UNDO_SECONDS)
+    except (OSError, ValueError):
+        return {"state": "unreachable"}
+    printed = reply.get("result") if isinstance(reply, dict) else None  # {"executed": True, "result": what the code printed}
+    printed = printed.get("result") if isinstance(printed, dict) else printed
+    found = re.search(r"CH_UNDO (\{.*\})", str(printed or ""))
+    try:
+        data = json.loads(found.group(1)) if found else None
+    except ValueError:
+        data = None
+    if not isinstance(data, dict) or data.get("state") not in UNDO_WORDS:
+        why = reply.get("message") if isinstance(reply, dict) else None  # no undo_request in the add-on: an AttributeError
+        return {"state": "failed", "detail": str(why or "Claude Hand Chat 애드온이 예전 버전입니다")[:300]}
+    return {"state": data["state"], "top": str(data.get("top") or ""), "summary": "", "detail": str(data.get("detail") or "")}
 
 # A reply has to say whether the work still goes on. The tool definition asks for it, but Claude Code does not hold
 # a call to that, and a supervisor that has answered without it for days goes on doing so (a hint in the result
@@ -217,6 +284,11 @@ class ChatHub:
         self.stops: dict[str, dict] = {}  # chat_id -> its panel's 중지: {"seq": of the request it stops (0: work asked elsewhere), "ts"}
         self.started = time.time()  # requests older than this server (shown again from history) are not its to chase
         self.events = None  # callable(event, **fields): the event log (handlib/eventlog.py); None: nothing is logged
+        # Undoing a request in every window it changed (undo_request). Which windows those are is written on the
+        # request's own panel message: item["points"], the chat_ids of the windows that got an undo point for it.
+        self.undo_window = None  # callable(app, pin, request id) -> what became of it there; None: undo_in_window
+        self.undoing: set[str] = set()  # request ids being undone right now (a second press waits for the first)
+        self.undo_notes: dict[str, str] = {}  # chat_id -> what was undone from its panel, told to the supervisor with its next message
 
     def _log(self, event: str, **fields) -> None:
         """One line in the event log, for `claude_hand.py trace`. Never in the way of the chat."""
@@ -273,7 +345,7 @@ class ChatHub:
         app), None when the prompt has no tag. From here until that subagent stops, the work in its window belongs
         to that request: previews, 중지 and the event log need not guess. The answer tells the hook what to do:
         ours false (not a window's subagent: none of its business), missing or unknown (refuse, the tag is wrong),
-        stop (refuse: 중지 was pressed on that request)."""
+        stop (refuse: 중지 was pressed on that request), busy (refuse: the window is at work for another request)."""
         agents = {a.name for a in installed_agents(self.agents_dir)}
         with self.cond:
             now = time.time()
@@ -293,6 +365,15 @@ class ChatHub:
                 if stop and stop["seq"] == item["seq"] and now - stop["ts"] <= STOP_SECONDS and self._asking(asker, now) is item:
                     self._log("refused", request=request, chat_id=window, tool="(맡기기)", reason="사용자가 채팅창에서 중지를 누름")
                     return {"ours": True, "chat_id": window, "stop": True}
+            # A window has one place for "whose request is this work": handing it work for another request while it is
+            # at work would put the rest of that work, its undo point and its 중지 down for the new request. Refused
+            # until the subagent there stops, or shows no sign of life for as long as two subagents are kept apart.
+            given = self._assignment(window, now)
+            if given is not None and given["item"] is not item and now - given["ts"] <= LOCK_SECONDS:
+                other = " ".join(str((given["item"] or {}).get("text", "")).split())[:40]
+                self._log("refused", request=request, chat_id=window, tool="(맡기기)", reason="그 창이 다른 요청으로 일하는 중" +
+                          (f" ({other})" if other else ""))
+                return {"ours": True, "chat_id": window, "busy": True, "other": other}
             self.assigned[window] = {"asker": asker, "item": item, "ts": now}
             self._log("assigned", request=request, chat_id=window, text="" if asker else "채팅창 요청이 아님")
             self.cond.notify_all()  # the other panels show the asking window: its request is under way (see _state)
@@ -457,6 +538,9 @@ class ChatHub:
         content = text if not context else f"{text}\n\n[{app} 창 정보: {window}]\n{context}"
         meta = {"chat_id": chat_id, "app": app, "window": window, "agent": agent or "none"}
         with self.cond:
+            undone = self.undo_notes.pop(chat_id, "")
+            if undone:  # the panel undid a request in other windows since: the supervisor would still count on that work
+                content = f"{content}\n\n{undone}"
             worker = self.workers.get(chat_id)
             if agent and worker and worker["agent_id"]:
                 meta["agent_id"] = worker["agent_id"]  # to resume with SendMessage, whatever the supervisor still remembers
@@ -810,7 +894,7 @@ class ChatHub:
                 if items or (progress_rev is not None and rev != progress_rev) or (others_rev is not None and others != others_rev) \
                         or remaining <= 0:
                     return {"items": items, "progress": self._current_progress(chat_id), "progress_rev": rev,
-                            "others": self._others(chat_id, now), "others_rev": others}
+                            "others": self._others(chat_id, now), "others_rev": others, "undo": self._undo_offer(chat_id, now)}
                 self.cond.wait(remaining)
 
     def _progress_entry(self, chat_id: str, now: float) -> dict:
@@ -876,6 +960,15 @@ class ChatHub:
             first = self.pointed.get(agent.name) != point and not looks
             if first:
                 self.pointed[agent.name] = point
+                if known and agent.name not in asked.setdefault("points", []):
+                    # Written on the request itself: the windows to undo it in (undo_request), also after a restart.
+                    asked["points"].append(agent.name)
+                    asked.setdefault("point_names", {})[agent.name] = \
+                        f"{agent.pin.rpartition('@')[0]} ({'Unity' if agent.app == 'unity' else 'Blender'})"
+                    if self.history_dir is not None:
+                        self._save_history(asker)
+                    if asker != agent.name:
+                        self._bump_progress(asker)  # the asking panel now offers to undo this window as well
             entry.update(tool=tool[:80], detail=detail[:120], actions=entry["actions"] + 1, updated=now)
             self._bump_progress(agent.name)
             label = " ".join(str(asked.get("text", "")).split())[:40] if asked is not None and first else ""
@@ -897,7 +990,9 @@ class ChatHub:
                 self._log("stopped", request=self._request_for(agent.name), chat_id=agent.name, pin=pin, agent_id=agent_id)
                 if self.stops.get(agent.name, {}).get("seq") == 0:  # 중지 on work asked elsewhere: it has stopped
                     del self.stops[agent.name]
-            if worker is None or worker["agent_id"] in ("", agent_id):
+            # Also a subagent that never touched the window (the worker on record is an earlier one, long stopped):
+            # left standing, what it was handed would keep the window shut to the next request (see assign).
+            if worker is None or worker["stopped"] or worker["agent_id"] in ("", agent_id):
                 given = self.assigned.pop(agent.name, None)  # what it was handed is done; the next hand-out says anew whose it is
                 if given is not None and given["asker"] != agent.name and self.progress.pop(agent.name, None) is not None:
                     # It worked for a request asked elsewhere: the answer goes there, and none comes to this window's
@@ -955,6 +1050,134 @@ class ChatHub:
             elif chat == chat_id or (stop["seq"] and asker == chat):
                 return chat
         return None
+
+    # ------------------------------------------------------------------ undoing a request in every window it changed
+
+    def _window_name(self, chat_id: str) -> str:
+        """"hand_test (Unity)" for a window's chat, as the other-windows lines name it. Called with the lock held."""
+        known = self.names.get(chat_id) or self.windows.get(chat_id) or self.contexts.get(chat_id) or {}
+        app, _, rest = chat_id.partition("-")
+        return f"{known.get('window') or rest} ({'Unity' if (known.get('app') or app) == 'unity' else 'Blender'})"
+
+    def _undo_item(self, chat_id: str, request: str = "") -> dict | None:
+        """The request of a chat to undo: the one with this id, else the newest it asked that still has a window to
+        go back in. Called with the lock held."""
+        for item in reversed(self.logs.get(chat_id, [])):
+            if item.get("kind") == "user" and item.get("points") and (not request or item.get("request") == request):
+                return item
+        return None
+
+    def _undo_offer(self, chat_id: str, now: float) -> dict | None:
+        """What a panel is told so that its 되돌리기 can take a request back in the other windows too: the newest
+        request asked in this chat that set an undo point in another window. The panel knows its own window's undo
+        points and decides with that: this request first, unless its own newest point is of a later request. Called
+        with the lock held."""
+        for item in reversed(self.logs.get(chat_id, [])):
+            if now - item["ts"] > OFFER_SECONDS:
+                break
+            others = [w for w in item.get("points") or [] if w != chat_id] if item.get("kind") == "user" else []
+            if others:
+                names = item.get("point_names") or {}
+                return {"request": str(item.get("request", "")), "label": " ".join(str(item.get("text", "")).split())[:40],
+                        "ts": item["ts"], "windows": [names.get(w) or self._window_name(w) for w in others]}
+        return None
+
+    @staticmethod
+    def _undo_text(label: str, results: list[dict]) -> str:
+        """How undoing a request went, window by window, as one line for a chat panel."""
+        if not results:
+            return f"'{label}' 요청은 다른 창에서 되돌릴 것이 없었어요."
+        parts = []
+        for result in results:
+            words = UNDO_WORDS.get(result["state"], UNDO_WORDS["failed"])
+            if result["state"] == "blocked" and result.get("top"):
+                words = f"그 뒤의 요청('{result['top']}')이 이 창을 바꿔서 건너뛰었어요. 그 창에서 먼저 되돌려 주세요"
+            more = result.get("summary") if result["state"] == "undone" else result.get("detail") if result["state"] == "failed" else ""
+            parts.append(f"{result['window']}: {words}" + (f" ({str(more).rstrip('.')})" if more else ""))
+        return f"'{label}' 요청 되돌리기: " + " / ".join(parts)
+
+    def undo_request(self, chat_id: str, request: str = "", skip=(), notify: bool = True) -> dict:
+        """Undo a request in every window it changed: the panel's 되돌리기 for a request that reached other windows
+        (the panel undoes its own window itself and passes it as skip), and the supervisor's undo_request tool for
+        "cancel that" (notify false: the supervisor tells the panel itself). Each window is asked to undo that
+        request by its id, and does so only when nothing newer changed it since (undo_in_window); a window at work
+        is passed by. The windows that were undone get a line in their own chat. request "": the newest request of
+        this chat that still has a window to go back in. Returns {"ok", "request", "label", "results": [{"chat_id",
+        "window", "state", ...}], "text"}, or ok false with reason "none" / "running"."""
+        agents = {a.name: a for a in installed_agents(self.agents_dir)}
+        with self.cond:
+            item = self._undo_item(chat_id, request)
+            if item is None:
+                return {"ok": False, "reason": "none"}
+            key = str(item.get("request") or "")
+            if key in self.undoing:
+                return {"ok": False, "reason": "running"}
+            self.undoing.add(key)
+            label = " ".join(str(item.get("text", "")).split())[:40]
+            now, names = time.time(), item.get("point_names") or {}
+            targets = [(window, names.get(window) or self._window_name(window),
+                        self._state(window, now)["state"] in ("working", "stopping", "dialog"))
+                       for window in item["points"] if window not in skip]
+        results = []
+        try:
+            for window, name, busy in targets:  # outside the lock: a window may take a while
+                agent = agents.get(window)
+                if busy:
+                    outcome = {"state": "busy"}
+                elif agent is None:
+                    outcome = {"state": "unreachable"}
+                else:
+                    try:
+                        outcome = (self.undo_window or undo_in_window)(agent.app, agent.pin, key) or {"state": "failed"}
+                    except Exception as exc:  # one window's trouble must not keep the others from going back
+                        outcome = {"state": "failed", "detail": str(exc)[:300]}
+                results.append({"chat_id": window, "window": name, **outcome})
+        finally:
+            with self.cond:
+                self.undoing.discard(key)
+                text = self._undo_text(label, results)
+                item["points"][:] = [window for window in item["points"] if window not in skip]  # the caller saw to those itself
+                for result in results:
+                    if result["state"] in ("undone", "nothing") and result["chat_id"] in item["points"]:
+                        item["points"].remove(result["chat_id"])
+                    if result["state"] == "undone" and result["chat_id"] != chat_id:  # that window's own record
+                        more = str(result.get("summary") or "")
+                        self._append(result["chat_id"], {"kind": "notice", "text": f"{self._window_name(chat_id)} 채팅창의 요청 "
+                                                                                    f"'{label}'을 여기서도 되돌렸어요." + (f" {more}" if more else "")})
+                if self.history_dir is not None:
+                    self._save_history(chat_id)
+                if notify:
+                    self._append(chat_id, {"kind": "notice", "text": text})
+                    if any(result["state"] == "undone" for result in results):  # the supervisor still counts on what is gone
+                        self.undo_notes[chat_id] = f"[사용자가 채팅창에서 되돌렸음: {text}]"
+                self._bump_progress(chat_id)  # the panel's button no longer offers what went back
+                self._log("undo", request=key, chat_id=chat_id, text=eventlog.short(text))
+        return {"ok": True, "request": key, "label": label, "results": results, "text": text}
+
+    def start_undo(self, app: str, window: str, pin: str = "", request: str = "", skip_own: bool = False) -> dict:
+        """되돌리기 in a panel, for a request that changed other windows: undo it there in the background (a window
+        may take a while). The panel hears how it went as a notice in its chat."""
+        chat_id, _ = resolve_window(installed_agents(self.agents_dir), app, window, pin)
+        with self.cond:
+            if self._undo_item(chat_id, request) is None:
+                return {"chat_id": chat_id, "started": False}
+        threading.Thread(target=self.undo_request, args=(chat_id, request, {chat_id} if skip_own else (), True), daemon=True).start()
+        return {"chat_id": chat_id, "started": True}
+
+    def window_undone(self, app: str, window: str, pin: str, request: str) -> dict:
+        """A panel undid this request in its own window with its own button: no other panel need offer that window
+        along with the request any more. A nicety: asked again, the window would just say there is nothing left."""
+        chat_id, _ = resolve_window(installed_agents(self.agents_dir), app, window, pin)
+        with self.cond:
+            for chat, items in self.logs.items():
+                for item in items:
+                    if item.get("kind") == "user" and request and item.get("request") == request and chat_id in (item.get("points") or []):
+                        item["points"].remove(chat_id)
+                        if self.history_dir is not None:
+                            self._save_history(chat)
+                        self._bump_progress(chat)
+                        return {"chat_id": chat_id, "known": True}
+        return {"chat_id": chat_id, "known": False}
 
     def _request_item(self, chat_id: str) -> dict | None:
         """The panel message not answered yet (a "working on it" reply does not answer it)."""
@@ -1018,7 +1241,7 @@ class StdioMcp:
         elif method == "ping":
             self.send({"jsonrpc": "2.0", "id": msg_id, "result": {}})
         elif method == "tools/list":
-            self.send({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": [REPLY_TOOL, CONTEXT_TOOL]}})
+            self.send({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": [REPLY_TOOL, CONTEXT_TOOL, UNDO_TOOL]}})
         elif method == "tools/call":
             self.send({"jsonrpc": "2.0", "id": msg_id, "result": self.call_tool(params)})
         elif method == "notifications/claude/channel/permission_request":
@@ -1029,12 +1252,22 @@ class StdioMcp:
 
     def call_tool(self, params: dict) -> dict:
         name = params.get("name")
-        if name not in ("reply", CONTEXT_TOOL["name"]):
+        if name not in ("reply", CONTEXT_TOOL["name"], UNDO_TOOL["name"]):
             return {"isError": True, "content": [{"type": "text", "text": f"Unknown tool {name!r}"}]}
         self.hub.mark_in_use()
         if name == CONTEXT_TOOL["name"]:
             return {"content": [{"type": "text", "text": json.dumps(self.hub.current_context(), ensure_ascii=False)}]}
         args = params.get("arguments") or {}
+        if name == UNDO_TOOL["name"]:
+            done = self.hub.undo_request(str(args.get("chat_id", "")), str(args.get("request") or ""), notify=False)
+            if not done["ok"]:
+                why = ("that request is being undone right now" if done["reason"] == "running" else
+                       "Claude Hand knows of no request of that chat with something left to undo. Work asked in the terminal or "
+                       "the Claude app has no undo point by request: hand that undo to the window's subagent instead")
+                return {"isError": True, "content": [{"type": "text", "text": f"Nothing undone: {why}."}]}
+            windows = [{k: v for k, v in result.items() if v not in ("", None)} for result in done["results"]]
+            return {"content": [{"type": "text", "text": json.dumps({"request": done["request"], "asked": done["label"], "windows": windows,
+                                                                    "in_words": done["text"]}, ensure_ascii=False)}]}
         chat_id, text = str(args.get("chat_id", "")), str(args.get("text", ""))
         origin = "desktop" if args.get("origin") == "desktop" else "panel"
         if not text.strip():
@@ -1179,6 +1412,17 @@ class PanelHandler(BaseHTTPRequestHandler):
         elif path == "/v1/stopped":  # a subagent's Stop hook: it finished its turn
             result = self.hub.agent_stopped(str(body.get("app", "")), str(body.get("pin", ""))[:200], str(body.get("agent_id", ""))[:80])
             self._json(200 if result else 404, {"ok": result is not None, **(result or {})})
+        elif path in ("/v1/undo", "/v1/undone"):  # 되돌리기 in a panel: the other windows of a request / its own window, done
+            app, request = str(body.get("app", "")), str(body.get("request") or "")[:80]
+            if app not in ("unity", "blender"):
+                self._json(400, {"ok": False, "error": "app must be unity or blender"})
+                return
+            window, pin = str(body.get("window", ""))[:200], str(body.get("pin", ""))[:200]
+            if path == "/v1/undone":
+                self._json(200, {"ok": True, **self.hub.window_undone(app, window, pin, request)})
+                return
+            result = self.hub.start_undo(app, window, pin, request, skip_own=body.get("skip_own") is True)
+            self._json(200, {"ok": result["started"], **result, **({} if result["started"] else {"error": "그 요청이 바꾼 다른 창이 없습니다"})})
         else:
             self._json(404, {"ok": False, "error": "not found"})
 

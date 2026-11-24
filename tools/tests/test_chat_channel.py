@@ -258,7 +258,7 @@ class McpTests(unittest.TestCase):
         self.assertEqual(init["protocolVersion"], "2025-06-18")
         self.assertEqual(init["capabilities"]["experimental"], {"claude/channel": {}, "claude/channel/permission": {}})
         self.assertIn("`reply` 도구로 같은 `chat_id`에", init["instructions"])
-        self.assertEqual([t["name"] for t in replies[1]["result"]["tools"]], ["reply", "current_context"])
+        self.assertEqual([t["name"] for t in replies[1]["result"]["tools"]], ["reply", "current_context", "undo_request"])
         self.assertEqual(replies[2], {"jsonrpc": "2.0", "id": 3, "result": {}})
         self.assertEqual(replies[3]["error"]["code"], -32601)
 
@@ -1442,6 +1442,263 @@ class WorkerTests(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+
+class UndoRequestTests(unittest.TestCase):
+    """A request that changed several windows is undone in each of them: by the 되돌리기 of the panel it was asked in,
+    or by the supervisor's undo_request tool for "cancel that"."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.agents = Path(self.tmp.name) / "agents"
+        write_agents(self.agents, more_unity=[handlib.discovery.Instance(name="Props", hash="bbbb2222")])
+        self.emitted = Recorder()
+        self.hub = cc.ChatHub(self.emitted, self.agents)
+        self.hub.initialized = True
+        self.asked, self.answers = [], {}  # what each window was asked to undo, and what it says (default: undone)
+        self.hub.undo_window = lambda app, pin, key: self.asked.append((pin, key)) or dict(self.answers.get(pin, {"state": "undone"}))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def request_of(self, chat_id):
+        return next(i["request"] for i in reversed(self.hub.logs[chat_id]) if i["kind"] == "user")
+
+    def work(self, pin, agent_id, tool="manage_gameobject", app="unity", request=None):
+        """A window's subagent is handed work for a request, changes something and stops."""
+        chat = next(a.name for a in handlib.agents.installed_agents(self.agents) if a.pin == pin)
+        if request is not None:
+            self.assertNotIn("busy", self.hub.assign(chat, request))
+        action = self.hub.report_action(app, pin, tool, "", agent_id)
+        self.hub.agent_stopped(app, pin, agent_id)
+        return action
+
+    def notices(self, chat_id):
+        return [i["text"] for i in self.hub.logs.get(chat_id, []) if i["kind"] == "notice"]
+
+    def send_model(self):
+        """Asked in the Blender panel: Blender changes, and two Unity projects take the model."""
+        self.hub.post_user_message("blender", "props", "의자를 고쳐서 두 프로젝트에 보내줘", pin="props@9877")
+        request = self.request_of("blender-props")
+        self.work("props@9877", "bbb", "execute_blender_code", "blender", request)
+        self.work("MyGame@aaaa1111", "aaa", "ch_import_model", request=request)
+        self.work("Props@bbbb2222", "ccc", "ch_import_model", request=request)
+        self.hub.reply("blender-props", "두 프로젝트에 놓았어요", changed=["unity-mygame", "unity-props"])
+        return request
+
+    def test_the_request_remembers_the_windows_it_changed(self):
+        self.hub.use_history(Path(self.tmp.name) / "history")
+        self.hub.post_user_message("blender", "props", "의자 위치만 알려줘", pin="props@9877")
+        self.work("props@9877", "bbb", "get_object_info", "blender", self.request_of("blender-props"))  # looked: no point
+        self.hub.reply("blender-props", "(0, 0, 0)에 있어요")
+        self.assertIsNone(self.hub.poll("blender-props", 0, 0)["undo"])
+        request = self.send_model()
+        item = next(i for i in self.hub.logs["blender-props"] if i.get("request") == request)
+        self.assertEqual(item["points"], ["blender-props", "unity-mygame", "unity-props"])
+        offer = self.hub.poll("blender-props", 0, 0)["undo"]
+        self.assertEqual((offer["request"], offer["label"], offer["windows"], offer["ts"]),
+                         (request, "의자를 고쳐서 두 프로젝트에 보내줘", ["MyGame (Unity)", "Props (Unity)"], item["ts"]))
+        self.assertIsNone(self.hub.poll("unity-mygame", 0, 0)["undo"])  # not asked there: its own button undoes its own window
+        # A request that changed only its own window is the panel's own business: nothing to offer for it ...
+        self.hub.post_user_message("unity", "MyGame", "큐브 하나 만들어줘")
+        self.work("MyGame@aaaa1111", "aaa", request=self.request_of("unity-mygame"))
+        self.assertIsNone(self.hub.poll("unity-mygame", 0, 0)["undo"])
+        # ... and the windows are still known after Claude Hand is started again.
+        again = cc.ChatHub(lambda message: None, self.agents)
+        again.use_history(Path(self.tmp.name) / "history")
+        self.assertEqual(again.poll("blender-props", 0, 0)["undo"]["windows"], ["MyGame (Unity)", "Props (Unity)"])
+        with unittest.mock.patch.object(cc, "OFFER_SECONDS", -1.0):
+            self.assertIsNone(again.poll("blender-props", 0, 0)["undo"])  # not for ever
+
+    def test_the_asking_panels_button_undoes_the_other_windows(self):
+        request = self.send_model()
+        self.answers["Props@bbbb2222"] = {"state": "blocked", "top": "바닥 색 바꿔줘 (10:20)"}
+        self.answers["MyGame@aaaa1111"] = {"state": "undone", "summary": "파일 1개를 이전 것으로 되돌렸어요."}
+        rev = self.hub.poll("blender-props", 0, 0)["progress_rev"]
+        # The panel undid its own window itself and asks for the rest.
+        done = self.hub.undo_request("blender-props", request, skip={"blender-props"})
+        self.assertEqual(self.asked, [("MyGame@aaaa1111", request), ("Props@bbbb2222", request)])
+        self.assertEqual([(r["chat_id"], r["state"]) for r in done["results"]], [("unity-mygame", "undone"), ("unity-props", "blocked")])
+        self.assertEqual(self.notices("blender-props")[-1],
+                         "'의자를 고쳐서 두 프로젝트에 보내줘' 요청 되돌리기: MyGame (Unity): 되돌렸어요 (파일 1개를 이전 것으로 되돌렸어요) / "
+                         "Props (Unity): 그 뒤의 요청('바닥 색 바꿔줘 (10:20)')이 이 창을 바꿔서 건너뛰었어요. 그 창에서 먼저 되돌려 주세요")
+        self.assertEqual(self.notices("unity-mygame"),  # the window that changed has it on record too
+                         ["props (Blender) 채팅창의 요청 '의자를 고쳐서 두 프로젝트에 보내줘'을 여기서도 되돌렸어요. 파일 1개를 이전 것으로 되돌렸어요."])
+        self.assertEqual(self.notices("unity-props"), [])
+        state = self.hub.poll("blender-props", 0, 0)
+        self.assertNotEqual(state["progress_rev"], rev)  # a waiting panel wakes and draws its button anew
+        self.assertEqual(state["undo"]["windows"], ["Props (Unity)"])  # still to go back there, once that window lets it
+        # The next message from that panel tells the supervisor, which still counts on what is gone.
+        self.hub.post_user_message("blender", "props", "다시 보내줘", pin="props@9877")
+        self.assertIn("[사용자가 채팅창에서 되돌렸음: '의자를 고쳐서 두 프로젝트에 보내줘' 요청 되돌리기: MyGame (Unity): 되돌렸어요",
+                      self.emitted.messages[-1]["params"]["content"])
+        self.hub.post_user_message("blender", "props", "하나 더", pin="props@9877")
+        self.assertNotIn("되돌렸음", self.emitted.messages[-1]["params"]["content"])  # said once
+        # Later that window is free: the same button finishes the job, and then has nothing left to offer.
+        del self.answers["Props@bbbb2222"]
+        self.hub.undo_request("blender-props", request, skip={"blender-props"})
+        self.assertEqual(self.asked[2:], [("Props@bbbb2222", request)])  # MyGame is not asked again
+        self.assertIsNone(self.hub.poll("blender-props", 0, 0)["undo"])
+        self.assertEqual(self.hub.undo_request("blender-props", request), {"ok": False, "reason": "none"})
+
+    def test_a_window_at_work_or_out_of_reach_is_passed_by(self):
+        request = self.send_model()
+        self.hub.post_user_message("unity", "MyGame", "큐브 백 개 만들어줘")
+        self.hub.assign("unity-mygame", self.request_of("unity-mygame"))
+        self.hub.report_action("unity", "MyGame@aaaa1111", "manage_gameobject", "create", "aaa")  # at work for a request of its own
+        self.answers["Props@bbbb2222"] = {"state": "unreachable"}
+        self.hub.undo_window = lambda app, pin, key, ask=self.hub.undo_window: 1 / 0 if app == "blender" else ask(app, pin, key)
+        done = self.hub.undo_request("blender-props")  # as the supervisor's tool: every window, the asking one too
+        self.assertEqual([(r["chat_id"], r["state"]) for r in done["results"]],
+                         [("blender-props", "failed"), ("unity-mygame", "busy"), ("unity-props", "unreachable")])
+        self.assertEqual(self.asked, [("Props@bbbb2222", request)])  # a window at work is not even asked
+        self.assertIn("MyGame (Unity): 지금 작업 중이라 건너뛰었어요", done["text"])
+        self.assertIn("props (Blender): 되돌리지 못했어요 (division by zero)", done["text"])
+        self.assertEqual(self.hub.poll("blender-props", 0, 0)["undo"]["windows"], ["MyGame (Unity)", "Props (Unity)"])  # nothing went back
+
+    def test_a_panel_that_undid_its_own_window_is_not_offered_again(self):
+        request = self.send_model()
+        self.assertEqual(self.hub.window_undone("unity", "MyGame", "", request), {"chat_id": "unity-mygame", "known": True})
+        self.assertEqual(self.hub.poll("blender-props", 0, 0)["undo"]["windows"], ["Props (Unity)"])
+        self.assertFalse(self.hub.window_undone("unity", "MyGame", "", request)["known"])
+        self.assertFalse(self.hub.window_undone("unity", "MyGame", "", "")["known"])
+
+    def test_the_supervisors_tool_undoes_the_newest_request_that_changed_something(self):
+        request = self.send_model()
+        self.hub.post_user_message("blender", "props", "방금 거 취소해줘", pin="props@9877")  # the newest message changed nothing
+        done = self.hub.undo_request("blender-props", notify=False)
+        self.assertEqual((done["request"], [r["state"] for r in done["results"]]), (request, ["undone"] * 3))
+        self.assertEqual([pin for pin, _ in self.asked], ["props@9877", "MyGame@aaaa1111", "Props@bbbb2222"])
+        self.assertEqual(self.notices("blender-props"), [])  # the supervisor answers that panel itself ...
+        self.assertEqual(len(self.notices("unity-mygame")), 1)  # ... the other windows get their line
+        self.hub.post_user_message("blender", "props", "고마워", pin="props@9877")
+        self.assertNotIn("되돌렸음", self.emitted.messages[-1]["params"]["content"])  # it knows: it did it
+        self.assertEqual(self.hub.undo_request("unity-mygame"), {"ok": False, "reason": "none"})  # nothing asked there changed a thing
+        self.assertEqual(self.hub.undo_request("nobody"), {"ok": False, "reason": "none"})
+
+    def test_a_second_press_waits_for_the_first(self):
+        request = self.send_model()
+        inside = []
+        self.hub.undo_window = lambda app, pin, key: inside.append(self.hub.undo_request("blender-props", request)) or {"state": "undone"}
+        self.assertTrue(self.hub.undo_request("blender-props", request)["ok"])
+        self.assertEqual(inside, [{"ok": False, "reason": "running"}] * 3)
+
+    def test_a_window_at_work_takes_no_other_requests_work(self):
+        """One place per window says whose request its work is for. Work for another request handed to it meanwhile
+        took that place: the rest of the first work, its undo point and its 중지 went down for the wrong request."""
+        self.hub.post_user_message("blender", "props", "의자를 MyGame으로 보내줘", pin="props@9877")
+        theirs = self.request_of("blender-props")
+        self.assertNotIn("busy", self.hub.assign("unity-mygame", theirs))
+        self.hub.report_action("unity", "MyGame@aaaa1111", "ch_import_model", "", "aaa")
+        self.hub.post_user_message("unity", "MyGame", "바닥 색 바꿔줘")
+        own = self.request_of("unity-mygame")
+        refused = self.hub.assign("unity-mygame", own)
+        self.assertEqual((refused["busy"], refused["other"]), (True, "의자를 MyGame으로 보내줘"))
+        self.assertEqual(self.hub.report_action("unity", "MyGame@aaaa1111", "manage_material", "", "aaa")["point"], theirs)  # still theirs
+        self.assertNotIn("busy", self.hub.assign("aaa", theirs))  # more of the same request is no other request
+        self.assertTrue(self.hub.assign("unity-mygame", "")["busy"])  # nor may work asked in the Claude app cut in
+        self.hub.agent_stopped("unity", "MyGame@aaaa1111", "aaa")
+        self.assertNotIn("busy", self.hub.assign("unity-mygame", own))  # done: the window is free
+        # A subagent that never touched its window stops too: what it was handed must not keep the window shut.
+        self.hub.agent_stopped("unity", "MyGame@aaaa1111", "ddd")
+        self.assertNotIn("busy", self.hub.assign("unity-mygame", theirs))
+        # One that was cut off never says it stopped: the window opens again after the time two subagents are kept apart.
+        with unittest.mock.patch.object(cc, "LOCK_SECONDS", -1.0):
+            self.assertNotIn("busy", self.hub.assign("unity-mygame", own))
+
+    def test_the_panels_and_the_supervisor_reach_it(self):
+        request = self.send_model()
+        server = cc.start_http(self.hub, "t", port=18791)
+        try:
+            def post(path, body):
+                req = urllib.request.Request(f"http://127.0.0.1:{server.server_address[1]}{path}", method="POST", data=json.dumps(body).encode(),
+                                             headers={"X-Claude-Hand-Token": "t", "Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            self.assertTrue(post("/v1/undone", {"app": "unity", "window": "Props", "request": request})["known"])
+            started = post("/v1/undo", {"app": "blender", "window": "props", "pin": "props@9877", "request": request, "skip_own": True})
+            self.assertEqual((started["ok"], started["started"]), (True, True))
+            deadline = time.time() + 5
+            while not self.notices("blender-props") and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(self.asked, [("MyGame@aaaa1111", request)])  # not the panel's own window, nor the one that undid itself
+            self.assertIn("MyGame (Unity): 되돌렸어요", self.notices("blender-props")[-1])
+            nothing = post("/v1/undo", {"app": "unity", "window": "MyGame", "request": ""})
+            self.assertEqual((nothing["ok"], nothing["started"], nothing["error"]), (False, False, "그 요청이 바꾼 다른 창이 없습니다"))
+        finally:
+            server.shutdown()
+            server.server_close()
+        # The supervisor's tool, over MCP.
+        request = self.send_model()
+        mcp = cc.StdioMcp(io.StringIO(), io.StringIO(), self.agents)
+        mcp.hub = self.hub
+        result = mcp.call_tool({"name": "undo_request", "arguments": {"chat_id": "blender-props"}})
+        told = json.loads(result["content"][0]["text"])
+        self.assertEqual((told["request"], [w["state"] for w in told["windows"]]), (request, ["undone"] * 3))
+        self.assertIn("MyGame (Unity): 되돌렸어요", told["in_words"])
+        again = mcp.call_tool({"name": "undo_request", "arguments": {"chat_id": "blender-props"}})
+        self.assertTrue(again["isError"])
+        self.assertIn("hand that undo to the window's subagent", again["content"][0]["text"])
+
+
+class UndoInWindowTests(unittest.TestCase):
+    """How one window is asked to undo a request by its id, and what its answer comes to."""
+
+    def unity(self, answer):
+        calls = []
+
+        def request(entry, tool, params, timeout):
+            calls.append((entry["hash"], tool, params))
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        with unittest.mock.patch.object(cc, "find_project", lambda hash_: {"hash": hash_, "port": 1} if hash_ == "aaaa1111" else None), \
+                unittest.mock.patch.object(cc, "unity_request", request):
+            return cc.undo_in_window("unity", "MyGame@aaaa1111", "1123-101500-7"), calls, cc.undo_in_window("unity", "Gone@ffff0000", "x")
+
+    def test_unity_through_the_bridge(self):
+        done, calls, closed = self.unity({"success": True, "message": "Reverted", "data": {"state": "undone", "summary": "파일 1개를 이전 것으로 되돌렸어요."}})
+        self.assertEqual(calls, [("aaaa1111", "ch_checkpoint", {"action": "undo_request", "request": "1123-101500-7"})])
+        self.assertEqual((done["state"], done["summary"]), ("undone", "파일 1개를 이전 것으로 되돌렸어요."))
+        self.assertEqual(closed, {"state": "unreachable"})  # that project is not open
+        blocked, _, _ = self.unity({"success": True, "data": {"state": "blocked", "top": "바닥 색 (10:20)"}})
+        self.assertEqual((blocked["state"], blocked["top"]), ("blocked", "바닥 색 (10:20)"))
+        self.assertEqual(self.unity({"success": True, "data": {"state": "nothing"}})[0]["state"], "nothing")
+        # A package from before undo_request: it must say no, never undo whatever is on top.
+        old, _, _ = self.unity({"success": False, "code": "INVALID_ARGS", "error": "INVALID_ARGS",
+                                "data": {"code": "INVALID_ARGS", "message": "action must be mark, undo or list.", "retry": "after_fix"}})
+        self.assertEqual((old["state"], old["detail"]), ("failed", "action must be mark, undo or list."))
+        self.assertEqual(self.unity({"success": True, "data": {"label": "x"}})[0]["state"], "failed")  # an answer it does not know
+        self.assertEqual(self.unity(cc.BridgeError("UNREACHABLE", "Unity MyGame does not answer"))[0]["state"], "unreachable")
+        self.assertEqual(self.unity(cc.BridgeError("FAILED", "boom"))[0], {"state": "failed", "detail": "boom"})
+
+    def test_blender_through_the_chat_addon(self):
+        sent = []
+
+        def blender(reply):
+            def request(port, command, timeout):
+                sent.append((port, command))
+                if isinstance(reply, Exception):
+                    raise reply
+                return reply
+            with unittest.mock.patch.object(cc, "blender_request", request):
+                return cc.undo_in_window("blender", "props@9877", "1123-101500-7")
+        printed = lambda text: {"status": "success", "result": {"executed": True, "result": text}}
+        self.assertEqual(blender(printed('CH_UNDO {"state": "undone", "detail": "되돌렸어요"}\n'))["state"], "undone")
+        port, command = sent[0]
+        self.assertEqual((port, command["type"]), (9877, "execute_code"))
+        said = {}
+        addon = type("Addon", (), {"undo_request": staticmethod(lambda request: said.update(request=request) or {"state": "nothing"})})
+        exec(command["params"]["code"].replace("import claude_hand_chat, json\n", "import json\n"), {"claude_hand_chat": addon, "print": lambda text: said.update(out=text)})
+        self.assertEqual(said, {"request": "1123-101500-7", "out": 'CH_UNDO {"state": "nothing"}'})
+        blocked = blender(printed('CH_UNDO {"state": "blocked", "top": "의자 (10:20)"}'))
+        self.assertEqual((blocked["state"], blocked["top"]), ("blocked", "의자 (10:20)"))
+        # An add-on from before undo_request: an error, not an undo.
+        old = blender({"status": "error", "message": "module 'claude_hand_chat' has no attribute 'undo_request'"})
+        self.assertEqual((old["state"], old["detail"]), ("failed", "module 'claude_hand_chat' has no attribute 'undo_request'"))
+        self.assertEqual(blender(printed("something else"))["state"], "failed")
+        self.assertEqual(blender(ConnectionRefusedError()), {"state": "unreachable"})
+        self.assertEqual(blender(None)["state"], "failed")
 
 
 if __name__ == "__main__":

@@ -42,6 +42,7 @@ namespace ClaudeHand.Editor
         private double _lastBusyRepaint;
         private List<string> _others = new List<string>();  // what the other open windows are busy with, a line each (from the channel)
         private long _othersRev = -1;       // the server's revision of that, so polling wakes when another window's state changes
+        private JObject _offer;             // a request asked here that changed other windows too: {request, label, ts, windows} (see DrawUndo)
         [SerializeField] private bool _showOthers = true;
         private int _unread;                // replies and permission prompts that came while this window had no focus
         [SerializeField] private string _undoNote;  // goes along with the next message after "되돌리기"
@@ -204,6 +205,7 @@ namespace ClaudeHand.Editor
                     SetProgress(null, -1);
                     _others.Clear();
                     _othersRev = -1;
+                    _offer = null;
                     _after = 0;
                     _chatId = null;
                 }
@@ -256,6 +258,12 @@ namespace ClaudeHand.Editor
             {
                 _othersRev = othersRev.Value;
                 _others = (updates["others"] as JArray)?.Select(line => line.ToString()).ToList() ?? new List<string>();
+                Repaint();
+            }
+            var offer = updates["undo"] as JObject;  // a request asked here that changed other windows too (null: none)
+            if (!JToken.DeepEquals(offer, _offer))
+            {
+                _offer = offer;
                 Repaint();
             }
             var items = updates["items"] as JArray;
@@ -614,34 +622,97 @@ namespace ClaudeHand.Editor
         /// <summary>
         /// "Undo the last request": back to the undo point the subagent's guard set before its first action. Not while
         /// it is still working, and only after a confirmation that says edits made by hand since then go too.
+        /// A request asked in this window that changed other windows too (the channel tells of it: _offer) is undone
+        /// in all of them with one press: here as always, in the others by the channel, which asks each window to
+        /// undo that request by its name. Such a request comes first unless this window's newest point is of a later
+        /// request, which is then undone here first, as before.
         /// </summary>
         private void DrawUndo()
         {
+            if (_progress != null) return;
             var marks = ChCheckpoint.Undoable;  // not a request that only looked: there is nothing to undo down to it
-            if (marks.Count == 0 || _progress != null) return;
-            var mark = marks[marks.Count - 1];
+            var mark = marks.Count > 0 ? marks[marks.Count - 1] : null;
+            var asked = _offer?.Value<string>("request");
+            bool here = mark != null && !string.IsNullOrEmpty(asked) && mark.request == asked;
+            if (!string.IsNullOrEmpty(asked) && (mark == null || here || mark.stamp <= (_offer.Value<double?>("ts") ?? 0)))
+            {
+                DrawUndoEverywhere(asked, here ? mark : null);
+                return;
+            }
+            if (mark == null) return;
             if (!GUILayout.Button($"되돌리기: {mark.label} ({mark.time})", EditorStyles.miniButton)) return;
-            // What the request did to files goes back too (ChCheckpoint): say so before, since it is not Unity's own Undo.
-            var plan = ChCheckpoint.Plan(mark);
-            var files = (plan.restore > 0 ? $"\n이 요청이 바꾼 파일 {plan.restore}개는 이전 것으로 돌아갑니다." : "") +
-                        (plan.remove > 0 ? $"\n이 요청으로 생긴 에셋 {plan.remove}개는 프로젝트에서 빠집니다({ChCheckpoint.RemovedFolder}에 보관)." : "") +
-                        (plan.putBack > 0 ? $"\n이 요청이 지운 에셋 {plan.putBack}개는 되살아납니다." : "") +
-                        (plan.moveBack > 0 ? $"\n이 요청이 옮기거나 이름을 바꾼 에셋 {plan.moveBack}개는 원래 자리로 갑니다." : "") +
-                        (plan.unkept.Count > 0 ? $"\n이전 내용이 보관되지 않은 파일 {plan.unkept.Count}개는 그대로 남습니다({ChCheckpoint.Few(plan.unkept)})." : "");
             var ok = EditorUtility.DisplayDialog("Claude Hand 되돌리기",
                 $"'{mark.label}' 요청({mark.time}) 이후 이 Unity에서 바뀐 것을 모두 되돌립니다.\n" +
                 "그 뒤에 직접 고친 것도 함께 되돌아갑니다(파일은 이 요청이 일하는 동안 바뀐 것만). " +
-                "저장해 둔 씬 파일은 다시 저장해야 바뀝니다." + files, "되돌리기", "취소");
+                "저장해 둔 씬 파일은 다시 저장해야 바뀝니다." + FileLines(mark), "되돌리기", "취소");
             if (!ok) return;
+            var undone = UndoHere();
+            // So that no other panel still offers this window along with that request.
+            if (undone != null && !string.IsNullOrEmpty(undone.request)) TellChannel("/v1/undone", new { app = "unity", window = ChPaths.ProjectName, undone.request }, null);
+            GUIUtility.ExitGUI();  // the dialog and the undo changed things mid-frame
+        }
+
+        /// <summary>mark: this window's point of that request, when it has one on top; null when the request changed only other windows.</summary>
+        private void DrawUndoEverywhere(string request, ChCheckpoint.Mark mark)
+        {
+            var label = _offer.Value<string>("label");
+            var others = string.Join(", ", (_offer["windows"] as JArray ?? new JArray()).Select(w => w.ToString()));
+            var where = mark != null ? "이 창 + " + others : others;
+            if (!GUILayout.Button($"되돌리기: {label} ({where})", EditorStyles.miniButton)) return;
+            var ok = EditorUtility.DisplayDialog("Claude Hand 되돌리기",
+                $"'{label}' 요청이 바꾼 것을 되돌립니다: {where}.\n" +
+                (mark != null
+                    ? "이 Unity에서는 그 요청 이후 바뀐 것을 모두 되돌립니다. 그 뒤에 직접 고친 것도 함께 되돌아갑니다" +
+                      "(파일은 이 요청이 일하는 동안 바뀐 것만). 저장해 둔 씬 파일은 다시 저장해야 바뀝니다.\n"
+                    : "") +
+                $"다른 창({others})은 그 창에 더 새 요청이 있거나 작업 중이면 건너뛰고, 그렇게 알려 줍니다." +
+                (mark != null ? FileLines(mark) : ""), "되돌리기", "취소");
+            if (!ok) return;
+            if (mark != null) UndoHere();
+            // The other windows: the channel undoes the request in each and says here how it went.
+            TellChannel("/v1/undo", new { app = "unity", window = ChPaths.ProjectName, request, skip_own = true }, "다른 창을 되돌리지 못했습니다");
+            GUIUtility.ExitGUI();
+        }
+
+        /// <summary>What undoing the mark does to files (ChCheckpoint): said before, since it is not Unity's own Undo.</summary>
+        private static string FileLines(ChCheckpoint.Mark mark)
+        {
+            var plan = ChCheckpoint.Plan(mark);
+            return (plan.restore > 0 ? $"\n이 요청이 바꾼 파일 {plan.restore}개는 이전 것으로 돌아갑니다." : "") +
+                   (plan.remove > 0 ? $"\n이 요청으로 생긴 에셋 {plan.remove}개는 프로젝트에서 빠집니다({ChCheckpoint.RemovedFolder}에 보관)." : "") +
+                   (plan.putBack > 0 ? $"\n이 요청이 지운 에셋 {plan.putBack}개는 되살아납니다." : "") +
+                   (plan.moveBack > 0 ? $"\n이 요청이 옮기거나 이름을 바꾼 에셋 {plan.moveBack}개는 원래 자리로 갑니다." : "") +
+                   (plan.unkept.Count > 0 ? $"\n이전 내용이 보관되지 않은 파일 {plan.unkept.Count}개는 그대로 남습니다({ChCheckpoint.Few(plan.unkept)})." : "");
+        }
+
+        /// <summary>Undoes this window's newest point and says so, here and (with the next message) to the supervisor.</summary>
+        private ChCheckpoint.Mark UndoHere()
+        {
             var undone = ChCheckpoint.UndoLast();
-            if (undone == null) return;
+            if (undone == null) return null;
             var done = undone.report?.Summary();
             _entries.Add(new Entry { Kind = "notice", Text = $"되돌렸어요: '{undone.label}' ({undone.time}) 이후의 변경." + (done != null ? " " + done : "") });
             _undoNote = $"[사용자가 채팅창에서 '{undone.label}' ({undone.time}) 요청 이후의 Unity 변경을 Undo로 되돌렸음" +
                         (done != null ? ". " + done : "") + "]";
             _followNewest = true;
             _scroll.y = float.MaxValue;
-            GUIUtility.ExitGUI();  // the dialog and the undo changed things mid-frame
+            return undone;
+        }
+
+        /// <summary>A word to the channel that needs no answer shown; failed: what the status line says when it did not get there (null: nothing).</summary>
+        private async void TellChannel(string path, object body, string failed)
+        {
+            var server = ReadServer();
+            if (server == null) return;
+            try
+            {
+                var result = await Call(server, HttpMethod.Post, path, body, CancellationToken.None);
+                if (failed != null && result.Value<bool?>("ok") != true) SetStatus($"{failed}: " + (result.Value<string>("error") ?? "Claude Hand가 받지 않았습니다"));
+            }
+            catch (Exception ex)
+            {
+                if (failed != null) SetStatus($"{failed}: " + ex.Message);
+            }
         }
 
         private void SetProgress(JObject progress, long rev)

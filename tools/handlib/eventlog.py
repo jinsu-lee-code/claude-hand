@@ -120,7 +120,8 @@ def trace(events: list[dict], request: str) -> list[dict]:
 
 
 LABELS = {"message": "요청", "assigned": "맡김", "action": "동작", "refused": "막음", "call": "ch 호출", "stopped": "멈춤", "reply": "답",
-          "reminder": "다시 알림", "dialog": "대화상자", "stop": "중지 누름", "permission": "허락 요청", "verdict": "허락 답"}
+          "reminder": "다시 알림", "dialog": "대화상자", "stop": "중지 누름", "permission": "허락 요청", "verdict": "허락 답",
+          "undo": "되돌림"}
 
 
 def describe(event: dict, since: float | None = None) -> str:

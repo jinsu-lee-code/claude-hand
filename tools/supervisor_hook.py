@@ -18,8 +18,8 @@ from the <channel> tag:
 
 This hook reads the tag and tells the channel, which from then on puts that window's work down for that request
 (until the subagent stops). A hand-out to a window's subagent without a tag, with an id the channel does not know,
-or for a request whose panel pressed 중지, is refused with what to do instead. Being a hook, this is not left to the
-supervisor remembering it.
+for a request whose panel pressed 중지, or to a window still at work for another request, is refused with what to do
+instead. Being a hook, this is not left to the supervisor remembering it.
 
 Unlike the subagents' guard (tools/guard.py), this hook never stands in the way when it cannot do its job: no
 Claude Hand running, a slow channel, any error at all, and the hand-out goes ahead (the channel then guesses as
@@ -90,6 +90,11 @@ def decision(event: dict, post) -> str | None:
     if answer.get("stop"):
         return ("사용자가 그 채팅창에서 [중지]를 누른 요청이라 이 호출을 막았습니다. 이 요청의 일은 더 맡기지 말고, 어디까지 했고 "
                 "무엇이 남았는지 reply로 알리세요.")
+    if answer.get("busy"):
+        other = str(answer.get("other") or "")
+        return (f"{window}은(는) 지금 다른 요청" + (f"('{other}')" if other else "") + "으로 일하는 중이라 이 호출을 막았습니다. 한 창에 두 "
+                "요청의 일이 겹치면 기록, 되돌리기 지점, 중지가 엉뚱한 요청 몫이 됩니다. 그 일이 끝났다는 알림이 온 뒤에 다시 맡기세요. "
+                "기다리는 동안 이 요청의 채팅창에는 reply(working: true)로 \"앞의 일이 끝나면 할게요\"라고 알려 둡니다.")
     return None
 
 

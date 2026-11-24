@@ -145,13 +145,15 @@ namespace ClaudeHand.Editor
 
         public class Parameters
         {
-            [ChParameter("mark (default), undo or list", Required = false)]
+            [ChParameter("mark (default), undo, list, or undo_request (Claude Hand's own: see request)", Required = false)]
             public string action { get; set; }
 
             [ChParameter("For mark: the request in a few words, shown on the chat window's undo button", Required = false)]
             public string label { get; set; }
 
-            [ChParameter("For mark: the request's name. Claude Hand's guard hook fills it in; leave it out", Required = false)]
+            [ChParameter("The request's name. For mark, Claude Hand's guard hook fills it in; leave it out. undo_request " +
+                         "undoes the request of this name, only when its point is the newest one with something to undo " +
+                         "(Claude Hand's chat channel calls it in every window a request changed)", Required = false)]
             public string request { get; set; }
         }
 
@@ -912,6 +914,24 @@ namespace ClaudeHand.Editor
             return plan;
         }
 
+        /// <summary>What an undo did, for the subagent or the chat channel that asked for it.</summary>
+        private static object Undone(Mark undone)
+        {
+            var files = undone.report;
+            var message = $"Reverted everything since '{undone.label}' ({undone.time})";
+            if (files.restored.Count > 0) message += $"; {files.restored.Count} file(s) are back as they were before";
+            if (files.removed.Count > 0) message += $"; {files.removed.Count} asset(s) the request made or brought in were taken out of the project (kept in {RemovedFolder})";
+            if (files.returned.Count > 0) message += $"; {files.returned.Count} asset(s) it deleted are back";
+            if (files.moved.Count > 0) message += $"; {files.moved.Count} asset(s) it moved are back where they were";
+            if (files.unkept.Count > 0) message += $"; {files.unkept.Count} file(s) changed with no copy of what was there before, and stay as they are (see unkept)";
+            if (files.problems.Count > 0) message += $"; {files.problems.Count} file(s) could not be put back (see problems)";
+            return new ChSuccess(message, new
+            {
+                state = "undone", undone.label, undone.time, files.restored, files.removed, files.returned, files.moved, files.unkept, files.problems,
+                summary = files.Summary(),  // the same sentence the chat window shows, for the channel to pass on
+            });
+        }
+
         public static object HandleCommand(JObject @params)
         {
             var p = @params?.ToObject<Parameters>() ?? new Parameters();
@@ -925,22 +945,31 @@ namespace ClaudeHand.Editor
                 case "undo":
                     var undone = UndoLast();
                     if (undone == null) return ChErrors.Make(ChErrors.NotFound, "There is no undo point to go back to.", "after_fix");
-                    var files = undone.report;
-                    var message = $"Reverted everything since '{undone.label}' ({undone.time})";
-                    if (files.restored.Count > 0) message += $"; {files.restored.Count} file(s) are back as they were before";
-                    if (files.removed.Count > 0) message += $"; {files.removed.Count} asset(s) the request made or brought in were taken out of the project (kept in {RemovedFolder})";
-                    if (files.returned.Count > 0) message += $"; {files.returned.Count} asset(s) it deleted are back";
-                    if (files.moved.Count > 0) message += $"; {files.moved.Count} asset(s) it moved are back where they were";
-                    if (files.unkept.Count > 0) message += $"; {files.unkept.Count} file(s) changed with no copy of what was there before, and stay as they are (see unkept)";
-                    if (files.problems.Count > 0) message += $"; {files.problems.Count} file(s) could not be put back (see problems)";
-                    return new ChSuccess(message, new { undone.label, undone.time, files.restored, files.removed, files.returned, files.moved, files.unkept, files.problems });
+                    return Undone(undone);
+                case "undo_request":
+                    // One request, in the window it is asked of, and only in order: a point of a later request on top
+                    // would go back with it, so then nothing is undone and the answer says what is in the way.
+                    var name = (p.request ?? string.Empty).Trim();
+                    if (name.Length == 0) return ChErrors.Make(ChErrors.InvalidArgs, "undo_request needs the request's name.", "after_fix");
+                    var points = Undoable;
+                    if (!points.Any(m => m.request == name))
+                    {
+                        return new ChSuccess("Nothing of that request is left to undo in this project.", new { state = "nothing" });
+                    }
+                    var top = points[points.Count - 1];
+                    if (top.request != name)
+                    {
+                        return new ChSuccess($"Not undone: '{top.label}' ({top.time}) changed this project after that request and comes first.",
+                            new { state = "blocked", top = $"{top.label} ({top.time})" });
+                    }
+                    return Undone(UndoLast());
                 case "list":
                     var shown = Undoable;
                     int skipped = Marks.Count - shown.Count;
                     return new ChSuccess($"{shown.Count} undo point(s)" + (skipped > 0 ? $" ({skipped} more that nothing happened after: skipped)" : ""),
                         new { marks = shown });
                 default:
-                    return ChErrors.Make(ChErrors.InvalidArgs, "action must be mark, undo or list.", "after_fix");
+                    return ChErrors.Make(ChErrors.InvalidArgs, "action must be mark, undo, undo_request or list.", "after_fix");
             }
         }
     }

@@ -92,6 +92,13 @@ class DecisionTests(unittest.TestCase):
         self.assertIn("0101-000000-9", unknown)
         stopped, _ = self.decide(agent_call("[요청 1111-052233-12] 큐브"), {"ours": True, "chat_id": "unity-mygame", "stop": True})
         self.assertIn("[중지]", stopped)
+        # The window is still at work for another request: its work, undo point and 중지 would go down for this one.
+        busy, _ = self.decide(agent_call("[요청 1111-052233-12] 큐브"), {"ours": True, "chat_id": "unity-mygame", "busy": True, "other": "의자 보내줘"})
+        self.assertIn("unity-mygame", busy)
+        self.assertIn("다른 요청('의자 보내줘')으로 일하는 중", busy)
+        self.assertIn("끝났다는 알림이 온 뒤에 다시 맡기세요", busy)
+        unnamed, _ = self.decide(agent_call("[요청 1111-052233-12] 큐브"), {"ours": True, "chat_id": "unity-mygame", "busy": True, "other": ""})
+        self.assertIn("다른 요청으로 일하는 중", unnamed)  # work asked in the Claude app has no words to quote
 
     def test_other_subagents_other_tools_and_no_claude_hand_are_none_of_its_business(self):
         self.assertEqual(self.decide(agent_call("찾아봐", "Explore"), {"ours": False})[0], None)

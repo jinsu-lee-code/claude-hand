@@ -285,11 +285,16 @@ MARK_SLOW = 3.0     # an attempt that took this long did not find the bridge awa
 def mark_checkpoint(app: str, pin: str, label: str, request=None, key: str = "", sleep=time.sleep, clock=time.time) -> None:
     """Set an undo point in the subagent's window: in Unity through Claude Hand Tools' own bridge (ch_checkpoint), in
     Blender through MCP for Blender's execute_code into the Claude Hand Chat add-on (nothing happens without it).
-    key: the name of the request the point is for (see work_begins); the Unity point carries it, and the files
-    kept under that name go back with it."""
+    key: the name of the request the point is for (see work_begins). The point carries it: in Unity the files kept
+    under that name go back with it, and in both a request that changed several windows is undone in each by that
+    name."""
     if app == "blender":
         from handlib import link
         code = f"import claude_hand_chat\nprint(claude_hand_chat.mark_undo_point({label!r}))"
+        if key:  # an add-on from before points had names takes the label alone
+            code = ("import claude_hand_chat\n"
+                    "named = 'request' in claude_hand_chat.mark_undo_point.__code__.co_varnames\n"
+                    f"print(claude_hand_chat.mark_undo_point({label!r}, **({{'request': {key!r}}} if named else {{}})))")
         (request or link.blender_request)(int(pin.rpartition("@")[2]), {"type": "execute_code", "params": {"code": code}}, 5.0)
         return
     import unity_bridge

@@ -238,6 +238,95 @@ class BlenderChatAddonTests(unittest.TestCase):
         bpy.ops.wm.read_factory_settings(use_empty=True)  # another file: a new undo history
         self.assertEqual(addon._marks, [])
 
+    def test_a_request_is_undone_by_its_name_only_when_its_point_is_the_newest(self):
+        """What the chat channel asks of every window a request changed (undo_in_window)."""
+        addon = self.addon
+        made = lambda: sorted(o.name for o in bpy.data.objects if o.name.startswith("CH_"))
+
+        def add(name):
+            bpy.ops.mesh.primitive_cube_add()
+            bpy.context.active_object.name = name
+        addon._undo_op(bpy.ops.ed.undo_push, message="Original")
+        self.assertEqual(addon.undo_request("r1"), {"state": "nothing"})
+        addon.mark_undo_point("의자", request="r1")
+        add("CH_Chair")
+        addon.mark_undo_point("램프", request="r2")
+        add("CH_Lamp")
+        self.assertEqual([(m["request"], m["stamp"] > 0) for m in addon._marks], [("r1", True), ("r2", True)])
+        blocked = addon.undo_request("r1")  # a later request changed this window since: undoing r1 would take it along
+        self.assertEqual((blocked["state"], blocked["top"].startswith("램프 (")), ("blocked", True))
+        self.assertEqual(made(), ["CH_Chair", "CH_Lamp"])
+        self.assertEqual(addon.undo_request("r2")["state"], "undone")
+        self.assertEqual(made(), ["CH_Chair"])
+        self.assertEqual(addon.undo_request("r2"), {"state": "nothing"})  # asked again: nothing of it is left
+        self.assertEqual(addon.undo_request("r1")["state"], "undone")
+        self.assertEqual((made(), addon._marks), ([], []))
+        self.assertEqual(addon.undo_request(""), {"state": "nothing"})
+        addon.mark_undo_point("x", request="r3")
+        bpy.ops.mesh.primitive_cube_add()
+        addon._undo_op(bpy.ops.ed.undo)  # Ctrl+Z in Blender went back past the point already
+        self.assertEqual((addon.undo_request("r3"), addon._marks), ({"state": "nothing"}, []))
+        addon.mark_undo_point("이름 없는 지점")  # from a guard of before points had names: only the panel's own button undoes it
+        self.assertEqual((addon._marks[-1]["request"], addon.undo_request("r3")), ("", {"state": "nothing"}))
+
+    def test_the_button_undoes_a_request_in_the_other_windows_it_changed(self):
+        addon, root = self.addon, Path(self.tmp.name)
+        made = lambda: sorted(o.name for o in bpy.data.objects if o.name.startswith("CH_"))
+        handlib.agents.write_agent_files(handlib.agents.build_agent_files(
+            [handlib.discovery.Instance(name="MyGame", hash="aaaa1111")], handlib.discovery.ServerConfig(transport="stdio"),
+            [handlib.discovery.BlenderInstance(port=9876, filepath=bpy.data.filepath)], None, "uv run"), root / "agents")
+        asked = []
+        self.hub.undo_window = lambda app, pin, key: asked.append((app, pin, key)) or {"state": "undone"}
+        self.assertTrue(wait_for(lambda: addon._status[0].startswith("담당"), addon))
+        addon._undo_op(bpy.ops.ed.undo_push, message="Original")
+
+        def ask(text, here):
+            """A request from this panel: (here) this Blender changes, then the Unity project. As the guards and the
+            supervisor's hook report it to the channel."""
+            before = len(self.emitted)
+            addon.send_text(text, include_context=False)
+            self.assertTrue(wait_for(lambda: len(self.emitted) > before, addon))
+            request = self.emitted[-1]["params"]["meta"]["request"]
+            if here:
+                self.hub.assign("blender-props", request)
+                self.assertTrue(self.hub.report_action("blender", "props@9876", "execute_blender_code", "", "bbb")["new_request"])
+                addon.mark_undo_point(text, request=request)  # what the guard does on new_request
+                bpy.ops.mesh.primitive_cube_add()
+                bpy.context.active_object.name = "CH_" + here
+                self.hub.agent_stopped("blender", "props@9876", "bbb")
+            self.hub.assign("unity-mygame", request)
+            self.hub.report_action("unity", "MyGame@aaaa1111", "ch_import_model", "", "aaa")
+            self.hub.agent_stopped("unity", "MyGame@aaaa1111", "aaa")
+            self.hub.reply("blender-props", "MyGame에 놓았어요", changed=["unity-mygame"])
+            self.assertTrue(wait_for(lambda: (addon._offer[0] or {}).get("request") == request and addon._progress[0] is None, addon))
+            return request
+
+        first = ask("의자를 고쳐서 MyGame으로 보내줘", "Chair")
+        mark, offer = addon.undo_plan()
+        self.assertEqual((mark["request"], offer["windows"]), (first, ["MyGame (Unity)"]))
+        self.assertEqual(addon.describe_plan(mark, offer), "의자를 고쳐서 MyGame으로 보내줘 (이 창 + MyGame (Unity))")
+        addon._undo_from_button()  # what the button runs once the confirmation is given
+        self.assertTrue(wait_for(lambda: any("MyGame (Unity): 되돌렸어요" in str(e.get("text")) for e in addon._entries), addon))
+        self.assertEqual(asked, [("unity", "MyGame@aaaa1111", first)])  # not this window: the panel undid it itself
+        self.assertEqual(made(), [])
+        self.assertTrue(wait_for(lambda: addon._offer[0] is None, addon))
+        self.assertEqual(addon.undo_plan(), (None, None))
+
+        # A request that only changed the other window (this Blender just exported): this window's older point is not it.
+        addon.mark_undo_point("옛 요청", request="older")
+        bpy.ops.mesh.primitive_cube_add()
+        bpy.context.active_object.name = "CH_Old"
+        second = ask("램프도 MyGame으로 보내줘", "")
+        mark, offer = addon.undo_plan()
+        self.assertEqual((mark, offer["request"]), (None, second))
+        self.assertEqual(addon.describe_plan(mark, offer), "램프도 MyGame으로 보내줘 (MyGame (Unity))")
+        addon._undo_from_button()
+        self.assertTrue(wait_for(lambda: len(asked) == 2, addon))
+        self.assertEqual((asked[1], made()), (("unity", "MyGame@aaaa1111", second), ["CH_Old"]))
+        self.assertTrue(wait_for(lambda: addon._offer[0] is None, addon))
+        mark, offer = addon.undo_plan()  # and now the plain button is back, for this window's own older request
+        self.assertEqual((mark["label"], offer, addon.describe_plan(mark, offer).startswith("옛 요청 (")), ("옛 요청", None, True))
+
     def test_the_message_after_an_undo_says_so(self):
         addon = self.addon
         self.assertTrue(wait_for(lambda: addon._status[0].startswith("담당"), addon))
