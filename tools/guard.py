@@ -16,6 +16,12 @@ refuses goes into the event log.
 
   guard.py --pin ... --server ... --app ... --stop       the same subagents' Stop hook: tells the chat channel the
                                                          subagent finished its turn. Never refuses anything.
+  guard.py --pin ... --server ... --app ... --after      their PostToolUse hook: asks the window what its protection
+                                                         rules found once the call has run, and tells the subagent.
+
+Before a call it also holds the call against the window's protection rules (handlib/protect.py): what the user said
+must not be changed there. A call that shows in its own words that it would is refused; the rest is the window's to
+catch, which is what --after asks about.
 
 Whatever goes wrong, the call is refused. Claude Code reads a hook's result like this:
   exit 0 with a "deny" decision on stdout   the call is refused, with the reason
@@ -206,16 +212,181 @@ def keep_named_files(project: Path | None, key: str, tool: str, tool_input: dict
         pass
 
 
+def short_name(event: dict, server: str) -> str:
+    """A tool of this subagent's own servers without its prefix ("manage_asset", "ch_checkpoint"); "" for any other."""
+    tool = str(event.get("tool_name", ""))
+    return next((tool[len(prefix):] for prefix in (f"mcp__{server}_ch__", f"mcp__{server}__") if tool.startswith(prefix)), "")
+
+
+def call_looks(app: str, short: str, tool_input: dict) -> bool:
+    """The call leaves its window as it was: by the tool's name, or (Blender code) by what the code is made of."""
+    if only_looks(app, tool_input):
+        return True
+    try:
+        from handlib import looks
+        return looks.tool_only_looks(short, str(tool_input.get("action") or ""))
+    except Exception:
+        return False
+
+
+# --------------------------------------------------------------------------- protection rules (handlib/protect.py)
+
+# What the guard asks a Blender window: its rules as its add-on reads them (it knows its own file, who is in a
+# collection and who is whose child), and with before=True the protected objects as they are now, to compare after
+# the call. An add-on from before there were rules only says which file is open; the guard then reads the file's rules.
+BLENDER_ASKS = ("import bpy, json\n"
+                "try:\n"
+                "    import claude_hand_chat\n"
+                "    state = claude_hand_chat.{call}\n"
+                "except Exception as error:\n"
+                "    state = {{'file': bpy.data.filepath, 'error': repr(error)}}\n"
+                "print('CH_PROTECT ' + json.dumps(state))")
+
+
+def ask_blender(pin: str, call: str, request=None, timeout: float = 5.0) -> dict | None:
+    """What the chat add-on of the subagent's Blender answers to `call` (BLENDER_ASKS); None when that Blender is not
+    there to ask (the call the subagent is about to make will not get there either)."""
+    from handlib import link
+    try:
+        reply = (request or link.blender_request)(int(pin.rpartition("@")[2]),
+                                                  {"type": "execute_code", "params": {"code": BLENDER_ASKS.format(call=call)}}, timeout)
+    except ConnectionError:
+        return None
+    printed = reply.get("result") if isinstance(reply, dict) else None  # {"executed": True, "result": what the code printed}
+    printed = printed.get("result") if isinstance(printed, dict) else printed
+    start = str(printed or "").find("CH_PROTECT ")
+    if start < 0:
+        raise ValueError("Blender가 보호 규칙을 알려 주지 않았습니다: " + str(reply)[:200])
+    state = json.loads(str(printed)[start + len("CH_PROTECT "):].splitlines()[0])
+    if not isinstance(state, dict):
+        raise ValueError("Blender가 보호 규칙을 알 수 없는 모양으로 알려 주었습니다")
+    return state
+
+
+def ask_unity(pin: str, action: str, request=None, timeout: float = 8.0) -> dict | None:
+    """What Claude Hand Tools in the subagent's project answers to ch_protect `action`; None when that editor cannot
+    be asked just now (closed, or compiling: what it refuses itself, it refuses all the same)."""
+    import unity_bridge
+    entry = unity_bridge.find_project(hash_=pin.rpartition("@")[2])
+    if not entry:
+        return None
+    try:
+        result = (request or unity_bridge.request)(entry, "ch_protect", {"action": action}, timeout=timeout) or {}
+    except Exception as exc:
+        if getattr(exc, "code", "") in ("UNREACHABLE", "NOT_RUNNING", "EDITOR_BUSY", "DIALOG", "NOT_FOUND"):  # NOT_FOUND: a package from before
+            return None
+        raise
+    data = result.get("data")
+    return data if result.get("success") is True and isinstance(data, dict) else None
+
+
+def protection_block(event: dict, pin: str, server: str, app: str, home: Path | None = None, folder=None, ask=None) -> tuple[str | None, bool]:
+    """(why the window's protection rules do not let this call through, or None; whether the window has to be asked
+    again after the call). The rules are the user's (handlib/protect.py): this window may only be looked at, these
+    assets and objects are not to be changed, these actions are not to be done. What shows in the call's words is
+    refused here; what does not, the window catches itself (see protection_after). Anything that goes wrong while
+    finding out is the caller's to turn into a refusal: a rule that cannot be read is not a rule that is not there."""
+    short = short_name(event, server)
+    if not short:
+        return None, False
+    from handlib import link, protect
+    tool_input = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
+    if short == "ch_protect" and str(tool_input.get("action") or "state").strip().lower() != "state":
+        return "ch_protect의 before · after는 Claude Hand의 가드가 부릅니다. 직접 부르지 마세요(state는 됩니다).", False
+    looking = call_looks(app, short, tool_input)
+    home = home or link.claude_hand_home()
+    key = protect.session_key(app, pin)
+    files, covered, pending = [], {}, None
+    if app == "blender":
+        state = (ask or ask_blender)(pin, f"protection_state({not looking})")
+        if state is None:
+            return None, False
+        rules = protect.from_dict(state["rules"]) if isinstance(state.get("rules"), dict) else \
+            protect.window_rules("blender", state.get("file") or None, home, key)
+        covered = state.get("covered") if isinstance(state.get("covered"), dict) else {}
+        pending = state.get("pending")
+    else:
+        project = (folder or project_folder)(pin)
+        if project is None:
+            return None, False
+        rules = protect.window_rules("unity", project, home, key)
+        if rules.watched() and not looking:
+            from handlib import keeps
+            files = keeps.named_files(project, tool_input)
+            state = (ask or ask_unity)(pin, "before") or {}
+            covered = state.get("covered") if isinstance(state.get("covered"), dict) else {}
+            pending = state.get("pending")
+    if rules.problems and not looking:
+        return ("보호 규칙 파일을 읽지 못해 이 호출을 막았습니다: " + rules.problems[0][:300] + ". 더 부르지 말고 이 내용을 그대로 "
+                "감독에게 보고하세요. 그 파일은 사용자가 고쳐야 합니다."), False
+    told = protect.found_after(pending)[1]
+    if told and not looking:  # found by the window since the last call, and nobody was told yet
+        return told, False
+    reason = protect.refusal(app, rules, short, tool_input, looking, files, covered)
+    return reason, bool(reason is None and rules.watched() and not looking)
+
+
+def tell_protected(event: dict, pin: str, app: str, text: str, home: Path | None = None, post=None, write=None) -> None:
+    """A call the protection rules stopped, or took back: a line in the window's chat panel (the channel knows whose
+    request it was) and in the event log. Best effort."""
+    try:
+        reply = post_to_channel("/v1/protected", {"app": app, "pin": pin, "agent_id": str(event.get("agent_id") or ""),
+                                                  "tool": str(event.get("tool_name", ""))[:120], "text": text[:600]}, home, post)
+    except Exception:
+        reply = {}
+    if reply.get("ok"):
+        return
+    try:
+        from handlib import eventlog
+        (write or eventlog.write)("protected", pin=pin, app=app, tool=str(event.get("tool_name", ""))[:120],
+                                  agent_id=str(event.get("agent_id") or ""), reason=eventlog.short(text, 300))
+    except Exception:
+        pass
+
+
+def protection_after(event: dict, pin: str, server: str, app: str, home: Path | None = None, folder=None, ask=None,
+                     stopping: bool = False) -> str | None:
+    """After a call that might have changed the window: ask the window what it found. It refused what it could
+    itself while the call ran (Unity: saving, deleting or moving a protected asset, a forbidden action), and where
+    something protected is no longer as it was before the call, it has taken back what the request did there
+    (handlib/protect.py, found_after). Returns what the subagent is told, or None. Best effort: never an error.
+    stopping: asked as the subagent ends its turn, whatever its last call was: should the hook after a call not
+    have run, what its last call did is still looked at before it reports."""
+    try:
+        short = short_name(event, server)
+        tool_input = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
+        if not stopping and (not short or short == "ch_protect" or call_looks(app, short, tool_input)):
+            return None
+        from handlib import link, protect
+        wait = 10.0 if stopping else 60.0
+        if app == "blender":
+            found = (ask or ask_blender)(pin, "protection_after()", timeout=wait)
+        else:
+            project = (folder or project_folder)(pin)
+            home = home or link.claude_hand_home()
+            if project is None or not protect.window_rules("unity", project, home, protect.session_key(app, pin)).watched():
+                return None
+            found = (ask or ask_unity)(pin, "after", timeout=wait)
+        line, told = protect.found_after(found)
+        if line:
+            tell_protected(event, pin, app, line, home)
+        return told
+    except Exception:
+        return None
+
+
 def report_progress(event: dict, pin: str, server: str, app: str, home: Path | None = None, post=None, mark=None,
-                    folder=None) -> str | None:
+                    folder=None, watch: bool = False) -> str | None:
     """Tell the chat channel what this subagent is about to do, so its window's panel can show it, and on the first
     action of a request set an undo point in that window (the chat panel's "되돌리기"). In a Unity project it also
     says which request is at work and keeps the files the call names (see work_begins, keep_named_files). Best
     effort: no Claude Hand, a slow server or any error just skips it; the tool call itself never waits more than a
     moment (but for an editor that is reloading scripts, whose undo point is worth some seconds: mark_checkpoint).
-    Returns a denial reason when the channel says another subagent is still at work in this window."""
-    tool = str(event.get("tool_name", ""))
-    short = next((tool[len(prefix):] for prefix in (f"mcp__{server}_ch__", f"mcp__{server}__") if tool.startswith(prefix)), "")
+    Returns a denial reason when the channel says another subagent is still at work in this window.
+    watch: the window has protection rules it looks after once the call is over (protection_after). What it then
+    takes back is what was done since the newest undo point, so without Claude Hand, which sets one per request,
+    one is set here before every such call."""
+    short = short_name(event, server)
     if not short:
         return None
     tool_input = event.get("tool_input") or {}
@@ -239,7 +410,7 @@ def report_progress(event: dict, pin: str, server: str, app: str, home: Path | N
         undoing = (short == "ch_checkpoint" and not own_mark) or "undo_last_request" in str(tool_input.get("code", ""))
         project, key = work_begins(app, pin, reply, own_mark, folder)
         marked = True
-        if reply.get("new_request") and not undoing:
+        if (reply.get("new_request") or (watch and not reply.get("chat_id") and not own_mark)) and not undoing:
             try:
                 (mark or mark_checkpoint)(app, pin, str(reply.get("label") or ""), key=key)
             except Exception:
@@ -329,6 +500,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--transport", choices=["stdio", "http"], default="stdio")
     parser.add_argument("--app", choices=["unity", "blender"], default="unity")
     parser.add_argument("--stop", action="store_true", help="run as the subagent's Stop hook")
+    parser.add_argument("--after", action="store_true", help="run as the subagent's PostToolUse hook")
 
 
 def read_event(stdin=None) -> dict:
@@ -352,10 +524,22 @@ def run_guard(args: argparse.Namespace, stdin=None, stdout=None) -> int:
         event, reason = {}, f"claude-hand guard 오류로 호출을 막았습니다: {exc}"
     if not reason and args.app == "unity":
         reason = dialog_block(event, args.pin, args.server)
+    watch = False
     if reason:
         note_refusal(event, args.pin, args.app, reason)
     else:
-        reason = report_progress(event, args.pin, args.server, args.app)
+        try:
+            reason, watch = protection_block(event, args.pin, args.server, args.app)
+        except Exception as exc:  # fail closed here too: rules that cannot be looked up are not rules that are not there
+            reason = (f"보호 규칙을 확인하지 못해 이 호출을 막았습니다: {exc}. 더 부르지 말고 이 내용을 그대로 감독에게 보고하세요.")
+        if reason:
+            try:
+                from handlib import protect
+                tell_protected(event, args.pin, args.app, protect.panel_line(reason))
+            except Exception:  # telling of it is a nicety; the refusal stands
+                pass
+        else:
+            reason = report_progress(event, args.pin, args.server, args.app, watch=watch)
     if reason:
         json.dump({
             "hookSpecificOutput": {
@@ -367,11 +551,36 @@ def run_guard(args: argparse.Namespace, stdin=None, stdout=None) -> int:
     return 0
 
 
+def run_after(args: argparse.Namespace, stdin=None, stdout=None) -> int:
+    """The PostToolUse hook: the call has run. When the window found something protected changed, or refused part of
+    what the call tried, the subagent is told with the call's result (Claude Code hands a "block" with its reason to
+    the model; the call itself is not undone by that, the window has seen to it)."""
+    told = protection_after(read_event(stdin), args.pin, args.server, args.app)
+    if told:
+        json.dump({"decision": "block", "reason": told}, stdout or sys.stdout)
+    return 0
+
+
+def run_stop(args: argparse.Namespace, stdin=None, stdout=None) -> int:
+    """The Stop hook: the subagent is about to end its turn. The window is asked once more what its protection
+    rules found (the hook after a call asks this as a rule; should it not have run, this is the last moment). When
+    the window took the request's work back just now, the subagent is kept from stopping once, with what happened,
+    so that its report says so; else the chat channel is told that it finished."""
+    event = read_event(stdin)
+    told = None if event.get("stop_hook_active") else protection_after(event, args.pin, args.server, args.app, stopping=True)
+    if told:
+        json.dump({"decision": "block", "reason": told}, stdout or sys.stdout)
+        return 0
+    report_stop(event, args.pin, args.app)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)  # bad arguments: argparse exits with 2, which refuses the call
     if args.stop:
-        report_stop(read_event(), args.pin, args.app)
-        return 0
+        return run_stop(args)
+    if args.after:
+        return run_after(args)
     return run_guard(args)
 
 
@@ -389,4 +598,4 @@ def exit_code(run=main, stop_hook: bool = False) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(exit_code(stop_hook="--stop" in sys.argv[1:]))
+    raise SystemExit(exit_code(stop_hook="--stop" in sys.argv[1:] or "--after" in sys.argv[1:]))  # after the call: nothing left to refuse

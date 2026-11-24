@@ -1,0 +1,41 @@
+{
+  "about": "What a protection rule covers. The guard (tools/handlib/protect.py), Claude Hand Tools in Unity (ChProtect.cs) and the Blender add-on each have their own code for this, and each is held to these cases by its own tests. rule: the rule that covers it, null for none.",
+  "paths": {
+    "rules": ["Assets/Art/**", "Assets/Scenes/Main.unity", "Assets/Audio", "Assets/*/Locked/*.mat"],
+    "cases": [
+      {"path": "Assets/Art/Hero.fbx", "rule": "Assets/Art/**"},
+      {"path": "assets\\art\\Sub\\Deep\\x.png", "rule": "Assets/Art/**"},
+      {"path": "Assets/Art", "rule": "Assets/Art/**"},
+      {"path": "Assets/Art/Hero.fbx.meta", "rule": "Assets/Art/**"},
+      {"path": "Assets/Art.meta", "rule": "Assets/Art/**"},
+      {"path": "Assets/Scenes/Main.unity", "rule": "Assets/Scenes/Main.unity"},
+      {"path": "Assets/Audio/Music/a.wav", "rule": "Assets/Audio"},
+      {"path": "Assets/Props/Locked/Gold.mat", "rule": "Assets/*/Locked/*.mat"},
+      {"path": "Assets/Artwork/x.png", "rule": null},
+      {"path": "Assets/Scenes/Main2.unity", "rule": null},
+      {"path": "Assets/Scenes/Main.unity.bak", "rule": null},
+      {"path": "Assets/AudioClips/a.wav", "rule": null},
+      {"path": "Assets/Props/Deep/Locked/Gold.mat", "rule": null},
+      {"path": "Assets/Props/Locked/Sub/Gold.mat", "rule": null},
+      {"path": "Assets", "rule": null}
+    ]
+  },
+  "objects": {
+    "rules": ["Player", "Environment/**", "Rig*", "UI/Canvas", "collection:Props"],
+    "cases": [
+      {"name": "Player", "rule": "Player"},
+      {"name": "World/Player/Hand/Sword", "rule": "Player"},
+      {"name": "Environment/Trees/Oak", "rule": "Environment/**"},
+      {"name": "Environment", "rule": "Environment/**"},
+      {"name": "Rig_Left", "rule": "Rig*"},
+      {"name": "UI/Canvas", "rule": "UI/Canvas"},
+      {"name": "Root/UI/Canvas", "rule": "UI/Canvas"},
+      {"name": "Players", "rule": null},
+      {"name": "player", "rule": null},
+      {"name": "UI/Canvas/Button", "rule": null},
+      {"name": "UI", "rule": null},
+      {"name": "Props", "rule": null},
+      {"name": "Chair", "rule": null}
+    ]
+  }
+}

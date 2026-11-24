@@ -741,6 +741,12 @@ class Layout:
     def column(self, align=False):
         return Layout(self.shown)
 
+    def row(self, align=False):
+        return Layout(self.shown)
+
+    def prop(self, data, name, text=""):
+        self.shown.append(f"<{text}>")
+
 
 @unittest.skipIf(bpy is None, "Blender's bpy module is not installed")
 class FollowTests(unittest.TestCase):
@@ -2294,6 +2300,209 @@ class ShapeTests(unittest.TestCase):
         manifest = json.loads(Path(self.addon.export_fbx(["Hull"], "ship")["manifest"]).read_text(encoding="utf-8"))
         self.assertEqual(sorted(manifest["check"]["parts"]), ["Deck", "Hull"])
         self.assertEqual(manifest["check"], json.loads(json.dumps(self.addon._shape([hull, deck]))))
+
+
+@unittest.skipIf(bpy is None, "Blender's bpy module is not installed")
+class ProtectTests(unittest.TestCase):
+    """This window's protection rules: what they cover, and that a protected object a call changed is found out and
+    the request's work taken back (Blender has no way to refuse the change itself)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.home, self.blend = root / "home", root / "props.blend"
+        os.environ["CLAUDE_HAND_HOME"] = str(self.home)
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        rig = bpy.data.collections.new("Rig")
+        bpy.context.scene.collection.children.link(rig)
+        for name, parent, collection in (("Hero", None, None), ("Sword", "Hero", None), ("Prop", None, None), ("Arm.L", None, rig)):
+            mesh = bpy.data.meshes.new(name + "Mesh")
+            mesh.from_pydata([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [], [(0, 1, 2)])
+            obj = bpy.data.objects.new(name, mesh)
+            obj.parent = bpy.data.objects.get(parent) if parent else None
+            (collection or bpy.context.scene.collection).objects.link(obj)
+        material = bpy.data.materials.new("HeroMat")
+        bpy.data.objects["Hero"].data.materials.append(material)
+        bpy.ops.wm.save_as_mainfile(filepath=str(self.blend))
+        spec = importlib.util.spec_from_file_location("claude_hand_chat", ADDON)
+        self.addon = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.addon)
+        self.addon.register()
+        self.addon._undo_op(bpy.ops.ed.undo_push, message="Original")  # what a file opened in the UI starts with
+
+    def tearDown(self):
+        self.addon.unregister()
+        os.environ.pop("CLAUDE_HAND_HOME", None)
+        self.tmp.cleanup()
+
+    def rules(self, lasting=True, **rules):
+        path = self.blend.with_suffix(".claude-hand.protect.json") if lasting else self.home / "protect" / "blender-9876.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"version": 1, **rules}), encoding="utf-8")
+        return path
+
+    def call(self, change, request="r1"):
+        """A call of the subagent as its guard hook brackets it: the state before, an undo point for the request
+        (Claude Hand's), the call, and what the window found after."""
+        addon = self.addon
+        state = addon.protection_state(True)
+        if not addon._marks:
+            addon.mark_undo_point("요청", request=request)
+        change()
+        return state, addon.protection_after()
+
+    def test_the_rules_are_read_from_beside_the_file_and_from_this_run(self):
+        addon = self.addon
+        self.assertEqual(addon._protect_paths(), (str(self.blend.with_suffix(".claude-hand.protect.json")),
+                                                  str(self.home / "protect" / "blender-9876.json")))
+        empty = addon.protection_rules()
+        self.assertEqual((empty["window"], empty["objects"], empty["actions"], empty["rows"], empty["problems"]), ("open", [], [], [], []))
+        self.rules(window="look", objects=["Hero", "", 3], actions=["save_file", "fly"], paths=["Assets/x"])
+        self.rules(lasting=False, window="LOCKED", objects=["Hero", "collection:Rig"])
+        rules = addon.protection_rules()
+        self.assertEqual((rules["window"], rules["objects"], rules["actions"], rules["paths"]), ("locked", ["Hero", "collection:Rig"], ["save_file"], []))
+        self.assertEqual(rules["rows"], [("window", "look", True), ("object", "Hero", True), ("action", "save_file", True),
+                                         ("window", "locked", False), ("object", "Hero", False), ("object", "collection:Rig", False)])
+        broken = self.rules(objects=["Hero"])
+        broken.write_text("{not json", encoding="utf-8")
+        rules = addon.protection_rules()
+        self.assertEqual((rules["window"], len(rules["problems"])), ("locked", 1))  # this run's still hold; the broken one says so
+        state = addon.protection_state()
+        self.assertEqual((state["file"], state["rules"]["window"], len(state["rules"]["problems"]), state["pending"]),
+                         (bpy.data.filepath, "locked", 1, None))
+        json.dumps(state)  # it goes to the guard as JSON
+
+    def test_a_rule_covers_what_the_guards_own_reading_says(self):
+        cases = json.loads((Path(__file__).with_name("protect_cases.json")).read_text(encoding="utf-8"))["objects"]
+        for case in cases["cases"]:
+            self.assertEqual(self.addon.protect_object_rule(cases["rules"], case["name"].split("/")), case["rule"], case["name"])
+
+    def test_which_objects_the_rules_cover(self):
+        self.rules(objects=["Hero", "collection:Rig"])
+        self.assertEqual(self.addon.protected_objects(), {"Hero": "Hero", "Sword": "Hero", "Arm.L": "collection:Rig"})  # a child and a member
+        self.rules(objects=["Hero/Sword"])
+        self.assertEqual(self.addon.protected_objects(), {"Sword": "Hero/Sword"})
+        self.rules(objects=["Nobody", "collection:None"])
+        self.assertEqual(self.addon.protected_objects(), {})
+        state = self.addon.protection_state()
+        self.assertEqual((state["covered"], self.addon._protect["base"]), ({}, None))  # nothing noted: no call is about to change things
+
+    def test_a_protected_object_that_a_call_changed_is_found_and_the_request_taken_back(self):
+        self.rules(objects=["Hero"])
+        hero, prop = (lambda: bpy.data.objects["Hero"]), (lambda: bpy.data.objects["Prop"])
+
+        def change():  # through the data API, which no notice of Blender's tells of by itself
+            prop().location.x += 1.0
+            hero().location.z += 2.0
+        state, found = self.call(change)
+        self.assertEqual(state["covered"], {"Hero": "Hero", "Sword": "Hero"})
+        self.assertEqual((found["undone"], found["changed"]), (True, ["Hero (자리)", "Sword (자리)"]))  # the child moved along
+        self.assertEqual((tuple(hero().location), tuple(prop().location), self.addon._marks), ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), []))
+        self.assertIn("되돌렸어요", self.addon._entries[-1]["text"])
+
+    def test_what_is_not_protected_may_change(self):
+        self.rules(objects=["Hero"])
+        _, found = self.call(lambda: setattr(bpy.data.objects["Prop"].location, "x", 3.0))
+        self.assertEqual((found, bpy.data.objects["Prop"].location.x, len(self.addon._marks)), ({}, 3.0, 1))
+        self.assertEqual(self.addon.protection_after(), {})  # asked again with no call between: nothing to compare
+        self.rules()
+        _, found = self.call(lambda: setattr(bpy.data.objects["Hero"].location, "x", 3.0))  # no rules: nothing is watched
+        self.assertEqual(found, {})
+
+    def test_every_way_of_changing_it_shows(self):
+        self.rules(objects=["Hero"])
+        hero = lambda: bpy.data.objects["Hero"]
+        ways = {
+            "모디파이어": lambda: hero().modifiers.new("Bevel", "BEVEL"),
+            "이름": lambda: setattr(hero(), "name", "Villain"),
+            "사용자 속성": lambda: hero().__setitem__("made_by", "claude"),
+            "메시": lambda: setattr(hero().data.vertices[0].co, "x", 5.0),
+            "재질": lambda: setattr(bpy.data.materials["HeroMat"], "diffuse_color", (1.0, 0.0, 0.0, 1.0)),
+            "보이기": lambda: setattr(hero(), "hide_render", True),
+            "부모": lambda: setattr(hero(), "parent", bpy.data.objects["Prop"]),
+            "없어지거나": lambda: bpy.data.objects.remove(hero()),
+        }
+        for word, change in ways.items():
+            _, found = self.call(change, request=word)
+            self.assertTrue(found.get("undone"), (word, found))
+            self.assertIn(word, found["changed"][0], word)
+            self.assertEqual((hero().name, len(hero().modifiers), "made_by" in hero().keys(), hero().parent), ("Hero", 0, False, None), word)
+        hero().modifiers.new("Bevel", "BEVEL")
+        self.addon._undo_op(bpy.ops.ed.undo_push, message="the user's own bevel")
+        _, found = self.call(lambda: setattr(hero().modifiers["Bevel"], "width", 0.5), request="width")
+        self.assertEqual((found.get("undone"), found["changed"]), (True, ["Hero (모디파이어)"]))  # a setting of one that was there
+
+    def test_a_change_nobody_asked_about_is_found_before_the_next_call(self):
+        """The hook after a call asks; should it not have run, the question before the next call finds it."""
+        self.rules(objects=["Hero"])
+        addon = self.addon
+        addon.protection_state(True)
+        addon.mark_undo_point("요청", request="r1")
+        bpy.data.objects["Hero"].location.x = 4.0
+        self.assertIsNone(addon.protection_state(False)["pending"])  # a look in between takes nothing away
+        state = addon.protection_state(True)
+        self.assertEqual((state["pending"], bpy.data.objects["Hero"].location.x), ({"changed": ["Hero (자리)", "Sword (자리)"], "undone": True}, 0.0))
+        self.assertIsNone(addon.protection_state(True)["pending"])  # told once
+
+    def test_with_no_undo_point_it_says_so_and_leaves_things(self):
+        self.rules(objects=["Hero"])
+        addon = self.addon
+        addon.protection_state(True)
+        bpy.data.objects["Hero"].location.x = 9.0
+        found = addon.protection_after()
+        self.assertEqual((found["undone"], found["detail"], bpy.data.objects["Hero"].location.x), (False, "이 요청의 되돌리기 지점이 없음", 9.0))
+
+    def test_the_user_adds_and_removes_rules(self):
+        addon = self.addon
+        self.assertIsNone(addon.protect_add("object", "Hero"))
+        self.assertIsNone(addon.protect_add("object", "Hero"))  # once
+        self.assertIsNone(addon.protect_add("object", "collection:Rig", lasting=False))
+        self.assertIsNone(addon.protect_add("window", "look", lasting=False))
+        self.assertIsNone(addon.protect_add("action", "save_file"))
+        self.assertIn("창 규칙이 아닙니다", addon.protect_add("window", "shut"))
+        self.assertIn("막을 수 있는 동작이 아닙니다", addon.protect_add("action", "play_mode"))
+        rules = addon.protection_rules()
+        self.assertEqual(rules["rows"], [("object", "Hero", True), ("action", "save_file", True),
+                                         ("window", "look", False), ("object", "collection:Rig", False)])
+        self.assertEqual(json.loads(self.blend.with_suffix(".claude-hand.protect.json").read_text(encoding="utf-8")),
+                         {"version": 1, "objects": ["Hero"], "actions": ["save_file"]})
+        self.assertEqual([addon.protect_row_label(*row) for row in rules["rows"]],
+                         ["오브젝트 Hero", "금지: .blend 저장", "이 창: 보기만 (이번만)", "컬렉션 Rig (이번만)"])
+        self.assertIsNone(addon.protect_remove("window", "look", lasting=False))
+        self.assertIsNone(addon.protect_remove("object", "Hero"))
+        self.assertEqual(addon.protection_rules()["rows"], [("action", "save_file", True), ("object", "collection:Rig", False)])
+        bpy.ops.wm.read_factory_settings(use_empty=True)  # a file never saved has nowhere to keep lasting rules
+        self.assertIn("저장한 적 없는 파일", addon.protect_add("object", "Cube"))
+        self.assertIsNone(addon.protect_add("object", "Cube", lasting=False))
+
+    def test_a_rule_claude_proposed_holds_once_the_user_presses_add(self):
+        addon = self.addon
+        offer = lambda offer_id, **rule: {"kind": "protect_offer", "offer_id": offer_id, "rule": rule, "text": "Hero를 보호할까요?"}
+        addon._entries.extend([offer("p1", kind="object", value="Hero", lasting=True), offer("p2", kind="window", value="look", lasting=False)])
+        self.assertEqual(addon.protection_rules()["rows"], [])  # proposing changes nothing
+        self.assertIsNone(addon.protect_offer_answer("p2", "declined"))
+        self.assertIsNone(addon.protect_offer_answer("p1", "added"))
+        self.assertEqual((addon.protection_rules()["rows"], [e.get("behavior") for e in addon._entries]), ([("object", "Hero", True)], ["added", "declined"]))
+        self.assertEqual(addon.protect_offer_answer("p1", "added"), "이미 답한 제안입니다.")
+        rows, _ = addon.entry_rows(addon._entries[0], None)
+        self.assertEqual(rows[0], ("Claude가 제안한 보호 규칙", "LOCKED"))
+        addon.apply_event("items", [offer("p3", kind="object", value="Prop"), {"kind": "protect_resolved", "offer_id": "p3", "behavior": "declined"}])
+        self.assertEqual(addon._entries[-1]["behavior"], "declined")  # answered in another panel, or by the channel
+
+    def test_the_panel_says_it_in_words(self):
+        addon, wm = self.addon, bpy.context.window_manager
+        layout = Layout()
+        addon.draw_protect(layout, None, wm)
+        self.assertEqual(layout.shown[-5:], ["<이번만 (Claude Hand를 끌 때까지)>", "[선택한 오브젝트 보호]", "[이 창 보기만]", "[이 창 잠금]", "[.blend 저장 금지]"])
+        self.assertTrue(layout.shown[0].startswith("Claude가 이 창을 바꿀 수 있습니다"))
+        self.rules(window="look", objects=["Hero"], actions=["save_file"])
+        layout = Layout()
+        addon.draw_protect(layout, None, wm)
+        self.assertIn("보기만: Claude는 이 창을 읽기만 합니다.", layout.shown)
+        for text in ("이 창: 보기만", "오브젝트 Hero", "금지: .blend 저장", "[풀기]", "[이 창 잠금]"):
+            self.assertIn(text, layout.shown)
+        self.assertNotIn("[이 창 보기만]", layout.shown)
+        self.assertNotIn("[.blend 저장 금지]", layout.shown)
 
 
 @unittest.skipIf(bpy is None, "Blender's bpy module is not installed")

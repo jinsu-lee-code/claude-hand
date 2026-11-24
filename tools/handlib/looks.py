@@ -26,8 +26,9 @@ PURE_MODULES = {"math", "json", "re", "os.path", "time", "datetime", "collection
 FROM_BPY = {"data", "context", "app", "path"}
 # The chat add-on's export for Unity: it writes a file elsewhere and puts back what it touches here (selection, mode,
 # what it bakes). A request that sent a model as it is must not count as one that changed this Blender: its 되돌리기
-# said "이 창 +" with nothing to undo here (2026-11-24).
-EXPORTERS = {"claude_hand_chat": {"export_fbx"}}
+# said "이 창 +" with nothing to undo here (2026-11-24). And its account of the window's protection rules, which a
+# subagent may read in a window it may only look at.
+EXPORTERS = {"claude_hand_chat": {"export_fbx", "protection_rules"}}
 
 FUNCS = {"print", "len", "str", "repr", "int", "float", "bool", "round", "abs", "min", "max", "sum", "sorted", "reversed",
          "enumerate", "zip", "range", "list", "tuple", "dict", "set", "frozenset", "isinstance", "issubclass", "hasattr",
@@ -262,7 +263,8 @@ LOOKING_TOOLS = {"ch_scene_snapshot", "ch_editor_status", "ch_capture", "ch_expo
 
 def tool_only_looks(tool: str, detail: str = "") -> bool:
     return tool in LOOKING_TOOLS or tool.startswith(("get_", "read_", "find_", "list_")) or \
-        (tool in ("ch_checkpoint", "ch_model_follow") and detail.strip() == "list")
+        (tool in ("ch_checkpoint", "ch_model_follow") and detail.strip() == "list") or \
+        (tool == "ch_protect" and detail.strip() in ("", "state"))  # the window's protection rules, read
 
 
 def python_only_looks(code: str) -> bool:

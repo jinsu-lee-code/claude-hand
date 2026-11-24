@@ -92,6 +92,9 @@ def decision(event: dict, post) -> str | None:
     if answer.get("stop"):
         return ("사용자가 그 채팅창에서 [중지]를 누른 요청이라 이 호출을 막았습니다. 이 요청의 일은 더 맡기지 말고, 어디까지 했고 "
                 "무엇이 남았는지 reply로 알리세요.")
+    if answer.get("locked"):
+        return (f"{window}은(는) 사용자가 잠가 둔 창이라(보호 규칙: 잠금) 이 호출을 막았습니다. 그 창에는 일을 맡기지 말고, 그 창이 "
+                "잠겨 있어 하지 못했다고 reply로 알리세요. 잠금은 사용자가 그 창의 패널(보호 → 풀기)에서만 풉니다.")
     if answer.get("busy"):
         other = str(answer.get("other") or "")
         return (f"{window}은(는) 지금 다른 요청" + (f"('{other}')" if other else "") + "으로 일하는 중이라 이 호출을 막았습니다. 한 창에 두 "

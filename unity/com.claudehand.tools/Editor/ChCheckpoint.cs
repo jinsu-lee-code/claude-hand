@@ -217,6 +217,26 @@ namespace ClaudeHand.Editor
             return mark;
         }
 
+        /// <summary>An undo is putting things back right now: what it does to files and objects is nobody's request.</summary>
+        internal static bool Reverting => _reverting;
+
+        /// <summary>What happens to files right now is this package's own passing business, or the user's own doing (Unnoted, UsersOwn).</summary>
+        internal static bool Unnoting => _unnoted > 0;
+
+        /// <summary>
+        /// For ChProtect, which found something protected changed: undoes what the request at work did in this
+        /// project, with its point. Only when that point is the newest one: the point of an earlier request would
+        /// take that request's work back instead. Null when there is no such point (nothing is undone then).
+        /// </summary>
+        internal static Mark UndoForProtection()
+        {
+            if (Marks.Count == 0) return null;
+            var mark = Marks[Marks.Count - 1];
+            if (string.IsNullOrEmpty(mark.request) || mark.request != RequestAtWork()) return null;
+            Touched();  // a change past Undo (which is how it got past the notices) leaves the point looking as if nothing happened after it
+            return UndoLast();
+        }
+
         // ------------------------------------------------------------------ whether a mark has something to undo
 
         [InitializeOnLoadMethod]
@@ -437,6 +457,7 @@ namespace ClaudeHand.Editor
             deleted = NotOwn(deleted);
             moved = NotOwn(moved);
             if (imported.Length + deleted.Length + moved.Length == 0) return;
+            ChProtect.AssetsChanged(imported, deleted);
             Touched();
             Imported(imported, deleted);
         }
@@ -1069,28 +1090,33 @@ namespace ClaudeHand.Editor
 
     /// <summary>
     /// What Unity says before it touches asset files: ChCheckpoint notes it for the request at work, and takes over a
-    /// deletion (the asset is kept instead). With nobody at work every one of these does nothing.
+    /// deletion (the asset is kept instead). Before that, ChProtect refuses what the user's protection rules do not
+    /// allow. With nobody at work every one of these does nothing.
     /// </summary>
     internal sealed class ChCheckpointFiles : UnityEditor.AssetModificationProcessor
     {
         private static void OnWillCreateAsset(string assetName)
         {
+            ChProtect.WillCreate(assetName);
             ChCheckpoint.WillCreate(assetName);
         }
 
         private static string[] OnWillSaveAssets(string[] paths)
         {
+            paths = ChProtect.FilterSaves(paths);
             ChCheckpoint.WillSave(paths);
             return paths;
         }
 
         private static AssetDeleteResult OnWillDeleteAsset(string assetPath, RemoveAssetOptions options)
         {
+            if (ChProtect.RefusesDelete(assetPath)) return AssetDeleteResult.FailedDelete;
             return ChCheckpoint.WillDelete(assetPath) ? AssetDeleteResult.DidDelete : AssetDeleteResult.DidNotDelete;
         }
 
         private static AssetMoveResult OnWillMoveAsset(string sourcePath, string destinationPath)
         {
+            if (ChProtect.RefusesMove(sourcePath, destinationPath)) return AssetMoveResult.FailedMove;
             ChCheckpoint.WillMove(sourcePath, destinationPath);
             return AssetMoveResult.DidNotMove;
         }

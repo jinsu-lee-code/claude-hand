@@ -66,6 +66,7 @@ print(dict(seen))
     # It leaves the name each object went under on the object (claude_hand_sent_as) and nothing a user would undo:
     # a request that only sent a model said "이 창 +" on its 되돌리기 (found with the windows open, 2026-11-24).
     "an export by the add-on": "import claude_hand_chat\nprint(claude_hand_chat.export_fbx(['Cube'], 'cube'))",
+    "the window's protection rules": "import claude_hand_chat\nprint(claude_hand_chat.protection_rules())",
     "an export, and a look at what went": """
 import bpy, claude_hand_chat
 print(claude_hand_chat.export_fbx(["Cube"], "cube"))
@@ -103,7 +104,8 @@ CHANGING = {
     "a mesh update": "import bpy\nbpy.data.objects['Cube'].data.update()",
     "the undo of a request": "import claude_hand_chat\nprint(claude_hand_chat.undo_last_request())",
     "a model set to follow by the add-on": "import claude_hand_chat\nprint(claude_hand_chat.follow_set(0, True))",
-    "a model brought in by the add-on": "import claude_hand_chat\nprint(claude_hand_chat.import_model('C:/x/a.claudehand.json'))",
+    "a protection rule taken away through the add-on": "import claude_hand_chat\nprint(claude_hand_chat.protect_remove('object', 'Hero'))",
+    "a model brought in by the add-on":"import claude_hand_chat\nprint(claude_hand_chat.import_model('C:/x/a.claudehand.json'))",
     "an export under a name of the code's own": "import bpy\nclaude_hand_chat = bpy.data\nclaude_hand_chat.export_fbx(['Cube'], 'cube')",
     "exec": "exec('import bpy; bpy.ops.object.delete()')",
     "a file written": "open('C:/tmp/x.txt', 'w').write('x')",

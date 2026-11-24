@@ -371,6 +371,7 @@ namespace ClaudeHand.Editor
                 if (_sceneCube != null) UnityEngine.Object.DestroyImmediate(_sceneCube);
                 FileChecks();
                 RequestChecks();
+                ProtectChecks();
                 if (FollowChecks())
                 {
                     _followTicks = _followStep = 0;
@@ -537,6 +538,141 @@ namespace ClaudeHand.Editor
             Check("by name: then the one before it", state(then) == "undone" && !File.Exists(file(first)), Describe(then));
             var unnamed = undo("");
             Check("by name: no name, nothing undone", !Ok(unnamed), Describe(unnamed));
+        }
+
+        /// <summary>
+        /// 10b. Protection rules (ChProtect): what the user said must not be changed here. While a request is at work,
+        /// deleting, moving or saving a protected asset is refused by Unity itself, and so is a forbidden action; what
+        /// cannot be refused (a protected scene object changed, an asset made where the rules protect) is found when
+        /// the guard hook asks after the call, and the request's work is taken back. The hook's two questions are
+        /// asked here as it asks them. The project's own rules file is put back as it was.
+        /// </summary>
+        private static void ProtectChecks()
+        {
+            var rulesFile = ChProtect.LastingFile;
+            var rulesBefore = File.Exists(rulesFile) ? File.ReadAllBytes(rulesFile) : null;
+            Func<string, string> file = path => Path.Combine(ChPaths.ProjectRoot, path);
+            Func<string, JObject> protect = action => Call(ChProtect.HandleCommand, new { action });
+            Func<JObject, string, List<string>> told = (result, list) => result["data"]?[list]?.Values<string>().ToList() ?? new List<string>();
+            const string request = "selftest-protect";
+            GameObject guarded = null, free = null;
+            try
+            {
+                var package = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(ChProtect).Assembly);
+                var casesFile = package != null ? Path.GetFullPath(Path.Combine(package.resolvedPath, "..", "..", "tools", "tests", "protect_cases.json")) : null;
+                if (casesFile != null && File.Exists(casesFile))
+                {
+                    var cases = JObject.Parse(File.ReadAllText(casesFile));
+                    var pathRules = cases["paths"]["rules"].Values<string>().ToList();
+                    var objectRules = cases["objects"]["rules"].Values<string>().ToList();
+                    var wrong = cases["paths"]["cases"].Where(c => ChProtect.PathRule(pathRules, c.Value<string>("path")) != c.Value<string>("rule"))
+                        .Select(c => c.Value<string>("path"))
+                        .Concat(cases["objects"]["cases"].Where(c => ChProtect.ObjectRule(objectRules, c.Value<string>("name")) != c.Value<string>("rule"))
+                            .Select(c => c.Value<string>("name"))).ToList();
+                    Check("protect: a rule covers what the guard's own reading says", wrong.Count == 0, string.Join(", ", wrong));
+                }
+                else
+                {
+                    Check("protect: a rule covers what the guard's own reading says", true, "skipped: the cases lie with the repository, not in a package installed from a URL");
+                }
+
+                string folder = $"{Work}/Protected", kept = $"{folder}/ChSelfTestKept.mat", made = $"{folder}/ChSelfTestNew.mat", other = $"{Work}/ChSelfTestOther.mat";
+                ChPaths.EnsureAssetFolder(folder);
+                var shader = Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard");
+                AssetDatabase.CreateAsset(new Material(shader), kept);
+                AssetDatabase.CreateAsset(new Material(shader), other);
+                AssetDatabase.SaveAssets();
+                var keptBefore = File.ReadAllBytes(file(kept));
+                guarded = new GameObject("ChSelfTestGuarded");
+                new GameObject("ChSelfTestGuardedChild").transform.SetParent(guarded.transform);
+                free = new GameObject("ChSelfTestFree");
+
+                if (rulesBefore != null) File.Delete(rulesFile);  // the checks below go by these rules alone
+                var problems = new[]
+                {
+                    ChProtect.Add("path", folder + "/**", true), ChProtect.Add("object", "ChSelfTestGuarded", true),
+                    ChProtect.Add("action", "save_scene", true), ChProtect.Add("action", "fly", true),
+                };
+                var state = protect("state");
+                Check("protect: the user's rules are written next to the project's notes and read back",
+                    problems.Take(3).All(p => p == null) && problems[3] != null && File.Exists(rulesFile) && Ok(state) &&
+                    told(state, "paths").SequenceEqual(new[] { folder + "/**" }) && told(state, "objects").SequenceEqual(new[] { "ChSelfTestGuarded" }) &&
+                    told(state, "actions").SequenceEqual(new[] { "save_scene" }), Describe(state));
+
+                var renameFreely = AssetDatabase.RenameAsset(kept, "ChSelfTestKeptElse");
+                var renameBack = AssetDatabase.RenameAsset($"{folder}/ChSelfTestKeptElse.mat", "ChSelfTestKept");
+                Check("protect: with nobody at work, what the user does is not in the way",
+                    string.IsNullOrEmpty(renameFreely) && string.IsNullOrEmpty(renameBack) && File.Exists(file(kept)), $"'{renameFreely}' / '{renameBack}'");
+                keptBefore = File.ReadAllBytes(file(kept));  // a rename writes the name into the file
+
+                JObject before, refused, found, past;
+                bool deleted, takenBack;
+                string moveError;
+                string[] saves;
+                try
+                {
+                    ChCheckpoint.SetWork(request);
+                    Call(ChCheckpoint.HandleCommand, new { action = "mark", label = "self-test protect", request });
+                    before = protect("before");
+                    deleted = AssetDatabase.DeleteAsset(kept);
+                    moveError = AssetDatabase.MoveAsset(kept, $"{Work}/ChSelfTestKeptMoved.mat");
+                    var material = AssetDatabase.LoadAssetAtPath<Material>(kept);
+                    material.enableInstancing = !material.enableInstancing;
+                    EditorUtility.SetDirty(material);
+                    AssetDatabase.SaveAssets();
+                    saves = ChProtect.FilterSaves(new[] { "Assets/Scenes/ChSelfTest.unity", other });
+                    refused = protect("after");
+
+                    protect("before");
+                    Undo.RecordObject(guarded.transform, "Move ChSelfTestGuarded");
+                    guarded.transform.position = new Vector3(5f, 0f, 0f);
+                    Undo.RecordObject(free.transform, "Move ChSelfTestFree");
+                    free.transform.position = new Vector3(3f, 0f, 0f);
+                    Undo.FlushUndoRecordObjects();
+                    AssetDatabase.CreateAsset(new Material(shader), made);  // where the rules protect: Unity cannot be told no beforehand
+                    found = protect("after");
+                    takenBack = guarded.transform.position == Vector3.zero && free.transform.position == Vector3.zero && !File.Exists(file(made));
+
+                    Call(ChCheckpoint.HandleCommand, new { action = "mark", label = "self-test protect 2", request });
+                    protect("before");
+                    guarded.transform.position = new Vector3(7f, 0f, 0f);  // past Undo: found all the same, but nothing can take it back
+                    past = protect("after");
+                }
+                finally
+                {
+                    ChCheckpoint.SetWork(null);
+                }
+
+                Check("protect: the hook is told which objects the rules cover",
+                    Ok(before) && before["data"]["covered"].Value<string>("ChSelfTestGuarded") == "ChSelfTestGuarded" &&
+                    before["data"]["covered"].Value<string>("ChSelfTestGuardedChild") == "ChSelfTestGuarded" &&
+                    before["data"]["covered"]["ChSelfTestFree"] == null, Describe(before));
+                Check("protect: deleting, moving and saving a protected asset is refused by Unity itself, and so is saving a scene",
+                    !deleted && !string.IsNullOrEmpty(moveError) && File.ReadAllBytes(file(kept)).SequenceEqual(keptBefore) &&
+                    saves.SequenceEqual(new[] { other }) && Ok(refused) && told(refused, "blocked").Contains($"{kept} (지우기)") &&
+                    told(refused, "blocked").Contains($"{kept} (옮기기 · 이름 바꾸기)") && told(refused, "blocked").Contains($"{kept} (저장)") &&
+                    told(refused, "blocked").Contains("씬 저장") && told(refused, "changed").Count == 0,
+                    $"deleted {deleted} / move '{moveError}' / saves [{string.Join(", ", saves)}] / {Describe(refused)}");
+                Check("protect: a protected object that was changed, and an asset made where the rules protect, are found and the request taken back",
+                    Ok(found) && found["data"].Value<bool>("undone") && told(found, "changed").Contains("ChSelfTestGuarded (자리)") &&
+                    told(found, "changed").Contains($"{made} (새로 만듦)") && takenBack, $"taken back {takenBack} / {Describe(found)}");
+                Check("protect: a change past Undo is found too, and the answer says that it could not be taken back",
+                    Ok(past) && !past["data"].Value<bool>("undone") && told(past, "changed").Contains("ChSelfTestGuarded (자리)") &&
+                    (past["data"].Value<string>("detail") ?? "").StartsWith("Undo를 거치지 않은 변경이 남음"), Describe(past));
+
+                var loosened = new[] { ChProtect.Remove("path", folder + "/**", true), ChProtect.Remove("object", "ChSelfTestGuarded", true), ChProtect.Remove("action", "save_scene", true) };
+                AssetDatabase.ImportAsset(kept, ImportAssetOptions.ForceUpdate);  // as it is on disk: the change that was not saved is gone
+                Check("protect: taken away again by the user, the rules are gone",
+                    loosened.All(p => p == null) && ChProtect.Current.rows.Count == 0 && AssetDatabase.DeleteAsset(kept), string.Join(" / ", loosened));
+            }
+            finally
+            {
+                ChCheckpoint.SetWork(null);
+                if (rulesBefore != null) File.WriteAllBytes(rulesFile, rulesBefore);
+                else if (File.Exists(rulesFile)) File.Delete(rulesFile);
+                if (guarded != null) UnityEngine.Object.DestroyImmediate(guarded);
+                if (free != null) UnityEngine.Object.DestroyImmediate(free);
+            }
         }
 
         /// <summary>

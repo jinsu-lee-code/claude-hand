@@ -497,5 +497,243 @@ class FileTests(unittest.TestCase):
         self.assertFalse((self.project / "Library").exists())
 
 
+class ProtectionTests(unittest.TestCase):
+    """The window's protection rules, held against a call before it runs, and what the window found after it."""
+    PIN = "MyGame@aaaa1111"
+    SERVER = "unity_mygame"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "home"
+        self.project = Path(self.tmp.name) / "MyGame"
+        (self.project / "ClaudeHand").mkdir(parents=True)
+        (self.project / "Assets" / "Art").mkdir(parents=True)
+        (self.project / "Assets" / "Art" / "Hero.mat").write_text("mat", encoding="utf-8")
+        self.asked = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def rules(self, **rules):
+        (self.project / "ClaudeHand" / "protect.json").write_text(json.dumps({"version": 1, **rules}), encoding="utf-8")
+
+    def unity(self, tool, tool_input=None, window=None):
+        """(the refusal or None, whether to ask again after the call) for a call of the Unity subagent."""
+        def ask(pin, action):
+            self.asked.append(action)
+            return window
+        event = {"tool_name": f"mcp__{self.SERVER}__{tool}" if not tool.startswith("ch_") else f"mcp__{self.SERVER}_ch__{tool}",
+                 "tool_input": tool_input or {}}
+        return guard.protection_block(event, self.PIN, self.SERVER, "unity", home=self.home, folder=lambda pin: self.project, ask=ask)
+
+    def blender(self, code, state, tool="execute_blender_code"):
+        def ask(pin, call):
+            self.asked.append(call)
+            return state
+        event = {"tool_name": f"mcp__blender_props__{tool}", "tool_input": {"code": code} if code is not None else {}}
+        return guard.protection_block(event, "props@9876", "blender_props", "blender", home=self.home, ask=ask)
+
+    def test_a_window_without_rules_is_not_asked_anything(self):
+        self.assertEqual(self.unity("manage_gameobject", {"action": "create", "name": "Cube"}), (None, False))
+        self.assertEqual(self.asked, [])
+        self.assertEqual(guard.protection_block({"tool_name": "Read"}, self.PIN, self.SERVER, "unity", folder=lambda pin: 1 / 0), (None, False))
+        self.assertEqual(guard.protection_block({"tool_name": f"mcp__{self.SERVER}__manage_scene", "tool_input": {"action": "save"}},
+                                                self.PIN, self.SERVER, "unity", home=self.home, folder=lambda pin: None), (None, False))  # not open
+
+    def test_a_window_that_may_only_be_looked_at(self):
+        self.rules(window="look")
+        reason, watch = self.unity("manage_gameobject", {"action": "create", "name": "Cube"})
+        self.assertIn("보기만", reason)
+        self.assertFalse(watch)
+        self.assertEqual(self.unity("ch_scene_snapshot", {"depth": 2}), (None, False))
+        self.assertEqual(self.unity("manage_scene", {"action": "get_hierarchy"}), (None, False))
+        self.assertEqual(self.asked, [])  # nothing in the window to compare afterwards
+        self.rules(window="locked")
+        self.assertIn("잠금", self.unity("ch_scene_snapshot")[0])
+
+    def test_this_runs_rules_count_too(self):
+        session = self.home / "protect" / "unity-aaaa1111.json"
+        session.parent.mkdir(parents=True)
+        session.write_text(json.dumps({"window": "look"}), encoding="utf-8")
+        self.assertIn("보기만", self.unity("manage_gameobject", {"action": "create"})[0])
+
+    def test_what_a_calls_own_words_show_is_refused_before_it_runs(self):
+        self.rules(paths=["Assets/Art/**"], objects=["Player"], actions=["play_mode"])
+        self.assertIn("보호 경로 'Assets/Art/**'", self.unity("manage_material", {"action": "set_color", "path": "Assets/Art/Hero.mat"})[0])
+        self.assertIn("Assets/Art/Hero.mat", self.unity("manage_script", {"action": "update", "name": "Hero.mat", "path": "Assets/Art"})[0])  # as keeps finds it
+        self.assertIn("보호 오브젝트 'Player'", self.unity("manage_gameobject", {"action": "modify", "target": "Player"})[0])
+        self.assertIn("플레이 모드", self.unity("manage_editor", {"action": "play"})[0])
+        self.assertEqual(self.unity("manage_gameobject", {"action": "create", "name": "Enemy"}), (None, True))  # the window looks after it
+        self.assertEqual(self.unity("ch_scene_snapshot"), (None, False))  # a look: nothing to look after
+        self.assertEqual(self.asked.count("before"), 5)
+
+    def test_the_window_tells_which_objects_its_rules_cover(self):
+        self.rules(objects=["Environment/**"])
+        covered = {"covered": {"Oak": "Environment/**"}, "pending": None}
+        self.assertIn("보호 오브젝트 'Environment/**'", self.unity("execute_code", {"code": 'GameObject.Find("Oak").SetActive(false);'}, covered)[0])
+        self.assertEqual(self.unity("execute_code", {"code": 'GameObject.Find("Rock").SetActive(false);'}, covered), (None, True))
+
+    def test_what_the_window_found_meanwhile_stops_the_next_call(self):
+        self.rules(paths=["Assets/Art/**"])
+        reason, watch = self.unity("manage_gameobject", {"action": "create"}, {"pending": {"blocked": ["Assets/Art/Hero.mat (저장)"]}})
+        self.assertIn("보호 규칙이 막았어요: Assets/Art/Hero.mat (저장)", reason)
+        self.assertFalse(watch)
+
+    def test_rules_that_cannot_be_read_stop_what_would_change_things(self):
+        (self.project / "ClaudeHand" / "protect.json").write_text("{not json", encoding="utf-8")
+        self.assertIn("보호 규칙 파일을 읽지 못해", self.unity("manage_gameobject", {"action": "create"})[0])
+        self.assertEqual(self.unity("ch_scene_snapshot"), (None, False))
+
+    def test_the_subagent_does_not_call_the_windows_own_check(self):
+        self.assertIn("가드가 부릅니다", self.unity("ch_protect", {"action": "before"})[0])
+        self.assertEqual(self.unity("ch_protect", {"action": "state"}), (None, False))
+
+    def test_a_blender_window_says_its_own_rules(self):
+        state = {"file": "C:/Art/props.blend", "rules": {"window": "open", "objects": ["Hero", "collection:Rig"], "actions": ["save_file"]},
+                 "covered": {"Hero": "Hero", "Sword": "Hero", "Arm.L": "collection:Rig"}, "pending": None}
+        self.assertIn("보호 오브젝트 'Hero'", self.blender("bpy.data.objects['Sword'].location.x += 1", state)[0])
+        self.assertIn(".blend 저장", self.blender("bpy.ops.wm.save_mainfile()", state)[0])
+        self.assertEqual(self.blender("bpy.data.objects['Prop'].location.x += 1", state), (None, True))
+        self.assertEqual(self.blender("print(bpy.data.objects['Hero'].location)", state), (None, False))
+        self.assertEqual(self.asked, ["protection_state(True)"] * 3 + ["protection_state(False)"])
+        self.assertIn("보기만", self.blender("bpy.data.objects['Prop'].location.x += 1", {**state, "rules": {"window": "look"}})[0])
+        self.assertEqual(self.blender(None, {**state, "rules": {"window": "look"}}, tool="get_scene_info"), (None, False))
+        self.assertEqual(self.blender("bpy.data.objects['Hero'].location.x += 1", None), (None, False))  # that Blender is not there
+
+    def test_an_add_on_from_before_only_says_its_file(self):
+        blend = Path(self.tmp.name) / "props.blend"
+        blend.with_suffix(".claude-hand.protect.json").write_text(json.dumps({"objects": ["Hero"]}), encoding="utf-8")
+        old = {"file": str(blend), "error": "AttributeError(\"module 'claude_hand_chat' has no attribute 'protection_state'\")"}
+        self.assertIn("보호 오브젝트 'Hero'", self.blender("bpy.data.objects['Hero'].location.x += 1", old)[0])
+        self.assertEqual(self.blender("bpy.data.objects['Prop'].location.x += 1", {"file": "", "error": "x"}), (None, False))  # never saved: no rules
+
+    def test_asking_blender(self):
+        answer = lambda printed: lambda port, command, timeout: {"status": "success", "result": {"executed": True, "result": printed}}
+        state = guard.ask_blender("props@9876", "protection_state(True)", request=answer('noise\nCH_PROTECT {"file": "a.blend", "rules": {}}\n'))
+        self.assertEqual(state, {"file": "a.blend", "rules": {}})
+        sent = []
+        guard.ask_blender("props@9877", "protection_after()", request=lambda port, command, timeout: sent.append((port, command)) or
+                          {"status": "success", "result": {"result": "CH_PROTECT {}"}})
+        self.assertEqual(sent[0][0], 9877)
+        self.assertIn("claude_hand_chat.protection_after()", sent[0][1]["params"]["code"])
+        compile(sent[0][1]["params"]["code"], "asked", "exec")  # what Blender is to run is Python
+
+        def refused(port, command, timeout):
+            raise ConnectionRefusedError()
+        self.assertIsNone(guard.ask_blender("props@9876", "protection_state(False)", request=refused))
+        with self.assertRaises(ValueError):  # it answered, but not this: the caller refuses the call
+            guard.ask_blender("props@9876", "protection_state(False)", request=answer("Traceback ..."))
+
+    def test_after_the_call_the_window_is_asked_what_it_found(self):
+        self.rules(objects=["Player"])
+        event = {"tool_name": f"mcp__{self.SERVER}__execute_code", "tool_input": {"code": "x"}, "agent_id": "aaa"}
+        after = lambda found: guard.protection_after(event, self.PIN, self.SERVER, "unity", home=self.home, folder=lambda pin: self.project,
+                                                     ask=lambda pin, action, timeout: self.asked.append(action) or found)
+        self.assertIsNone(after({}))
+        told = after({"changed": ["Player (자리)"], "undone": True})
+        self.assertIn("보호된 Player (자리)이(가) 바뀌어 이 요청이 이 창에 한 일을 되돌렸어요", told)
+        self.assertIn("감독에게 보고", told)
+        self.assertEqual(self.asked, ["after", "after"])
+        look = {"tool_name": f"mcp__{self.SERVER}_ch__ch_scene_snapshot", "tool_input": {}}
+        self.assertIsNone(guard.protection_after(look, self.PIN, self.SERVER, "unity", home=self.home, folder=lambda pin: self.project,
+                                                 ask=lambda *a, **kw: 1 / 0))  # a look is not asked about
+        self.rules()
+        self.assertIsNone(guard.protection_after(event, self.PIN, self.SERVER, "unity", home=self.home, folder=lambda pin: self.project,
+                                                 ask=lambda *a, **kw: 1 / 0))  # no rules to look after
+        self.rules(objects=["Player"])
+        self.assertIsNone(guard.protection_after(event, self.PIN, self.SERVER, "unity", home=self.home, folder=lambda pin: self.project,
+                                                 ask=lambda *a, **kw: 1 / 0))  # never an error: the call is over
+        blender = {"tool_name": "mcp__blender_props__execute_blender_code", "tool_input": {"code": "bpy.data.objects['Hero'].location.x += 1"}}
+        told = guard.protection_after(blender, "props@9876", "blender_props", "blender", home=self.home,
+                                      ask=lambda pin, call, timeout: {"changed": ["Hero (자리)"], "undone": False, "detail": "이 요청의 되돌리기 지점이 없음"})
+        self.assertIn("되돌리지 못했어요(이 요청의 되돌리기 지점이 없음)", told)
+
+    def test_as_the_hook_after_a_call(self):
+        args = guard.build_parser().parse_args(["--pin", self.PIN, "--server", self.SERVER, "--after"])
+        event = json.dumps({"tool_name": f"mcp__{self.SERVER}__execute_code", "tool_input": {"code": "x"}})
+        out = io.StringIO()
+        with unittest.mock.patch.object(guard, "protection_after", lambda *a, **kw: "보호된 Player가 바뀌어 …"):
+            self.assertEqual(guard.run_after(args, io.StringIO(event), out), 0)
+        self.assertEqual(json.loads(out.getvalue()), {"decision": "block", "reason": "보호된 Player가 바뀌어 …"})
+        out = io.StringIO()
+        with unittest.mock.patch.object(guard, "protection_after", lambda *a, **kw: None):
+            guard.run_after(args, io.StringIO(event), out)
+        self.assertEqual(out.getvalue(), "")
+        with unittest.mock.patch("sys.stderr", io.StringIO()):
+            self.assertEqual(guard.exit_code(lambda: 1 / 0, stop_hook=True), 0)  # as with Stop: nothing here may end with another code
+
+    def test_as_the_subagent_stops_the_window_is_asked_once_more(self):
+        """Should the hook after a call not have run, what the last call did is still found before the subagent reports."""
+        args = guard.build_parser().parse_args(["--pin", self.PIN, "--server", self.SERVER, "--stop"])
+        asked, stopped = [], []
+
+        def after(event, pin, server, app, stopping=False):
+            asked.append(stopping)
+            return found[0]
+        with unittest.mock.patch.object(guard, "protection_after", after), \
+                unittest.mock.patch.object(guard, "report_stop", lambda event, pin, app: stopped.append(pin)):
+            found, out = [None], io.StringIO()
+            guard.run_stop(args, io.StringIO(json.dumps({"hook_event_name": "SubagentStop"})), out)
+            self.assertEqual((out.getvalue(), stopped, asked), ("", [self.PIN], [True]))  # nothing found: it stops, and the channel hears of it
+            found, out = ["보호된 Player (자리)이(가) 바뀌어 …"], io.StringIO()
+            guard.run_stop(args, io.StringIO(json.dumps({"hook_event_name": "SubagentStop"})), out)
+            self.assertEqual(json.loads(out.getvalue()), {"decision": "block", "reason": "보호된 Player (자리)이(가) 바뀌어 …"})
+            self.assertEqual(stopped, [self.PIN])  # kept from stopping once, to say so in its report
+            out = io.StringIO()
+            guard.run_stop(args, io.StringIO(json.dumps({"hook_event_name": "SubagentStop", "stop_hook_active": True})), out)
+            self.assertEqual((out.getvalue(), stopped, asked), ("", [self.PIN, self.PIN], [True, True]))  # never twice
+        self.rules(objects=["Player"])
+        event = {"hook_event_name": "SubagentStop"}
+        told = guard.protection_after(event, self.PIN, self.SERVER, "unity", home=self.home, folder=lambda pin: self.project, stopping=True,
+                                      ask=lambda pin, action, timeout: self.asked.append((action, timeout)) or {"changed": ["Player (자리)"], "undone": True})
+        self.assertIn("되돌렸어요", told)
+        self.assertEqual(self.asked, [("after", 10.0)])  # not long: the subagent is waiting to stop
+
+    def test_a_refusal_goes_out_as_one_and_into_the_log(self):
+        out, logged, reported = io.StringIO(), [], []
+        args = guard.build_parser().parse_args(["--pin", self.PIN, "--server", self.SERVER])
+        event = json.dumps({"tool_name": f"mcp__{self.SERVER}__manage_gameobject", "tool_input": {"action": "create"}})
+        with unittest.mock.patch.object(guard, "protection_block", lambda *a, **kw: ("보호 규칙이 이 호출을 막았습니다: …", False)), \
+                unittest.mock.patch.object(guard, "dialog_block", lambda *a, **kw: None), \
+                unittest.mock.patch.object(guard, "tell_protected", lambda event, pin, app, text: logged.append(text)), \
+                unittest.mock.patch.object(guard, "report_progress", lambda *a, **kw: reported.append(a)):
+            guard.run_guard(args, io.StringIO(event), out)
+        self.assertEqual(json.loads(out.getvalue())["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual((len(logged), reported), (1, []))  # no work line and no undo point for a call that does not happen
+        out = io.StringIO()
+        with unittest.mock.patch.object(guard, "protection_block", lambda *a, **kw: 1 / 0), \
+                unittest.mock.patch.object(guard, "dialog_block", lambda *a, **kw: None), \
+                unittest.mock.patch.object(guard, "tell_protected", lambda *a, **kw: None):
+            guard.run_guard(args, io.StringIO(event), out)
+        self.assertIn("보호 규칙을 확인하지 못해", json.loads(out.getvalue())["hookSpecificOutput"]["permissionDecisionReason"])  # fails closed
+
+    def test_telling_of_it(self):
+        sent, written = [], []
+        (self.home / "chat").mkdir(parents=True)
+        (self.home / "chat" / "server.json").write_text(json.dumps({"port": 8765, "token": "t"}), encoding="utf-8")
+        event = {"tool_name": f"mcp__{self.SERVER}__manage_gameobject", "agent_id": "aaa"}
+        guard.tell_protected(event, self.PIN, "unity", "보호 규칙이 막았어요: x", home=self.home,
+                             post=lambda req: sent.append(json.loads(req.data)) or {"ok": True}, write=lambda *a, **kw: written.append(kw))
+        self.assertEqual((sent[0]["text"], sent[0]["pin"], written), ("보호 규칙이 막았어요: x", self.PIN, []))  # the channel logs it, with the request
+        guard.tell_protected(event, self.PIN, "unity", "보호 규칙이 막았어요: x", home=self.home, post=lambda req: 1 / 0,
+                             write=lambda name, **kw: written.append((name, kw["reason"])))
+        self.assertEqual(written, [("protected", "보호 규칙이 막았어요: x")])  # no channel: straight into the log
+
+    def test_without_claude_hand_a_watched_call_gets_its_own_undo_point(self):
+        marks = []
+        event = {"tool_name": f"mcp__{self.SERVER}__manage_gameobject", "tool_input": {"action": "create"}}
+        report = lambda reply, watch: guard.report_progress(event, self.PIN, self.SERVER, "unity", home=self.home, watch=watch,
+                                                            post=lambda req: reply, folder=lambda pin: None,
+                                                            mark=lambda app, pin, label, key="": marks.append(label))
+        report({}, False)
+        self.assertEqual(marks, [])
+        report({}, True)  # nobody sets a point per request: what the window takes back goes down to this one
+        self.assertEqual(len(marks), 1)
+        (self.home / "chat").mkdir(parents=True)
+        (self.home / "chat" / "server.json").write_text(json.dumps({"port": 8765, "token": "t"}), encoding="utf-8")
+        report({"ok": True, "chat_id": "unity-mygame", "new_request": False}, True)  # Claude Hand set the request's
+        self.assertEqual(len(marks), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

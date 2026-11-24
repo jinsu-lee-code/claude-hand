@@ -122,7 +122,8 @@ def trace(events: list[dict], request: str) -> list[dict]:
 
 LABELS = {"message": "요청", "assigned": "맡김", "action": "동작", "refused": "막음", "call": "ch 호출", "stopped": "멈춤", "reply": "답",
           "reminder": "다시 알림", "dialog": "대화상자", "stop": "중지 누름", "permission": "허락 요청", "verdict": "허락 답",
-          "undo": "되돌림", "cost": "시간·토큰", "held": "쥐고 있음", "released": "넘김"}
+          "undo": "되돌림", "cost": "시간·토큰", "held": "쥐고 있음", "released": "넘김",
+          "protected": "막음 (보호 규칙)", "protect": "보호 규칙"}
 
 
 def describe(event: dict, since: float | None = None) -> str:
@@ -143,7 +144,7 @@ def describe(event: dict, since: float | None = None) -> str:
         parts = [who, " ".join(filter(None, [event.get("tool", ""), event.get("detail", "")]))]
         if event.get("first"):
             parts.append("(이 요청의 되돌리기 지점)")
-    elif kind == "refused":
+    elif kind in ("refused", "protected"):
         parts = [who, event.get("tool", ""), event.get("reason", "")]
     elif kind == "call":
         result = "성공" if event.get("ok") else f"실패 {event.get('code', '')}".strip()

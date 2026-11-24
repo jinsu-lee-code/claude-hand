@@ -51,7 +51,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from handlib import eventlog, overview, usage  # noqa: E402
+from handlib import eventlog, overview, protect, usage  # noqa: E402
 from handlib.agents import AgentInfo, installed_agents, prompt_template, refresh_agents, slug  # noqa: E402
 from handlib.capture import capture_window  # noqa: E402
 from handlib.constants import VERSION  # noqa: E402
@@ -140,6 +140,35 @@ UNDO_TOOL = {
                                                           "Leave out for the newest request of that chat that changed something."},
         },
         "required": ["chat_id"],
+    },
+}
+
+PROTECT_TOOL = {
+    "name": "propose_protection",
+    "description": "Propose a protection rule for one window: something Claude must not change there from now on. Use it when "
+                   "the user says so in words ('Hero는 건드리지 마', 'Assets/Art는 손대지 마', '이 창은 보기만 해', '씬은 저장하지 마'). "
+                   "The rule holds only once the user presses [추가] under the proposal in that window's chat panel: say so in "
+                   "your reply. You cannot add, change or remove a rule yourself, and nothing loosens one but the user in the "
+                   "panel (보호 → 풀기): when asked to lift a rule, tell the user where that button is. A rule is checked by "
+                   "the hooks and by the window itself, whatever a subagent does; a note in NOTES.md is only read.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "chat_id": {"type": "string", "description": "The window the rule is for (its chat_id)"},
+            "kind": {"type": "string", "enum": ["window", "path", "object", "action"],
+                     "description": "window: the window as a whole. path: Unity assets by project path. object: scene objects "
+                                    "(Unity) or objects (Blender) by name. action: something not to be done there at all"},
+            "value": {"type": "string",
+                      "description": "window: 'look' (only look, change nothing) or 'locked' (no work there at all). path: "
+                                     "'Assets/Art/**', 'Assets/Scenes/Main.unity' (* within a name, ** any depth; a folder covers "
+                                     "all in it). object: 'Player' (that object wherever it is, and all below it), "
+                                     "'Environment/**', 'UI/Canvas' (that one object); in Blender also 'collection:Rig'. action: "
+                                     "'save_scene', 'delete_asset', 'play_mode' (Unity), 'save_file' (Blender)"},
+            "lasting": {"type": "boolean", "description": "true: kept with the project or the .blend. false: only until Claude Hand "
+                                                           "is turned off (the user said 'for now', '이번만', '오늘은')"},
+            "why": {"type": "string", "description": "One line for the user: what they said that this rule answers"},
+        },
+        "required": ["chat_id", "kind", "value", "lasting"],
     },
 }
 
@@ -309,6 +338,11 @@ class ChatHub:
         self.costs: dict[str, dict] = {}  # request id -> {"chat", "asked", "answered", "actions"}: answered, tokens still to come
         self.show_cost = True        # the line in the panel (config.json "show_cost": false leaves it to trace and usage)
         # Messages for the supervisor that wait for its turn to end (deliver, check_held), oldest first.
+        # Protection rules (handlib/protect.py). The channel writes none: it shows a rule the supervisor proposes in
+        # the window's panel, where the user's press writes it, and says in the panels what the guard hook refused.
+        self.home: Path | None = None  # claude-hand's home folder (this run's rules lie in it); None: the usual one
+        self.offers: dict[str, dict] = {}  # offer id -> {"chat_id", "text"}: proposed rules the user has not answered
+        self.offer_count = 0
         self.held: list[dict] = []   # {"since", "notification"}
         self.handed_at = 0.0         # when a message last went to the supervisor
         self.agent_stop_at = 0.0     # when a subagent last stopped: its report is on its way to the supervisor
@@ -393,6 +427,9 @@ class ChatHub:
                 if stop and stop["seq"] == item["seq"] and now - stop["ts"] <= STOP_SECONDS and self._asking(asker, now) is item:
                     self._log("refused", request=request, chat_id=window, tool="(맡기기)", reason="사용자가 채팅창에서 중지를 누름")
                     return {"ours": True, "chat_id": window, "stop": True}
+            if self.protection(window).window == "locked":
+                self._log("refused", request=request, chat_id=window, tool="(맡기기)", reason="사용자가 잠근 창 (보호 규칙: 잠금)")
+                return {"ours": True, "chat_id": window, "locked": True}
             # A window has one place for "whose request is this work": handing it work for another request while it is
             # at work would put the rest of that work, its undo point and its 중지 down for the new request. Refused
             # until the subagent there stops, or shows no sign of life for as long as two subagents are kept apart.
@@ -972,11 +1009,16 @@ class ChatHub:
             if state is not None:  # what goes on there now, as the panels and `claude_hand.py status` show it
                 w["state"] = state["state"]
                 w.update({key: state[key] for key in ("request", "asker", "action", "dialog", "seconds") if key in state})
+            rules = self.protection(str(w.get("chat_id") or ""))
+            if not rules.empty():
+                w["protection"] = {key: getattr(rules, key) for key in ("window", "paths", "objects", "actions") if getattr(rules, key) != []}
         return {"windows": windows,
                 "note": "Most recently used first. A window that is not listed has not reported since this session "
                         "started (its Claude Hand Tools / chat add-on may be missing). state: working (its subagent is "
                         "at it; asker: the chat whose request it is, when not its own), waiting (its panel has a request "
-                        "and nothing is at work: your turn), dialog (a dialog stops that window), idle."}
+                        "and nothing is at work: your turn), dialog (a dialog stops that window), idle. protection: the "
+                        "user's rules for that window (window look: only look there; locked: hand it no work at all; "
+                        "paths, objects, actions: not to be changed or done). Calls that break them are refused."}
 
     @staticmethod
     def _permission_item(pending: dict) -> dict:
@@ -1327,6 +1369,79 @@ class ChatHub:
         threading.Thread(target=self.undo_request, args=(chat_id, request, {chat_id} if skip_own else (), True), daemon=True).start()
         return {"chat_id": chat_id, "started": True}
 
+    # ------------------------------------------------------------------ protection rules
+
+    def protection(self, chat_id: str) -> protect.Rules:
+        """The rules of a window's subagent's window as they stand in their files now (the project's or the .blend's,
+        and this run's); none for a chat without a subagent, or when they cannot be looked up."""
+        agent = next((a for a in installed_agents(self.agents_dir) if a.name == chat_id), None)
+        if agent is None:
+            return protect.Rules()
+        try:
+            where = agent.path
+            if not where and agent.app == "unity":
+                where = (find_project(hash_=agent.pin.rpartition("@")[2]) or {}).get("project_path") or ""
+            return protect.window_rules(agent.app, where or None, self.home or claude_hand_home(), protect.session_key(agent.app, agent.pin))
+        except Exception as exc:  # the guard hook holds every call against the rules anyway
+            log("could not read a window's protection rules:", exc)
+            return protect.Rules()
+
+    def propose_protection(self, chat_id: str, kind: str, value: str, lasting: bool = True, why: str = "") -> dict:
+        """The supervisor proposes a rule for a window (the user said in words what must not be touched). Shown in
+        that window's panel with [추가] and [취소]; the panel writes the rule when the user presses [추가]. Returns
+        {"ok": True, "offer_id"} or {"ok": False, "reason": what is wrong with the proposal}."""
+        agent = next((a for a in installed_agents(self.agents_dir) if a.name == chat_id), None)
+        if agent is None:
+            return {"ok": False, "reason": f"Unknown chat_id {chat_id!r}: a rule is for one window (current_context lists them)."}
+        kind, value = str(kind or "").strip().lower(), " ".join(str(value or "").split())
+        problem = protect.proposal_problem(agent.app, kind, value)
+        if problem:
+            return {"ok": False, "reason": problem}
+        text = protect.proposal_words(kind, value, lasting) + (f"\n{clip(' '.join(why.split()), 300)}" if why.strip() else "")
+        with self.cond:
+            self.offer_count += 1
+            offer_id = f"p{self.offer_count}-{int(time.time())}"
+            self.offers[offer_id] = {"chat_id": chat_id, "text": text}
+            self._append(chat_id, {"kind": "protect_offer", "offer_id": offer_id, "text": text,
+                                   "rule": {"kind": kind, "value": value, "lasting": bool(lasting)}})
+            self._log("protect", chat_id=chat_id, request=self._request_for(chat_id), text="제안: " + eventlog.short(text.splitlines()[0]))
+        return {"ok": True, "offer_id": offer_id}
+
+    def protection_verdict(self, offer_id: str, behavior: str) -> bool:
+        """The user pressed [추가] or [취소] under a proposed rule (the panel has written the rule by then, or left
+        it). The supervisor hears of it with that panel's next message."""
+        if behavior not in ("added", "declined"):
+            return False
+        with self.cond:
+            offer = self.offers.pop(offer_id, None)
+            if offer is None:
+                return False
+            chat_id, rule = offer["chat_id"], offer["text"].splitlines()[0]
+            self._append(chat_id, {"kind": "protect_resolved", "offer_id": offer_id, "behavior": behavior})
+            note = f"[사용자가 제안된 보호 규칙을 {'추가했음' if behavior == 'added' else '추가하지 않았음'}: {rule}]"
+            self.undo_notes[chat_id] = "\n".join(filter(None, [self.undo_notes.get(chat_id, ""), note]))
+            self._log("protect", chat_id=chat_id, text=("추가함: " if behavior == "added" else "추가 안 함: ") + eventlog.short(rule))
+        return True
+
+    def protected(self, app: str, pin: str, tool: str, text: str, agent_id: str = "") -> dict | None:
+        """A subagent's guard hook says the window's protection rules stopped a call, or that the window took a
+        request's work back because something protected had changed: a line in that window's panel, and in the panel
+        the request was asked in. None for a pin no generated subagent has."""
+        agent = next((a for a in installed_agents(self.agents_dir) if a.app == app and a.pin == pin), None)
+        if agent is None or not text.strip():
+            return None
+        text = clip(" ".join(text.split()), 600)
+        with self.cond:
+            now = time.time()
+            self.names.setdefault(agent.name, {"app": agent.app, "window": agent.pin.rpartition("@")[0]})
+            asker, _ = self._work_for(agent.name, now)
+            self._append(agent.name, {"kind": "notice", "text": text, "alert": True})
+            if asker and asker != agent.name:
+                self._append(asker, {"kind": "notice", "text": f"{self._window_name(agent.name)}: {text}", "alert": True})
+            self._log("protected", request=self._request_for(agent.name), chat_id=agent.name, pin=pin, tool=tool[:80], agent_id=agent_id,
+                      reason=eventlog.short(text, 300))
+        return {"chat_id": agent.name}
+
     def window_undone(self, app: str, window: str, pin: str, request: str) -> dict:
         """A panel undid this request in its own window with its own button: no other panel need offer that window
         along with the request any more. A nicety: asked again, the window would just say there is nothing left."""
@@ -1404,7 +1519,7 @@ class StdioMcp:
         elif method == "ping":
             self.send({"jsonrpc": "2.0", "id": msg_id, "result": {}})
         elif method == "tools/list":
-            self.send({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": [REPLY_TOOL, CONTEXT_TOOL, UNDO_TOOL]}})
+            self.send({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": [REPLY_TOOL, CONTEXT_TOOL, UNDO_TOOL, PROTECT_TOOL]}})
         elif method == "tools/call":
             self.send({"jsonrpc": "2.0", "id": msg_id, "result": self.call_tool(params)})
         elif method == "notifications/claude/channel/permission_request":
@@ -1415,12 +1530,20 @@ class StdioMcp:
 
     def call_tool(self, params: dict) -> dict:
         name = params.get("name")
-        if name not in ("reply", CONTEXT_TOOL["name"], UNDO_TOOL["name"]):
+        if name not in ("reply", CONTEXT_TOOL["name"], UNDO_TOOL["name"], PROTECT_TOOL["name"]):
             return {"isError": True, "content": [{"type": "text", "text": f"Unknown tool {name!r}"}]}
         self.hub.mark_in_use()
         if name == CONTEXT_TOOL["name"]:
             return {"content": [{"type": "text", "text": json.dumps(self.hub.current_context(), ensure_ascii=False)}]}
         args = params.get("arguments") or {}
+        if name == PROTECT_TOOL["name"]:
+            offered = self.hub.propose_protection(str(args.get("chat_id", "")), str(args.get("kind", "")), str(args.get("value", "")),
+                                                  lasting=args.get("lasting") not in (False, "false"), why=str(args.get("why") or ""))
+            if not offered["ok"]:
+                return {"isError": True, "content": [{"type": "text", "text": "Not proposed: " + offered["reason"]}]}
+            return {"content": [{"type": "text", "text": "Proposed in that window's chat panel. It is not a rule yet: it holds once the "
+                                                         "user presses [추가] there. Tell the user so in your reply; you will hear "
+                                                         "what they chose with that panel's next message."}]}
         if name == UNDO_TOOL["name"]:
             done = self.hub.undo_request(str(args.get("chat_id", "")), str(args.get("request") or ""), notify=False)
             if not done["ok"]:
@@ -1574,6 +1697,13 @@ class PanelHandler(BaseHTTPRequestHandler):
                                                            str(body.get("agent") or "")[:200], str(body.get("transcript") or "")[:1000])})
         elif path == "/v1/stopped":  # a subagent's Stop hook: it finished its turn
             result = self.hub.agent_stopped(str(body.get("app", "")), str(body.get("pin", ""))[:200], str(body.get("agent_id", ""))[:80])
+            self._json(200 if result else 404, {"ok": result is not None, **(result or {})})
+        elif path == "/v1/protect":  # [추가] or [취소] under a protection rule the supervisor proposed
+            ok = self.hub.protection_verdict(str(body.get("offer_id", ""))[:80], str(body.get("behavior", "")))
+            self._json(200 if ok else 409, {"ok": ok})
+        elif path == "/v1/protected":  # a subagent's guard hook: the window's protection rules stopped a call, or took work back
+            result = self.hub.protected(str(body.get("app", "")), str(body.get("pin", ""))[:200], str(body.get("tool", "")),
+                                        str(body.get("text", "")), str(body.get("agent_id", ""))[:80])
             self._json(200 if result else 404, {"ok": result is not None, **(result or {})})
         elif path in ("/v1/undo", "/v1/undone"):  # 되돌리기 in a panel: the other windows of a request / its own window, done
             app, request = str(body.get("app", "")), str(body.get("request") or "")[:80]
@@ -1863,6 +1993,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     mcp.hub.auto_sync = lambda agents_dir: refresh_agents(agents_dir=agents_dir)
     mcp.hub.events = eventlog.write
+    mcp.hub.home = home
+    protect.clear_session(home)  # the protection rules that were for the last run only ("이번만") are over
     mcp.hub.use_history(home / "chat" / "history")
     mcp.hub.capture = lambda app, pin, path: capture_window(app, pin, path, PREVIEW_SIZE)
     mcp.hub.images_dir = home / "chat" / "images"

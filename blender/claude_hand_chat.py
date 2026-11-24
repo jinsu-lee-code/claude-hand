@@ -21,13 +21,14 @@ Install: `uv run tools/claude_hand.py blender-install-chat` (or Preferences > Ad
 bl_info = {
     "name": "Claude Hand Chat",
     "author": "claude-hand",
-    "version": (0, 17, 1),
+    "version": (0, 18, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar (N) > Claude Hand",
     "description": "Chat with this Blender window's claude-hand subagent",
     "category": "Interface",
 }
 
+import array
 import base64
 import contextlib
 import datetime
@@ -68,7 +69,7 @@ PROGRESS_STALE = 300.0  # seconds without progress news after which "작업 중"
 PANEL_MARGIN_PX = 50.0  # category tabs, box and label padding at UI scale 1
 LABEL_HEADROOM = 1.2    # blf's width at the label size can come out a little narrower than the drawn label
 CHAR_PX = 6.0           # without blf: width of a narrow character at 11 px (wide ones such as Korean count twice)
-SHOWN_KINDS = ("user", "reply", "permission", "notice", "image")
+SHOWN_KINDS = ("user", "reply", "permission", "notice", "image", "protect_offer")
 IMAGE_LINES = 8         # what a result preview counts for when the panel decides how much history fits
 ALERT_FRESH_SECONDS = 30.0  # older items (history shown again after a restart) never blink the taskbar
 UNDO_KEPT = 20          # undo points kept for the newest requests
@@ -701,6 +702,337 @@ def _undo_from_button():
 def _forget_undo_points(*_args):
     """Opening a file starts a new undo history."""
     _marks.clear()
+    _protect.update(base=None, read={})
+
+
+# --------------------------------------------------------------------------- protection rules (main thread)
+#
+# What the user has said must not be changed in this window: the window as a whole ("look": only calls that look,
+# "locked": none at all), objects by name, actions. A note is something Claude tries to keep; these are checked. The
+# subagent's guard hook asks for them before every call (protection_state) and refuses what a call's own words show.
+# Blender has no door to shut on the rest (any code can reach any object), so the hook asks again after the call
+# (protection_after): the protected objects are compared with what they were just before it, and when one differs,
+# what the request did in this window is taken back with its undo point. Notices from Blender's depsgraph would not
+# do for this: they come only once something asks for an evaluation, say nothing of a rename or a custom property,
+# and an undo from inside one would run in the middle of the code that is still changing things (tried, 2026-11-24).
+#
+# The rules are the user's: only the panel's buttons write them (and the [추가] under a rule Claude proposed).
+#   beside the .blend: <name>.claude-hand.protect.json      lasting, goes with the file
+#   ~/.claude-hand/protect/blender-<port>.json              this run of Claude Hand only ("이번만")
+# The same file means the same in tools/handlib/protect.py (the guard) and in Unity (ChProtect.cs).
+
+PROTECT_MODES = ("open", "look", "locked")  # weakest first: of two files, the stricter holds
+PROTECT_MODE_WORDS = {"open": "열림", "look": "보기만", "locked": "잠금"}
+PROTECT_ACTIONS = {"save_file": ".blend 저장"}
+PROTECT_COVERED = 3000  # names told to the guard at most
+PROTECT_FIELDS = {"exists": "없어짐", "name": "이름", "type": "종류", "parent": "부모", "collections": "컬렉션", "world": "자리",
+                  "local": "자리", "modifiers": "모디파이어", "constraints": "제약", "slots": "재질 칸", "materials": "재질",
+                  "hide": "보이기", "props": "사용자 속성", "data": "데이터", "mesh": "메시", "shape_keys": "셰이프 키"}
+_protect = {"base": None, "read": {}}  # base: the protected objects as they were before the call that runs now
+
+
+def _protect_paths():
+    """(the lasting rules file or "" for a file never saved, this run's)."""
+    lasting = os.path.splitext(bpy.data.filepath)[0] + ".claude-hand.protect.json" if bpy.data.filepath else ""
+    home = os.environ.get("CLAUDE_HAND_HOME") or os.path.join(os.path.expanduser("~"), ".claude-hand")
+    return lasting, os.path.join(home, "protect", f"blender-{window_identity()[1].rpartition('@')[2]}.json")
+
+
+def _protect_file(path):
+    """One file's rules as {"window", "objects", "actions"} and what is wrong with it (None: nothing). Read anew only
+    when the file changed: the panel draws often."""
+    try:
+        stat = os.stat(path) if path else None
+    except OSError:
+        stat = None
+    if stat is None:
+        _protect["read"].pop(path, None)
+        return {"window": "open", "objects": [], "actions": []}, None
+    stamp = (stat.st_mtime_ns, stat.st_size)
+    cached = _protect["read"].get(path)
+    if cached is None or cached[0] != stamp:
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("not an object")
+            strings = lambda key: [v.strip() for v in data.get(key) if isinstance(v, str) and v.strip()] if isinstance(data.get(key), list) else []
+            window = str(data.get("window") or "open").strip().lower()
+            rules = {"window": window if window in PROTECT_MODES else "open", "objects": strings("objects"),
+                     "actions": [a for a in strings("actions") if a in PROTECT_ACTIONS]}
+            cached = (stamp, rules, None)
+        except (OSError, ValueError) as exc:  # a rule that was meant and cannot be read must not go unnoticed
+            cached = (stamp, {"window": "open", "objects": [], "actions": []}, f"{path}: {exc}")
+        _protect["read"][path] = cached
+    return cached[1], cached[2]
+
+
+def protection_rules():
+    """This window's rules, the lasting ones and this run's as one: {"window", "paths": [], "objects", "actions",
+    "problems", "rows"}. rows: (kind, value, lasting) for each rule as it stands in its file, for the panel."""
+    out = {"window": "open", "paths": [], "objects": [], "actions": [], "problems": [], "rows": []}
+    for lasting, path in zip((True, False), _protect_paths()):
+        rules, problem = _protect_file(path)
+        if problem:
+            out["problems"].append(problem)
+        if PROTECT_MODES.index(rules["window"]) > 0:
+            out["rows"].append(("window", rules["window"], lasting))
+            if PROTECT_MODES.index(rules["window"]) > PROTECT_MODES.index(out["window"]):
+                out["window"] = rules["window"]
+        for kind in ("objects", "actions"):
+            for value in rules[kind]:
+                out["rows"].append((kind[:-1], value, lasting))
+                if value not in out[kind]:
+                    out[kind].append(value)
+    return out
+
+
+def _protect_glob(pattern):
+    parts = re.split(r"(\*\*|\*|\?)", pattern)
+    return re.compile("".join(".*" if p == "**" else "[^/]*" if p == "*" else "[^/]" if p == "?" else re.escape(p) for p in parts) + r"\Z")
+
+
+def protect_object_rule(rules, parts):
+    """The rule that covers the object whose names from the top of its hierarchy down to itself are `parts`, or None:
+    a plain name covers that object wherever it is and all below it, "A/**" covers A and all below it, "A/B" that
+    one object (as object_rule in tools/handlib/protect.py; tools/tests/protect_cases.json holds both to it)."""
+    for rule in rules:
+        if rule.lower().startswith("collection:") or not rule.strip():
+            continue
+        wanted = [p for p in rule.replace("\\", "/").split("/") if p]
+        if len(wanted) == 1:
+            if any(_protect_glob(wanted[0]).match(part) for part in parts):
+                return rule
+            continue
+        below = wanted[-1] == "**"
+        head = wanted[:-1] if below else wanted
+        for start in range(len(parts) - len(head) + 1):
+            if all(_protect_glob(w).match(p) for w, p in zip(head, parts[start:])) and (below or start + len(head) == len(parts)):
+                return rule
+    return None
+
+
+def protected_objects(rules=None):
+    """{object name: the rule that covers it} for every object of this file the rules protect."""
+    wanted = (rules or protection_rules())["objects"]
+    if not wanted:
+        return {}
+    found = {}
+    for rule in wanted:
+        if rule.lower().startswith("collection:"):
+            match = _protect_glob(rule.split(":", 1)[1].strip())
+            for collection in bpy.data.collections:
+                if match.match(collection.name):
+                    for obj in collection.all_objects:
+                        found.setdefault(obj.name, rule)
+    for obj in bpy.data.objects:
+        if obj.name in found:
+            continue
+        parts, above = [obj.name], obj.parent
+        while above is not None and len(parts) < 64:
+            parts.insert(0, above.name)
+            above = above.parent
+        rule = protect_object_rule(wanted, parts)
+        if rule:
+            found[obj.name] = rule
+    return found
+
+
+def _protect_plain(value):
+    if isinstance(value, (int, str, bool, type(None))):
+        return value
+    if isinstance(value, float):
+        return round(value, 5)
+    if isinstance(value, bpy.types.ID):
+        return f"<{type(value).__name__}:{value.name}>"
+    try:
+        return [round(float(x), 5) for x in value]  # vectors, colours, arrays
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _protect_settings(item):
+    """The plain settings of a modifier or a constraint, so that a changed bevel width shows."""
+    rows = []
+    for prop in item.bl_rna.properties:
+        if prop.identifier == "rna_type" or prop.type == "COLLECTION":
+            continue
+        try:
+            value = getattr(item, prop.identifier)
+            if prop.type == "POINTER" and not isinstance(value, (bpy.types.ID, type(None))):
+                continue  # a struct of its own (a bevel's profile): told by where it lies in memory, which an undo changes
+            rows.append((prop.identifier, _protect_plain(value)))
+        except Exception:  # noqa: BLE001 - a property that cannot be read here is not one a call sets either
+            continue
+    return hashlib.blake2b(json.dumps(rows, sort_keys=True, default=str).encode("utf-8"), digest_size=8).hexdigest()
+
+
+def _protect_material(material):
+    """What a material is made of, in short: its colour and the values and links of its nodes."""
+    if material is None:
+        return None
+    rows = [("diffuse", _protect_plain(material.diffuse_color))]
+    tree = getattr(material, "node_tree", None)
+    if tree is not None:
+        for node in tree.nodes:
+            rows.append((node.name, node.bl_idname, [(s.identifier, _protect_plain(s.default_value)) for s in node.inputs if hasattr(s, "default_value")]))
+        rows.append(sorted((l.from_node.name, l.from_socket.identifier, l.to_node.name, l.to_socket.identifier) for l in tree.links))
+    return hashlib.blake2b(json.dumps(rows, sort_keys=True, default=str).encode("utf-8"), digest_size=8).hexdigest()
+
+
+def protect_fingerprint(names):
+    """{name: what the object is like now}, looked up by name (a pointer does not live through an undo): where it is,
+    what it is made of, what hangs on it. Enough to tell that a call changed it, whatever way the call took."""
+    out = {}
+    for name in names:
+        obj = bpy.data.objects.get(name)
+        if obj is None:
+            out[name] = {"exists": False}
+            continue
+        row = {
+            "exists": True, "type": obj.type, "parent": obj.parent.name if obj.parent else None,
+            "collections": sorted(c.name for c in obj.users_collection),
+            "world": [round(x, 5) for line in obj.matrix_world for x in line],
+            "local": [round(x, 5) for x in (*obj.location, *obj.rotation_euler, *obj.rotation_quaternion, *obj.scale)],
+            "modifiers": [(m.name, m.type, _protect_settings(m)) for m in obj.modifiers],
+            "constraints": [(c.name, c.type, _protect_settings(c)) for c in obj.constraints],
+            "slots": [slot.material.name if slot.material else None for slot in obj.material_slots],
+            "materials": [_protect_material(slot.material) for slot in obj.material_slots],
+            "hide": (obj.hide_viewport, obj.hide_render, obj.hide_select),
+            "props": sorted((key, str(_protect_plain(obj[key]))) for key in obj.keys() if key != SENT_AS),
+            "data": obj.data.name if obj.data else None,
+        }
+        if obj.type == "MESH":
+            mesh = obj.data
+            coords = array.array("f", bytes(4 * 3 * len(mesh.vertices)))
+            mesh.vertices.foreach_get("co", coords)
+            row["mesh"] = (len(mesh.vertices), len(mesh.edges), len(mesh.polygons), hashlib.blake2b(coords.tobytes(), digest_size=8).hexdigest())
+            row["shape_keys"] = [(k.name, round(k.value, 5)) for k in mesh.shape_keys.key_blocks] if mesh.shape_keys else []
+        out[name] = row
+    return out
+
+
+def _protect_changed(before, now):
+    """["Hero (자리, 모디파이어)", ...]: the protected objects that are no longer as they were, and in what."""
+    found = []
+    for name, was in before.items():
+        row = now.get(name, {"exists": False})
+        if was.get("exists") and not row.get("exists"):  # by that name: it may live on under another
+            found.append(f"{name} (없어지거나 이름이 바뀜)")
+            continue
+        fields = sorted({PROTECT_FIELDS.get(key, key) for key in set(was) | set(row) if was.get(key) != row.get(key)})
+        if fields:
+            found.append(f"{name} ({', '.join(fields)})")
+    return found
+
+
+def protection_state(before=False):
+    """For the subagent's guard hook, through MCP for Blender's execute_code just before a call: this window's rules,
+    and the objects they protect by name ({"file", "rules", "covered": {name: rule}, "pending"}). before: the call
+    may change things, so the protected objects are noted as they are now, for protection_after to compare.
+    pending: what protection_after would have said of the call before, when nobody asked."""
+    # Nobody asked after the last call that might have changed things (the hook that does was not run): looked at
+    # now, before the next one goes ahead. What is found is told with this answer, and that call is refused.
+    pending = protection_after() if before and _protect["base"] else None
+    rules = protection_rules()
+    covered = protected_objects(rules)
+    if before:
+        if covered:
+            bpy.context.view_layer.update()  # where things are is worked out lazily: have it settled before the call
+        _protect["base"] = protect_fingerprint(covered) if covered else None
+    told = dict(list(covered.items())[:PROTECT_COVERED])
+    return {"file": bpy.data.filepath, "rules": {key: rules[key] for key in ("window", "paths", "objects", "actions", "problems")},
+            "covered": told, "pending": pending or None}
+
+
+def protection_after():
+    """For the guard hook, just after a call that may have changed things: {} when every protected object is as it
+    was before the call. Else what the request did in this window is taken back with its undo point (the newest one:
+    Claude Hand sets one per request, the hook one per call without it), and the answer says so: {"changed": [...],
+    "undone": whether all is as before again, "detail": why not}."""
+    base, _protect["base"] = _protect["base"], None
+    if not base:
+        return {}
+    bpy.context.view_layer.update()
+    changed = _protect_changed(base, protect_fingerprint(base))
+    if not changed:
+        return {}
+    if not _marks:
+        return {"changed": changed, "undone": False, "detail": "이 요청의 되돌리기 지점이 없음"}
+    mark = _marks[-1]
+    done, text = _undo_newest()
+    if done and mark.get("request"):  # so no other panel still offers this window along with that request
+        window, pin = window_identity()
+        post_in_background("/v1/undone", {"app": "blender", "window": window, "pin": pin, "request": mark["request"]}, "undone_sent")
+    left = _protect_changed(base, protect_fingerprint(base)) if done else changed
+    if done and not left:
+        return {"changed": changed, "undone": True}
+    return {"changed": changed, "undone": False,
+            "detail": text if not done else "실행 취소로 돌아가지 않은 것이 남음: " + ", ".join(left[:3])}
+
+
+def _protect_write(lasting, change):
+    """Change one rules file: change(data) sets the dict that is written. Returns what stands in the way, or None."""
+    path = _protect_paths()[0 if lasting else 1]
+    if not path:
+        return "저장한 적 없는 파일이라 계속 두는 규칙은 적을 곳이 없습니다. '이번만'을 켜고 다시 누르거나, 파일을 저장한 뒤 누르세요."
+    try:
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                data = json.load(f)
+        except OSError:
+            data = {}
+        if not isinstance(data, dict):
+            raise ValueError("규칙 파일이 아닌 것이 그 자리에 있습니다")
+        data.setdefault("version", 1)
+        change(data)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+    except (OSError, ValueError) as exc:
+        return f"규칙을 적지 못했습니다: {exc}"
+    _redraw()
+    return None
+
+
+def protect_add(kind, value, lasting=True):
+    """The user adds a rule (a button of the panel): kind "window" (value "look" or "locked"), "object" (a name, a
+    hierarchy path or "collection:<name>") or "action" ("save_file"). Returns what stands in the way, or None."""
+    value = str(value or "").strip()
+    if kind == "window":
+        if value not in PROTECT_MODES[1:]:
+            return f"'{value}'은(는) 창 규칙이 아닙니다."
+        return _protect_write(lasting, lambda data: data.update(window=value))
+    if kind == "action" and value not in PROTECT_ACTIONS:
+        return f"'{value}'은(는) Blender에서 막을 수 있는 동작이 아닙니다."
+    if kind not in ("object", "action") or not value:
+        return "더할 규칙이 없습니다."
+
+    def add(data):
+        rows = data.get(kind + "s") if isinstance(data.get(kind + "s"), list) else []
+        data[kind + "s"] = rows + ([value] if value not in rows else [])
+    return _protect_write(lasting, add)
+
+
+def protect_remove(kind, value, lasting=True):
+    """The user takes a rule away again (the panel's [풀기]): only this, never anything Claude can call."""
+    if kind == "window":
+        return _protect_write(lasting, lambda data: data.update(window="open"))
+
+    def remove(data):
+        rows = data.get(kind + "s") if isinstance(data.get(kind + "s"), list) else []
+        data[kind + "s"] = [row for row in rows if row != value]
+    return _protect_write(lasting, remove)
+
+
+def protect_row_label(kind, value, lasting):
+    what = (f"이 창: {PROTECT_MODE_WORDS.get(value, value)}" if kind == "window" else
+            f"금지: {PROTECT_ACTIONS.get(value, value)}" if kind == "action" else
+            f"컬렉션 {value.split(':', 1)[1].strip()}" if value.lower().startswith("collection:") else f"오브젝트 {value}")
+    return what + ("" if lasting else " (이번만)")
 
 
 # --------------------------------------------------------------------------- transfers (what the subagent calls)
@@ -2191,7 +2523,7 @@ def apply_event(event, payload):
     elif event == "undo_sent":
         if not payload.get("ok"):
             _notice("다른 창은 되돌리지 못했습니다: " + str(payload.get("error", "Claude Hand가 받지 않았습니다")))
-    elif event == "undone_sent":
+    elif event in ("undone_sent", "protect_sent"):
         pass  # telling the channel is a nicety
     elif event == "follow_listed":
         _follow_safely(_follow_listed, payload)
@@ -2218,6 +2550,11 @@ def apply_event(event, payload):
             if item.get("kind") == "permission_resolved":
                 for entry in _entries:
                     if entry.get("kind") == "permission" and entry.get("request_id") == item.get("request_id"):
+                        entry["behavior"] = item.get("behavior")
+                continue
+            if item.get("kind") == "protect_resolved":
+                for entry in _entries:
+                    if entry.get("kind") == "protect_offer" and entry.get("offer_id") == item.get("offer_id"):
                         entry["behavior"] = item.get("behavior")
                 continue
             if item.get("kind") == "reply" and item.get("origin") != "desktop":
@@ -2401,6 +2738,121 @@ class CLAUDEHAND_OT_stop(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def protect_offer_answer(offer_id, behavior):
+    """[추가] or [취소] under a rule Claude proposed in this chat (the supervisor's propose_protection): the rule
+    is written here, by the user's press, and the channel is told how it went. Returns what stands in the way."""
+    entry = next((e for e in _entries if e.get("kind") == "protect_offer" and str(e.get("offer_id")) == str(offer_id)), None)
+    if entry is None or entry.get("behavior"):
+        return "이미 답한 제안입니다."
+    if behavior == "added":
+        rule = entry.get("rule") if isinstance(entry.get("rule"), dict) else {}
+        problem = protect_add(str(rule.get("kind") or ""), rule.get("value"), rule.get("lasting") is not False)
+        if problem:
+            return problem
+    entry["behavior"] = behavior
+    window, pin = window_identity()
+    post_in_background("/v1/protect", {"app": "blender", "window": window, "pin": pin, "offer_id": str(offer_id), "behavior": behavior},
+                       "protect_sent")
+    _redraw()
+    return None
+
+
+class CLAUDEHAND_OT_protect_offer(bpy.types.Operator):
+    bl_idname = "claude_hand.protect_offer"
+    bl_label = "보호 규칙 제안에 답하기"
+    bl_description = "Add the protection rule Claude proposed to this window's rules, or leave it"
+
+    offer_id: bpy.props.StringProperty()
+    behavior: bpy.props.StringProperty()
+
+    def execute(self, context):
+        problem = protect_offer_answer(self.offer_id, self.behavior)
+        if problem:
+            self.report({"WARNING"}, problem)
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class CLAUDEHAND_OT_protect_add(bpy.types.Operator):
+    bl_idname = "claude_hand.protect_add"
+    bl_label = "보호 규칙 더하기"
+    bl_description = ("Add a protection rule for this window: Claude's calls that would change what it covers are refused, "
+                      "and a change that gets through is taken back")
+
+    kind: bpy.props.StringProperty()   # "selected" (the selected objects), "window", "object", "action"
+    value: bpy.props.StringProperty()
+
+    def execute(self, context):
+        lasting = not context.window_manager.claude_hand_protect_session
+        values = selected_roots() if self.kind == "selected" else [self.value]
+        if not values:
+            self.report({"WARNING"}, "보호할 오브젝트를 먼저 고르세요.")
+            return {"CANCELLED"}
+        for value in values:
+            problem = protect_add("object" if self.kind == "selected" else self.kind, value, lasting)
+            if problem:
+                self.report({"WARNING"}, problem)
+                return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class CLAUDEHAND_OT_protect_remove(bpy.types.Operator):
+    bl_idname = "claude_hand.protect_remove"
+    bl_label = "풀기"
+    bl_description = "Take this protection rule away again: from then on Claude may change what it covered"
+
+    kind: bpy.props.StringProperty()
+    value: bpy.props.StringProperty()
+    lasting: bpy.props.BoolProperty(default=True)
+
+    def invoke(self, context, event):
+        message = f"'{protect_row_label(self.kind, self.value, self.lasting)}' 규칙을 풉니다. Claude가 다시 바꿀 수 있게 됩니다."
+        try:
+            return context.window_manager.invoke_confirm(self, event, title="보호 규칙 풀기", message=message, confirm_text="풀기")
+        except TypeError:  # Blender before 4.1: no title or message
+            return context.window_manager.invoke_confirm(self, event)
+
+    def execute(self, context):
+        problem = protect_remove(self.kind, self.value, self.lasting)
+        if problem:
+            self.report({"WARNING"}, problem)
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+PROTECT_MODE_LINES = {"open": "Claude가 이 창을 바꿀 수 있습니다. 아래 규칙이 가리키는 것만 빼고요.",
+                      "look": "보기만: Claude는 이 창을 읽기만 합니다.",
+                      "locked": "잠금: Claude는 이 창에서 아무 일도 하지 않습니다."}
+
+
+def draw_protect(layout, width, wm):
+    """This window's protection rules, a line each with its [풀기], and the buttons that add one. Said in words and
+    with the padlock's shape (open or shut), never by a colour."""
+    rules = protection_rules()
+    mode = rules["window"]
+    for i, line in enumerate(wrap(PROTECT_MODE_LINES[mode], width)):
+        layout.label(text=line, icon=("UNLOCKED" if mode == "open" else "LOCKED") if i == 0 else "BLANK1")
+    col = layout.column(align=True)
+    for kind, value, lasting in rules["rows"]:
+        row = col.row(align=True)
+        row.label(text=protect_row_label(kind, value, lasting), icon="LOCKED")
+        op = row.operator(CLAUDEHAND_OT_protect_remove.bl_idname, text="풀기")
+        op.kind, op.value, op.lasting = kind, value, lasting
+    for problem in rules["problems"]:
+        for i, line in enumerate(wrap("읽지 못한 규칙 파일(고칠 때까지 Claude의 바꾸는 호출을 막습니다): " + problem, width)[:4]):
+            layout.label(text=line, icon="ERROR" if i == 0 else "BLANK1")
+    layout.prop(wm, "claude_hand_protect_session", text="이번만 (Claude Hand를 끌 때까지)")
+    col = layout.column(align=True)
+    col.operator(CLAUDEHAND_OT_protect_add.bl_idname, text="선택한 오브젝트 보호", icon="LOCKED").kind = "selected"
+    for value, label, icon in (("look", "이 창 보기만", "HIDE_OFF"), ("locked", "이 창 잠금", "LOCKED")):
+        if mode != value:
+            op = col.operator(CLAUDEHAND_OT_protect_add.bl_idname, text=label, icon=icon)
+            op.kind, op.value = "window", value
+    if "save_file" not in rules["actions"]:
+        op = col.operator(CLAUDEHAND_OT_protect_add.bl_idname, text=".blend 저장 금지", icon="FILE_BLEND")
+        op.kind, op.value = "action", "save_file"
+
+
 def _follow_row(index):
     return _follow["rows"][index] if 0 <= index < len(_follow["rows"]) else None
 
@@ -2533,6 +2985,22 @@ class CLAUDEHAND_PT_follow(bpy.types.Panel):
         draw_follow(self.layout, panel_metrics(context))
 
 
+class CLAUDEHAND_PT_protect(bpy.types.Panel):
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Claude Hand"
+    bl_label = "보호"
+    bl_parent_id = "CLAUDEHAND_PT_chat"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw_header(self, context):
+        rules = protection_rules()
+        self.layout.label(text="", icon="LOCKED" if rules["rows"] else "UNLOCKED")
+
+    def draw(self, context):
+        draw_protect(self.layout, panel_metrics(context), context.window_manager)
+
+
 class CLAUDEHAND_PT_chat(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -2578,6 +3046,15 @@ class CLAUDEHAND_PT_chat(bpy.types.Panel):
                     for behavior, label in (("allow", "허용"), ("deny", "거부")):
                         op = row.operator(CLAUDEHAND_OT_permission.bl_idname, text=label)
                         op.request_id = entry.get("request_id", "")
+                        op.behavior = behavior
+            if entry.get("kind") == "protect_offer":
+                if entry.get("behavior"):
+                    col.label(text="→ 규칙에 더함" if entry["behavior"] == "added" else "→ 더하지 않음")
+                else:
+                    row = col.row(align=True)
+                    for behavior, label in (("added", "추가"), ("declined", "취소")):
+                        op = row.operator(CLAUDEHAND_OT_protect_offer.bl_idname, text=label)
+                        op.offer_id = str(entry.get("offer_id", ""))
                         op.behavior = behavior
         if _pending[0] is not None:
             col = box.column(align=True)
@@ -2754,6 +3231,9 @@ def entry_rows(entry, width):
         return [(line, first if i == 0 else "NONE") for i, line in enumerate(lines)], 0
     if kind == "image":  # the picture itself is drawn after these rows (draw_image)
         return [(entry.get("caption") or "결과 미리보기", "IMAGE_DATA")], 0
+    if kind == "protect_offer":  # a rule Claude proposes: it holds only once the user presses [추가] under it
+        lines = wrap(entry_text(entry), width)[:ENTRY_LINES]
+        return [("Claude가 제안한 보호 규칙", "LOCKED")] + [(line, "NONE") for line in lines], 0
     rows = []
     if kind == "reply" and entry.get("origin") == "desktop":
         rows.append(("데스크톱 앱에서", "WINDOW"))
@@ -2778,7 +3258,7 @@ def visible_entries(width):
         if full:
             continue
         rows, hidden = entry_rows(entry, width)
-        cost = len(rows) + (1 if hidden else 0) + (1 if entry.get("kind") == "permission" else 0) + \
+        cost = len(rows) + (1 if hidden else 0) + (1 if entry.get("kind") in ("permission", "protect_offer") else 0) + \
             (IMAGE_LINES if entry.get("kind") == "image" else 0)
         if shown and (used + cost > PANEL_LINES or len(shown) >= VISIBLE_ENTRIES):
             full = True  # older entries stay folded, even short ones, so the history has no gaps
@@ -2792,7 +3272,8 @@ def visible_entries(width):
 CLASSES = (CLAUDEHAND_OT_send, CLAUDEHAND_OT_start, CLAUDEHAND_OT_permission, CLAUDEHAND_OT_copy, CLAUDEHAND_OT_undo,
            CLAUDEHAND_OT_native_input, CLAUDEHAND_OT_open_image, CLAUDEHAND_OT_stop, CLAUDEHAND_OT_follow_toggle,
            CLAUDEHAND_OT_follow_relink, CLAUDEHAND_OT_follow_adopt, CLAUDEHAND_OT_follow_send, CLAUDEHAND_OT_follow_look,
-           CLAUDEHAND_PT_chat, CLAUDEHAND_PT_follow)
+           CLAUDEHAND_OT_protect_offer, CLAUDEHAND_OT_protect_add, CLAUDEHAND_OT_protect_remove,
+           CLAUDEHAND_PT_chat, CLAUDEHAND_PT_follow, CLAUDEHAND_PT_protect)
 HANDLERS = (("load_post", _forget_undo_points), ("load_post", _on_loaded), ("save_post", _on_saved),
             ("depsgraph_update_post", _on_touched))
 
@@ -2804,6 +3285,8 @@ def register():
         name="메시지", description="Enter로 보냅니다", update=_on_input_update)
     bpy.types.WindowManager.claude_hand_chat_context = bpy.props.BoolProperty(
         name="선택 항목 함께 보내기", default=True)
+    bpy.types.WindowManager.claude_hand_protect_session = bpy.props.BoolProperty(
+        name="이번만", description="새로 더하는 보호 규칙을 Claude Hand를 끌 때까지만 둡니다(끄면 파일 옆에 적어 계속 둡니다)", default=False)
     # Defined here (not a custom property) so the Properties editor does not list it.
     setattr(bpy.types.Scene, UNDO_PROP, bpy.props.StringProperty(options={"HIDDEN"}))
     for name, handler in HANDLERS:
@@ -2834,6 +3317,7 @@ def unregister():
     delattr(bpy.types.Scene, UNDO_PROP)
     del bpy.types.WindowManager.claude_hand_chat_input
     del bpy.types.WindowManager.claude_hand_chat_context
+    del bpy.types.WindowManager.claude_hand_protect_session
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)
 

@@ -83,7 +83,8 @@ def supervisor_settings(runner: str) -> dict:
 
 
 def hook_block(command: str) -> list[str]:
-    """PreToolUse: the guard decides on every Unity/Blender call. Stop: the same script tells the chat channel the
+    """PreToolUse: the guard decides on every Unity/Blender call. PostToolUse: the same script asks the window what
+    its protection rules found once the call has run (handlib/protect.py). Stop: it tells the chat channel the
     subagent finished its turn (Claude Code runs a subagent's Stop hook when that subagent stops)."""
     return [
         "hooks:",
@@ -92,6 +93,11 @@ def hook_block(command: str) -> list[str]:
         "      hooks:",
         "        - type: command",
         "          command: " + q(command),
+        "  PostToolUse:",
+        '    - matcher: "mcp__.*"',
+        "      hooks:",
+        "        - type: command",
+        "          command: " + q(command + " --after"),
         "  Stop:",
         "    - hooks:",
         "        - type: command",

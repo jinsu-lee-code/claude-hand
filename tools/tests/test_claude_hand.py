@@ -183,6 +183,8 @@ class GenerationTests(unittest.TestCase):
         self.assertIn("guard.py\\\" --pin \\\"MyGame@aaaa1111\\\" --server unity_mygame --transport stdio --app unity", front)
         self.assertIn("  Stop:\n    - hooks:\n        - type: command\n", front)
         self.assertIn('--transport stdio --app unity --stop"', front)  # the same script tells the channel the subagent stopped
+        self.assertIn('  PostToolUse:\n    - matcher: "mcp__.*"\n      hooks:\n        - type: command\n', front)
+        self.assertIn('--transport stdio --app unity --after"', front)  # ... and asks the window what its protection rules found
         self.assertIn(handlib.constants.GENERATED_MARKER, text)
         self.assertNotIn("set_active_instance(instance=", text)
 
@@ -390,7 +392,7 @@ class BlenderTests(unittest.TestCase):
         addon = ast.parse(handlib.constants.CHAT_ADDON_SOURCE.read_text(encoding="utf-8"))
         defined = {node.name for node in addon.body if isinstance(node, ast.FunctionDef)}
         called = set(re.findall(r"claude_hand_chat\.(\w+)\(", prompt))
-        self.assertEqual(called, {"undo_last_request", "export_blend", "import_blend", "export_fbx", "import_model"})
+        self.assertEqual(called, {"undo_last_request", "export_blend", "import_blend", "export_fbx", "import_model", "protection_rules"})
         self.assertLessEqual(called, defined)
         self.assertNotIn("```python", prompt)
 

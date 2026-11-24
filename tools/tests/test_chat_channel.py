@@ -258,7 +258,7 @@ class McpTests(unittest.TestCase):
         self.assertEqual(init["protocolVersion"], "2025-06-18")
         self.assertEqual(init["capabilities"]["experimental"], {"claude/channel": {}, "claude/channel/permission": {}})
         self.assertIn("`reply` 도구로 같은 `chat_id`에", init["instructions"])
-        self.assertEqual([t["name"] for t in replies[1]["result"]["tools"]], ["reply", "current_context", "undo_request"])
+        self.assertEqual([t["name"] for t in replies[1]["result"]["tools"]], ["reply", "current_context", "undo_request", "propose_protection"])
         self.assertEqual(replies[2], {"jsonrpc": "2.0", "id": 3, "result": {}})
         self.assertEqual(replies[3]["error"]["code"], -32601)
 
@@ -311,6 +311,143 @@ class McpTests(unittest.TestCase):
         # A supervisor that still leaves it out is not made to send every answer twice for ever.
         self.assertEqual(say(), {"content": [{"type": "text", "text": "sent"}]})
         self.assertNotIn("working", mcp.hub.logs["unity-mygame"][-1])
+
+
+class ProtectionTests(unittest.TestCase):
+    """Protection rules as the channel has to do with them: it writes none. A rule the supervisor proposes is shown in
+    the window's panel, where the user's press writes it; what the guard hook stopped is said in the panels; a
+    locked window is handed no work."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.project = root / "MyGame"
+        (self.project / "ClaudeHand").mkdir(parents=True)
+        unity = handlib.discovery.Instance(name="MyGame", hash="aaaa1111", path=str(self.project))
+        blender = handlib.discovery.BlenderInstance(port=9877, filepath=str(root / "props.blend"))
+        files = handlib.agents.build_agent_files([unity], handlib.discovery.ServerConfig(transport="stdio"), [blender], None, "uv run")
+        handlib.agents.write_agent_files(files, root / "agents")
+        self.mcp = cc.StdioMcp(io.StringIO(""), io.StringIO(), root / "agents")
+        self.hub = self.mcp.hub
+        self.hub.initialized = True
+        self.hub.home = root / "home"
+        self.logged = []
+        self.hub.events = lambda event, **fields: self.logged.append((event, fields))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def rules(self, **rules):
+        (self.project / "ClaudeHand" / "protect.json").write_text(json.dumps({"version": 1, **rules}), encoding="utf-8")
+
+    def propose(self, **arguments):
+        return self.mcp.call_tool({"name": "propose_protection", "arguments": arguments})
+
+    def items(self, chat_id):
+        return [{k: v for k, v in item.items() if k not in ("seq", "ts")} for item in self.hub.logs.get(chat_id, [])]
+
+    def test_a_proposed_rule_is_shown_in_the_windows_panel_and_is_no_rule_yet(self):
+        answer = self.propose(chat_id="blender-props", kind="object", value="Hero", lasting=True, why="'Hero는 건드리지 마'라고 하셔서")
+        self.assertNotIn("isError", answer)
+        self.assertIn("not a rule yet", answer["content"][0]["text"])
+        offer, = self.items("blender-props")
+        self.assertEqual((offer["kind"], offer["rule"]), ("protect_offer", {"kind": "object", "value": "Hero", "lasting": True}))
+        self.assertEqual(offer["text"], "오브젝트 'Hero' 보호(바꾸기 · 지우기 금지) — 계속\n'Hero는 건드리지 마'라고 하셔서")
+        self.assertFalse((Path(self.tmp.name) / "props.claude-hand.protect.json").exists())  # the channel writes no rule
+        self.assertTrue(self.hub.protection("blender-props").empty())
+        self.propose(chat_id="unity-mygame", kind="window", value="look", lasting=False)
+        self.assertEqual(self.items("unity-mygame")[0]["text"], "이 창을 보기만 하기(읽기만 하고 바꾸지 않음) — 이번만(Claude Hand를 끌 때까지)")
+        self.assertEqual([fields["text"] for event, fields in self.logged if event == "protect"],
+                         ["제안: 오브젝트 'Hero' 보호(바꾸기 · 지우기 금지) — 계속", "제안: 이 창을 보기만 하기(읽기만 하고 바꾸지 않음) — 이번만(Claude Hand를 끌 때까지)"])
+
+    def test_a_proposal_that_makes_no_sense_is_sent_back(self):
+        for arguments, said in (({"chat_id": "nope", "kind": "object", "value": "Hero"}, "Unknown chat_id"),
+                                ({"chat_id": "blender-props", "kind": "path", "value": "Assets/Art/**"}, "Paths are for Unity"),
+                                ({"chat_id": "blender-props", "kind": "action", "value": "play_mode"}, "save_file"),
+                                ({"chat_id": "unity-mygame", "kind": "action", "value": "save_file"}, "save_scene, delete_asset, play_mode"),
+                                ({"chat_id": "unity-mygame", "kind": "window", "value": "open"}, "'look' or 'locked'"),
+                                ({"chat_id": "unity-mygame", "kind": "path", "value": "Packages/x"}, "starts with Assets/"),
+                                ({"chat_id": "unity-mygame", "kind": "object", "value": "collection:Rig"}, "Blender windows"),
+                                ({"chat_id": "unity-mygame", "kind": "unlock", "value": "Player"}, "kind is one of")):
+            answer = self.propose(lasting=True, **arguments)
+            self.assertTrue(answer.get("isError"), arguments)
+            self.assertIn(said, answer["content"][0]["text"], arguments)
+        self.assertEqual((self.hub.logs, self.hub.offers), ({}, {}))
+
+    def test_what_the_user_pressed_reaches_the_other_panels_and_the_supervisor(self):
+        self.propose(chat_id="unity-mygame", kind="path", value="Assets/Art/**", lasting=True)
+        offer_id = self.items("unity-mygame")[0]["offer_id"]
+        self.assertFalse(self.hub.protection_verdict(offer_id, "maybe"))
+        self.assertTrue(self.hub.protection_verdict(offer_id, "added"))
+        self.assertFalse(self.hub.protection_verdict(offer_id, "added"))  # once
+        self.assertEqual(self.items("unity-mygame")[-1], {"kind": "protect_resolved", "offer_id": offer_id, "behavior": "added"})
+        emitted = []
+        self.hub.emit = emitted.append
+        self.hub.post_user_message("unity", "MyGame", "이제 큐브 만들어줘")
+        self.assertIn("[사용자가 제안된 보호 규칙을 추가했음: 경로 'Assets/Art/**' 보호(고치기 · 지우기 · 옮기기 금지) — 계속]",
+                      emitted[-1]["params"]["content"])
+
+    def test_what_the_guard_stopped_is_said_in_the_panels(self):
+        self.assertIsNone(self.hub.protected("unity", "Other@ffff0000", "manage_asset", "보호 규칙이 막았어요: x"))
+        asked = self.hub.post_user_message("blender", "props", "이걸 Unity로 보내서 Hero 자리에 놓아줘", pin="props@9877")
+        request = next(i["request"] for i in self.hub.logs["blender-props"] if i["kind"] == "user")
+        self.hub.assign("unity-mygame", request)
+        self.assertEqual(asked["chat_id"], "blender-props")
+        told = self.hub.protected("unity", "MyGame@aaaa1111", "mcp__unity_mygame__manage_gameobject",
+                                  "보호 규칙이 막았어요: 보호 오브젝트 'Hero' (manage_gameobject: Hero)", "aaa")
+        self.assertEqual(told, {"chat_id": "unity-mygame"})
+        self.assertEqual(self.items("unity-mygame")[-1], {"kind": "notice", "alert": True,
+                                                         "text": "보호 규칙이 막았어요: 보호 오브젝트 'Hero' (manage_gameobject: Hero)"})
+        self.assertEqual(self.items("blender-props")[-1]["text"],  # where it was asked, with the window's name
+                         "MyGame (Unity): 보호 규칙이 막았어요: 보호 오브젝트 'Hero' (manage_gameobject: Hero)")
+        event, fields = self.logged[-1]
+        self.assertEqual((event, fields["request"], fields["chat_id"], fields["reason"]),
+                         ("protected", request, "unity-mygame", "보호 규칙이 막았어요: 보호 오브젝트 'Hero' (manage_gameobject: Hero)"))
+
+    def test_a_locked_window_is_handed_no_work(self):
+        self.hub.post_user_message("unity", "MyGame", "큐브 만들어줘")
+        request = next(i["request"] for i in self.hub.logs["unity-mygame"] if i["kind"] == "user")
+        self.rules(window="look")
+        self.assertEqual(self.hub.assign("unity-mygame", request).get("locked"), None)  # looking there is work too
+        self.rules(window="locked")
+        self.assertEqual(self.hub.assign("unity-mygame", request), {"ours": True, "chat_id": "unity-mygame", "locked": True})
+        self.assertEqual(self.logged[-1], ("refused", {"request": request, "chat_id": "unity-mygame", "tool": "(맡기기)",
+                                                       "reason": "사용자가 잠근 창 (보호 규칙: 잠금)"}))
+        session = self.hub.home / "protect" / "blender-9877.json"  # this run's rules count as well
+        session.parent.mkdir(parents=True)
+        session.write_text(json.dumps({"window": "locked"}), encoding="utf-8")
+        self.assertTrue(self.hub.assign("blender-props", "").get("locked"))
+
+    def test_the_supervisor_sees_each_windows_rules(self):
+        self.rules(window="look", paths=["Assets/Art/**"], actions=["play_mode"])
+        self.hub.update_context("unity", "MyGame", "", {"scene": "Main"})
+        self.hub.update_context("blender", "props", "props@9877", {"file": "props.blend"})
+        windows = {w["chat_id"]: w for w in self.hub.current_context()["windows"]}
+        self.assertEqual(windows["unity-mygame"]["protection"], {"window": "look", "paths": ["Assets/Art/**"], "actions": ["play_mode"]})
+        self.assertNotIn("protection", windows["blender-props"])
+
+    def test_over_http(self):
+        httpd = cc.start_http(self.hub, "t", port=18840)
+        try:
+            def post(path, body):
+                request = urllib.request.Request(f"http://127.0.0.1:{httpd.server_address[1]}{path}", data=json.dumps(body).encode("utf-8"),
+                                                 method="POST", headers={"X-Claude-Hand-Token": "t", "Content-Type": "application/json"})
+                try:
+                    with urllib.request.urlopen(request, timeout=10) as response:
+                        return response.status, json.loads(response.read())
+                except urllib.error.HTTPError as error:
+                    with error:
+                        return error.code, json.loads(error.read())
+            self.propose(chat_id="unity-mygame", kind="object", value="Player", lasting=True)
+            offer_id = self.items("unity-mygame")[0]["offer_id"]
+            self.assertEqual(post("/v1/protect", {"app": "unity", "window": "MyGame", "offer_id": offer_id, "behavior": "declined"}), (200, {"ok": True}))
+            self.assertEqual(post("/v1/protect", {"offer_id": offer_id, "behavior": "declined"}), (409, {"ok": False}))
+            self.assertEqual(post("/v1/protected", {"app": "unity", "pin": "MyGame@aaaa1111", "tool": "x", "text": "보호 규칙이 막았어요: y"}),
+                             (200, {"ok": True, "chat_id": "unity-mygame"}))
+            self.assertEqual(post("/v1/protected", {"app": "unity", "pin": "Other@ffff0000", "text": "y"})[0], 404)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
 
 
 class EndToEndTests(unittest.TestCase):

@@ -80,7 +80,12 @@ namespace ClaudeHand.Editor
             public bool Cost;         // "notice" from the channel: what the request took, a quiet line under its result
             public string Key;        // "notice" from this editor (Tell): what it is about; the same again changes this line
             public int Count;         // ... and how often it was told
+            public string OfferId;    // "protect_offer": a protection rule Claude proposed; Behavior says how the user answered
+            public JObject Rule;      // ... {kind, value, lasting}
         }
+
+        [SerializeField] private bool _showProtect;
+        [SerializeField] private bool _protectSession;  // new rules are for this run of Claude Hand only ("이번만")
 
         private readonly Dictionary<string, Texture2D> _images = new Dictionary<string, Texture2D>();  // by file; null = gone
 
@@ -140,6 +145,7 @@ namespace ClaudeHand.Editor
             _polling = new CancellationTokenSource();
             PollLoop(_polling.Token);
             ChCheckpoint.Changed += Repaint;
+            ChProtect.Changed += Repaint;
         }
 
         private void OnDisable()
@@ -147,6 +153,7 @@ namespace ClaudeHand.Editor
             _polling?.Cancel();
             EditorApplication.update -= RepaintWhileBusy;
             ChCheckpoint.Changed -= Repaint;
+            ChProtect.Changed -= Repaint;
             foreach (var texture in _images.Values.Where(t => t != null)) DestroyImmediate(texture);
             _images.Clear();
         }
@@ -316,6 +323,12 @@ namespace ClaudeHand.Editor
                     if (match != null) match.Behavior = item.Value<string>("behavior");
                     continue;
                 }
+                if (kind == "protect_resolved")
+                {
+                    var proposed = _entries.FirstOrDefault(e => e.Kind == "protect_offer" && e.OfferId == item.Value<string>("offer_id"));
+                    if (proposed != null) proposed.Behavior = item.Value<string>("behavior");
+                    continue;
+                }
                 if (kind == "reply" && item.Value<string>("origin") != "desktop") _lastUserMessageTime = -1;
                 _entries.Add(new Entry
                 {
@@ -331,6 +344,8 @@ namespace ClaudeHand.Editor
                     Caption = item.Value<string>("caption"),
                     Alert = item.Value<bool?>("alert") ?? false,
                     Cost = item.Value<bool?>("cost") ?? false,
+                    OfferId = item.Value<string>("offer_id"),
+                    Rule = item["rule"] as JObject,
                 });
             }
             if (_entries.Count > KeptEntries) _entries.RemoveRange(0, _entries.Count - KeptEntries);
@@ -618,6 +633,9 @@ namespace ClaudeHand.Editor
                     case "image":
                         DrawImage(entry);
                         break;
+                    case "protect_offer":
+                        DrawOffer(entry);
+                        break;
                 }
                 GUILayout.Space(6);
             }
@@ -640,6 +658,7 @@ namespace ClaudeHand.Editor
                 _followNewest = _scroll.y + GUILayoutUtility.GetLastRect().height >= _contentHeight - 30f;
             }
             DrawOthers();
+            DrawProtect();
             DrawProgress();
             DrawUndo();
 
@@ -891,6 +910,141 @@ namespace ClaudeHand.Editor
 
         private static string Shorten(string text, int max) =>
             string.IsNullOrEmpty(text) || text.Length <= max ? text ?? string.Empty : text.Substring(0, max) + "…";
+
+        // ------------------------------------------------------------------ protection rules (ChProtect)
+
+        private static readonly Dictionary<string, string> ProtectModeLines = new Dictionary<string, string>
+        {
+            { "open", "Claude가 이 프로젝트를 바꿀 수 있습니다. 아래 규칙이 가리키는 것만 빼고요." },
+            { "look", "보기만: Claude는 이 프로젝트를 읽기만 합니다." },
+            { "locked", "잠금: Claude는 이 프로젝트에서 아무 일도 하지 않습니다." },
+        };
+
+        /// <summary>
+        /// This project's protection rules, a line each with its [풀기], and the buttons that add one. Whether there
+        /// are any is said in words in the title ([잠김], [열림]), never by a colour.
+        /// </summary>
+        private void DrawProtect()
+        {
+            var rules = ChProtect.Current;
+            var title = rules.rows.Count == 0 ? "보호 [열림] 규칙 없음"
+                : $"보호 [잠김] {(rules.window != "open" ? ChProtect.ModeWords[rules.window] + " · " : "")}규칙 {rules.rows.Count}개";
+            if (rules.problems.Count > 0) title += " · 읽지 못한 파일 있음";
+            _showProtect = EditorGUILayout.Foldout(_showProtect, title, true);
+            if (!_showProtect) return;
+            EditorGUILayout.LabelField(ProtectModeLines[rules.window], EditorStyles.wordWrappedMiniLabel);
+            foreach (var row in rules.rows)
+            {
+                GUILayout.BeginHorizontal();
+                EditorGUILayout.LabelField(ChProtect.Label(row), EditorStyles.miniLabel);
+                bool loosen = GUILayout.Button("풀기", EditorStyles.miniButton, GUILayout.Width(44));
+                GUILayout.EndHorizontal();
+                if (!loosen) continue;
+                if (EditorUtility.DisplayDialog("보호 규칙 풀기", $"'{ChProtect.Label(row)}' 규칙을 풉니다. Claude가 다시 바꿀 수 있게 됩니다.", "풀기", "취소"))
+                {
+                    var problem = ChProtect.Remove(row.kind, row.value, row.lasting);
+                    if (problem != null) SetStatus(problem);
+                }
+                GUIUtility.ExitGUI();  // the dialog and the change happened mid-frame
+            }
+            foreach (var problem in rules.problems)
+            {
+                EditorGUILayout.HelpBox("읽지 못한 규칙 파일(고칠 때까지 Claude의 바꾸는 호출을 막습니다): " + problem, MessageType.Warning);
+            }
+            _protectSession = EditorGUILayout.ToggleLeft("이번만 (Claude Hand를 끌 때까지)", _protectSession);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("선택한 것 보호", EditorStyles.miniButton)) ProtectSelection();
+            if (rules.window != "look" && GUILayout.Button("이 창 보기만", EditorStyles.miniButton)) AddRule("window", "look");
+            if (rules.window != "locked" && GUILayout.Button("이 창 잠금", EditorStyles.miniButton)) AddRule("window", "locked");
+            var open = ChProtect.ActionWords.Where(a => !rules.actions.Contains(a.Key)).ToList();
+            if (open.Count > 0 && EditorGUILayout.DropdownButton(new GUIContent("동작 금지"), FocusType.Passive, EditorStyles.miniButton))
+            {
+                var menu = new GenericMenu();
+                foreach (var action in open)
+                {
+                    var name = action.Key;
+                    menu.AddItem(new GUIContent(action.Value + " 금지"), false, () => AddRule("action", name));
+                }
+                menu.ShowAsContext();
+            }
+            GUILayout.EndHorizontal();
+        }
+
+        private void AddRule(string kind, string value)
+        {
+            var problem = ChProtect.Add(kind, value, !_protectSession);
+            if (problem != null) SetStatus(problem);
+            Repaint();
+        }
+
+        /// <summary>
+        /// [선택한 것 보호]: the objects selected in the scene (each with all below it) and the assets selected in the
+        /// Project window (a folder with all in it).
+        /// </summary>
+        private void ProtectSelection()
+        {
+            var objects = Selection.gameObjects.Where(go => go.scene.IsValid() && !EditorUtility.IsPersistent(go))
+                .Select(go => ChRefs.HierarchyPath(go.transform) + "/**").Distinct().ToList();
+            var paths = Selection.assetGUIDs.Select(AssetDatabase.GUIDToAssetPath)
+                .Where(path => !string.IsNullOrEmpty(path) && path.StartsWith("Assets/", StringComparison.Ordinal)).Distinct().ToList();
+            if (objects.Count + paths.Count == 0)
+            {
+                SetStatus("보호할 오브젝트(Hierarchy)나 에셋(Project)을 먼저 고르세요.");
+                return;
+            }
+            foreach (var value in objects) AddRule("object", value);
+            foreach (var value in paths) AddRule("path", value);
+        }
+
+        /// <summary>A rule Claude proposed (the supervisor's propose_protection). It holds only once the user presses [추가] here.</summary>
+        private void DrawOffer(Entry entry)
+        {
+            EditorGUILayout.HelpBox("Claude가 제안한 보호 규칙\n" + entry.Text, MessageType.Info);
+            if (entry.Behavior != null)
+            {
+                EditorGUILayout.LabelField(entry.Behavior == "added" ? "→ 규칙에 더함" : "→ 더하지 않음", EditorStyles.miniLabel);
+                return;
+            }
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("추가")) AnswerOffer(entry, "added");
+            if (GUILayout.Button("취소")) AnswerOffer(entry, "declined");
+            GUILayout.EndHorizontal();
+        }
+
+        private void AnswerOffer(Entry entry, string behavior)
+        {
+            if (behavior == "added")
+            {
+                var rule = entry.Rule ?? new JObject();
+                var problem = ChProtect.Add(rule.Value<string>("kind"), rule.Value<string>("value"), rule.Value<bool?>("lasting") ?? true);
+                if (problem != null)
+                {
+                    SetStatus(problem);
+                    return;
+                }
+            }
+            entry.Behavior = behavior;
+            TellChannel("/v1/protect", new { app = "unity", window = ChPaths.ProjectName, offer_id = entry.OfferId, behavior }, null);
+            Repaint();
+        }
+
+        /// <summary>
+        /// ChProtect took a request's work back in this project: so that no other panel still offers this window
+        /// along with that request. Best effort.
+        /// </summary>
+        internal static async void TellUndone(string request)
+        {
+            var server = ReadServer();
+            if (server == null || string.IsNullOrEmpty(request)) return;
+            try
+            {
+                await Call(server, HttpMethod.Post, "/v1/undone", new { app = "unity", window = ChPaths.ProjectName, request }, CancellationToken.None);
+            }
+            catch (Exception)
+            {
+                // a nicety
+            }
+        }
 
         private void DrawPermission(Entry entry)
         {
