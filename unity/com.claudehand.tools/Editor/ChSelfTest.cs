@@ -48,6 +48,17 @@ namespace ClaudeHand.Editor
         private static GameObject _sceneCube;
         private static double _sceneDeadline;
 
+        // ... and the checks of models that follow their .blend end a few ticks later.
+        private const string FollowRequest = "selftest-follow";
+        private const string FollowSource = "selftest/ch_selftest_follow.blend";
+        private static int _followTicks, _followStep;
+        private static string _followPath, _followOne, _followTwo;
+
+        // Serve: how long the editor waits for the Blender that is to send it a model.
+        private const double ServeSeconds = 240;
+        private static string _serveStop;
+        private static double _serveDeadline;
+
         private static void Check(string name, bool ok, string detail = "")
         {
             Checks.Add(new { name, ok, detail });
@@ -328,6 +339,12 @@ namespace ClaudeHand.Editor
                 if (_sceneCube != null) UnityEngine.Object.DestroyImmediate(_sceneCube);
                 FileChecks();
                 RequestChecks();
+                if (FollowChecks())
+                {
+                    _followTicks = _followStep = 0;
+                    EditorApplication.update += FollowTick;
+                    return;
+                }
             }
             catch (Exception ex)
             {
@@ -490,6 +507,201 @@ namespace ClaudeHand.Editor
             Check("by name: no name, nothing undone", !Ok(unnamed), Describe(unnamed));
         }
 
+        /// <summary>
+        /// 11. A model that follows its .blend (ch_model_follow). Told to follow, it is replaced in place by what a save
+        /// in Blender sends, and that is the user's own doing: not the request's that is at work meanwhile, nothing
+        /// placed, nothing made that is not here, nothing done when what comes is there already. Blender's panel
+        /// stands in here as the calls it makes. This sets up; the saves come in ticks of their own (FollowTick), so
+        /// that what a tick tells of them is told of them alone. False when there is nothing to go on with.
+        /// </summary>
+        private static bool FollowChecks()
+        {
+            _followOne = WriteObj("follow_a", 1, FollowSource, "ChSelfTestFollow");
+            _followTwo = WriteObj("follow_b", 2, FollowSource, "ChSelfTestFollow");
+            var came = Call(ChImportModel.HandleCommand, new { manifest = _followOne });
+            _followPath = came["data"]?.Value<string>("asset_path");
+            if (!Ok(came))
+            {
+                Check("follow: set up (a model that came from Blender)", false, Describe(came));
+                return false;
+            }
+
+            var first = Listed(FollowSource);
+            var early = Follow(new { action = "update", manifest = _followTwo });
+            Check("follow: a model does not follow until it is told to",
+                first != null && first.Value<bool>("here") && !first.Value<bool>("follow") && StateOf(early) == "off" &&
+                ChCheckpoint.Same(Path.Combine(ChPaths.ProjectRoot, _followPath), ModelFile(_followOne)),
+                $"{first?.ToString(Formatting.None)} / {Describe(early)}");
+
+            var on = Follow(new { action = "set", asset_path = _followPath, follow = true });
+            var resent = Call(ChImportModel.HandleCommand, new { manifest = _followOne });  // "send it again" through Claude leaves it on
+            var told = Listed(FollowSource);
+            Check("follow: told to, it stays so through a re-send, and the list gives what Blender compares its export with",
+                Ok(on) && Ok(resent) && told != null && told.Value<bool>("follow") && (told.Value<string>("file_hash") ?? "").Length == 64 &&
+                told.Value<int>("instances") == 1, $"{Describe(on)} / {told?.ToString(Formatting.None)}");
+            return true;
+        }
+
+        private static JObject Follow(object parameters) => Call(ChModelFollow.HandleCommand, parameters);
+
+        private static string StateOf(JObject result) => result["data"]?.Value<string>("state");
+
+        /// <summary>The test's model as ch_model_follow lists it for a .blend.</summary>
+        private static JObject Listed(string source)
+        {
+            return (Follow(new { action = "list", source })["data"]?["models"] as JArray)?.OfType<JObject>()
+                .FirstOrDefault(m => m.Value<string>("asset_path") == _followPath);
+        }
+
+        /// <summary>The steps of 11, a few ticks apart: by then the editor has told of what the step before changed.</summary>
+        private static void FollowTick()
+        {
+            if (++_followTicks < 3) return;
+            _followTicks = 0;
+            try
+            {
+                if (_followStep == 0)
+                {
+                    SavedWhileAtWork(_followTwo, true);
+                    _followStep = 1;
+                    return;
+                }
+                if (_followStep == 1)
+                {
+                    StillNothingToUndo("follow update: ticks later the request that was at work still has nothing to undo");
+                    SavedWhileAtWork(WriteObj("follow_e", 1, FollowSource, "ChSelfTestFollow", 2), false);
+                    _followStep = 2;
+                    return;
+                }
+                EditorApplication.update -= FollowTick;
+                StillNothingToUndo("follow update: nor after a model came with other parts than it had");
+                FollowRest();
+            }
+            catch (Exception ex)
+            {
+                EditorApplication.update -= FollowTick;
+                Check("follow: ran to the end", false, ex.ToString());
+            }
+            Finish();
+        }
+
+        /// <summary>The user saves in Blender while a request is at work here.</summary>
+        private static void SavedWhileAtWork(string manifest, bool first)
+        {
+            var file = Path.Combine(ChPaths.ProjectRoot, _followPath);
+            int roots = EditorSceneManager.GetActiveScene().rootCount, marks;
+            JObject updated, again;
+            try
+            {
+                ChCheckpoint.SetWork(FollowRequest);
+                if (first) Call(ChCheckpoint.HandleCommand, new { action = "mark", label = FollowRequest, request = FollowRequest });
+                marks = ChCheckpoint.Marks.Count;
+                updated = Follow(new { action = "update", manifest });
+                again = Follow(new { action = "update", manifest });
+            }
+            finally
+            {
+                ChCheckpoint.SetWork(null);
+            }
+            bool replaced = StateOf(updated) == "updated" && ChCheckpoint.Same(file, ModelFile(manifest)) &&
+                            updated["data"].Value<int>("instance_count") == 1 && EditorSceneManager.GetActiveScene().rootCount == roots;
+            if (!first)
+            {
+                Check("follow update: a model that comes with other parts than it had is replaced as well", replaced, Describe(updated));
+                return;
+            }
+            var mark = ChCheckpoint.Marks.LastOrDefault();
+            var kept = updated["data"]?.Value<string>("previous_file");
+            Check("follow update: the model is replaced in place by what the save sent, and nothing is placed", replaced, Describe(updated));
+            Check("follow update: not the doing of the request at work, and the file it replaced is kept apart from the requests' files",
+                ChCheckpoint.Marks.Count == marks && mark != null && mark.request == FollowRequest && (mark.files == null || mark.files.Count == 0) &&
+                kept != null && File.Exists(kept) && ChPaths.ToPosix(kept).Contains("/replaced/follow/"),
+                $"{mark?.files?.Count} note(s) on '{mark?.request}', kept at {kept}");
+            Check("follow update: what is there already is left alone", StateOf(again) == "unchanged", Describe(again));
+        }
+
+        private static void StillNothingToUndo(string name)
+        {
+            var mark = ChCheckpoint.Marks.LastOrDefault(m => m.request == FollowRequest);
+            Check(name, mark != null && mark.untouched && (mark.files == null || mark.files.Count == 0),
+                mark == null ? "its mark is gone" : $"untouched {mark.untouched}, {mark.files?.Count} note(s)");
+        }
+
+        /// <summary>What a save never does, a .blend that goes on under another name, and a model sent from Blender's panel.</summary>
+        private static void FollowRest()
+        {
+            const string renamed = "selftest/ch_selftest_follow_v2.blend";
+            int models = AssetDatabase.FindAssets("l:ClaudeHandImport").Length;
+            var stranger = Follow(new { action = "update", manifest = WriteObj("follow_c", 1, "selftest/another.blend", "ChSelfTestFollow") });
+            Check("follow update: a model this project does not have is not made",
+                StateOf(stranger) == "missing" && AssetDatabase.FindAssets("l:ClaudeHandImport").Length == models, Describe(stranger));
+
+            var movedList = Follow(new { action = "list", source = renamed, moved_from = FollowSource });
+            var there = (movedList["data"]?["models"] as JArray)?.OfType<JObject>().FirstOrDefault(m => m.Value<string>("asset_path") == _followPath);
+            var old = Follow(new { action = "update", manifest = _followOne });  // the file it was saved from no longer reaches the model
+            var tied = Follow(new { action = "set", asset_path = _followPath, source = FollowSource });
+            var back = Listed(FollowSource);
+            Check("follow: a .blend saved under another name takes its models along, and a model can be tied to another file",
+                Ok(movedList) && there != null && there.Value<bool>("here") && there.Value<bool>("follow") &&
+                movedList["data"]["moved"].Values<string>().Contains(_followPath) && StateOf(old) == "missing" &&
+                Ok(tied) && back != null && back.Value<bool>("here") && back.Value<bool>("follow"),
+                $"{there?.ToString(Formatting.None)} / {Describe(old)} / {Describe(tied)}");
+
+            var sent = WriteObj("follow_d", 1, "selftest/ch_selftest_sent.blend", "ChSelfTestSent");
+            int roots = EditorSceneManager.GetActiveScene().rootCount;
+            JObject refused;
+            try
+            {
+                ChCheckpoint.SetWork(FollowRequest);
+                refused = Follow(new { action = "receive", manifest = sent });
+            }
+            finally
+            {
+                ChCheckpoint.SetWork(null);
+            }
+            var received = Follow(new { action = "receive", manifest = sent });
+            var path = received["data"]?.Value<string>("asset_path");
+            bool offered = (ChCheckpoint.Undoable.LastOrDefault()?.label ?? "").StartsWith("Blender에서 보냄");
+            bool placed = EditorSceneManager.GetActiveScene().rootCount == roots + 1;
+            var undone = Call(ChCheckpoint.HandleCommand, new { action = "undo" });
+            Check("receive: a model sent from Blender's panel comes in following, with an undo point of its own that takes it out again",
+                Ok(received) && received["data"].Value<bool>("follow") && placed && offered && Ok(undone) && path != null &&
+                !File.Exists(Path.Combine(ChPaths.ProjectRoot, path)) && EditorSceneManager.GetActiveScene().rootCount == roots,
+                $"{Describe(received)} / {Describe(undone)}");
+            Check("receive: not while a request is at work here", !Ok(refused) && refused.Value<string>("code") == ChErrors.Conflict, Describe(refused));
+        }
+
+        /// <summary>
+        /// The other half of the self-test's round trip (`claude_hand.py selftest --unity-project`, after Run): this
+        /// editor, without a window but with its bridge open (CLAUDE_HAND_BRIDGE_IN_BATCH=1), stays up while a real
+        /// Blender sends it a model from its panel and then saves, over the same socket as in daily use. It ends when
+        /// the file CLAUDE_HAND_SELFTEST_STOP names appears, or after ServeSeconds, and deletes what came in.
+        ///   Unity -batchmode -projectPath &lt;project&gt; -executeMethod ClaudeHand.Editor.ChSelfTest.Serve
+        /// </summary>
+        public static void Serve()
+        {
+            Checks.Clear();
+            _failed = false;
+            EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
+            _serveStop = Environment.GetEnvironmentVariable("CLAUDE_HAND_SELFTEST_STOP");
+            _serveDeadline = EditorApplication.timeSinceStartup + ServeSeconds;
+            EditorApplication.update += ServeTick;
+        }
+
+        private static void ServeTick()
+        {
+            bool told = !string.IsNullOrEmpty(_serveStop) && File.Exists(_serveStop);
+            if (!told && EditorApplication.timeSinceStartup < _serveDeadline) return;
+            EditorApplication.update -= ServeTick;
+            Check("served until told to stop", told, told ? "" : $"no word within {ServeSeconds} seconds");
+            Finish();
+        }
+
+        private static string ModelFile(string manifest)
+        {
+            return Path.Combine(Path.GetDirectoryName(manifest), JObject.Parse(File.ReadAllText(manifest)).Value<string>("model_file"));
+        }
+
         /// <summary>An asset that an undo took out of the project lies in Library/ClaudeHand/removed, with its .meta.</summary>
         private static bool KeptOutside(string assetPath)
         {
@@ -549,15 +761,21 @@ namespace ClaudeHand.Editor
         }
 
         /// <summary>A stand-in for what Blender's export_fbx leaves in the exchange folder: `quads` squares, one material.</summary>
-        private static string WriteObj(string version, int quads)
+        private static string WriteObj(string version, int quads, string source = "selftest/ch_selftest.blend", string root = "ChSelfTest",
+                                       int parts = 1)
         {
-            var lines = new List<string> { "o ChSelfTest" };
-            for (int q = 0; q < quads; q++)
+            var lines = new List<string>();
+            int vertex = 0;
+            for (int part = 0; part < parts; part++)  // each part an object of its own in the model
             {
-                lines.AddRange(new[] { $"v {q * 2} 0 0", $"v {q * 2 + 1} 0 0", $"v {q * 2 + 1} 1 0", $"v {q * 2} 1 0" });
+                lines.Add(part == 0 ? "o ChSelfTest" : $"o ChSelfTestPart{part + 1}");
+                for (int q = 0; q < quads; q++)
+                {
+                    lines.AddRange(new[] { $"v {q * 2} {part * 2} 0", $"v {q * 2 + 1} {part * 2} 0", $"v {q * 2 + 1} {part * 2 + 1} 0", $"v {q * 2} {part * 2 + 1} 0" });
+                }
+                lines.Add("usemtl ChSelfTestMat");
+                for (int q = 0; q < quads; q++, vertex += 4) lines.Add($"f {vertex + 1} {vertex + 2} {vertex + 3} {vertex + 4}");
             }
-            lines.Add("usemtl ChSelfTestMat");
-            for (int q = 0; q < quads; q++) lines.Add($"f {q * 4 + 1} {q * 4 + 2} {q * 4 + 3} {q * 4 + 4}");
             var id = $"{Name}_{version}";
             File.WriteAllLines(Path.Combine(ChPaths.ExchangeDir, id + ".obj"), lines);
             var manifest = Path.Combine(ChPaths.ExchangeDir, id + ".claudehand.json");
@@ -567,8 +785,8 @@ namespace ClaudeHand.Editor
                 name = Name,
                 transfer_id = id,
                 model_file = id + ".obj",
-                source = "selftest/ch_selftest.blend",
-                roots = new[] { "ChSelfTest" },
+                source,
+                roots = new[] { root },
             }));
             return manifest;
         }

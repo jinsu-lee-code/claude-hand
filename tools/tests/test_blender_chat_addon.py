@@ -4,13 +4,17 @@ Needs Blender's Python module (`pip install bpy`); skipped when it is not import
 """
 
 import base64
+import hashlib
 import importlib.util
 import json
 import os
 import secrets
+import socketserver
 import sys
 import tempfile
+import threading
 import time
+import types
 import unittest
 from pathlib import Path
 
@@ -547,6 +551,514 @@ class TransferTests(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             exec(compile(handlib.install.blender_port_expr(9877), "<port>", "exec"), {"__name__": "__port__"})
         self.assertIn("not enabled", out.getvalue())
+
+    def test_the_same_objects_give_the_same_file_and_the_scene_is_left_alone(self):
+        """Whether Unity has a model already is told by the file. So an export must not depend on when it is made
+        (the FBX holds its time of writing) nor on the Blender run (the exporter numbers what it writes with Python's
+        hash(); that part is checked with separate Blender runs in docs/DESIGN.md, here that it is put back)."""
+        from io_scene_fbx import fbx_utils
+        addon, layer = self.addon, bpy.context.view_layer
+        fbx_utils._keys_to_uuids["theirs"] = 7  # what an export the user started left behind
+        layer.objects.active = bpy.data.objects["Bystander"]
+        bpy.ops.object.mode_set(mode="EDIT")  # the user is in the middle of editing another mesh
+        files = []
+        for _ in range(2):
+            path = self.exchange / f"same_{len(files)}.fbx"
+            self.exchange.mkdir(exist_ok=True)
+            addon._write_fbx([bpy.data.objects["Rock"], bpy.data.objects["Pebble"]], str(path))
+            files.append(path.read_bytes())
+            time.sleep(1.1)  # the clock moves on to the next second
+        self.assertEqual(files[0], files[1])
+        self.assertEqual(({o.name for o in layer.objects if o.select_get()}, layer.objects.active.name, bpy.context.mode),
+                         ({"Bystander"}, "Bystander", "EDIT_MESH"))
+        self.assertEqual((fbx_utils._keys_to_uuids.get("theirs"), "hash" in vars(fbx_utils)), (7, False))  # the exporter is as it was
+        del fbx_utils._keys_to_uuids["theirs"]
+        bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.data.objects["Bystander"].location.x += 1  # not sent: the file is the same
+        addon._write_fbx([bpy.data.objects["Rock"], bpy.data.objects["Pebble"]], str(self.exchange / "same_2.fbx"))
+        self.assertEqual((self.exchange / "same_2.fbx").read_bytes(), files[0])
+        bpy.data.objects["Pebble"].location.x += 0.001  # a millimetre: another file
+        addon._write_fbx([bpy.data.objects["Rock"], bpy.data.objects["Pebble"]], str(self.exchange / "same_3.fbx"))
+        self.assertNotEqual((self.exchange / "same_3.fbx").read_bytes(), files[0])
+        self.assertEqual(self.addon.import_model(str(self.exchange / "same_3.fbx"))["added"], ["Pebble.001", "Rock.001"])  # and it reads back
+
+    def test_an_object_keeps_the_name_it_was_sent_under(self):
+        """Unity knows a model by the names of the objects it was made of. An object that is renamed afterwards still
+        goes to its model; a copy of it, or another object that takes its old name, is something else."""
+        addon, rock = self.addon, bpy.data.objects["Rock"]
+        bpy.ops.wm.save_as_mainfile(filepath=str(Path(self.tmp.name) / "rocks.blend"))
+        roots = lambda sent: json.loads(Path(sent["manifest"]).read_text(encoding="utf-8"))["roots"]
+        self.assertEqual((addon.sent_as(rock), addon.key_of(rock)), ("", "Rock"))
+        self.assertEqual(roots(addon.export_fbx(["Rock"], "rock")), ["Rock"])
+        self.assertEqual((addon.sent_as(rock), addon.sent_as(bpy.data.objects["Pebble"])), ("Rock", ""))  # the ones named, not their children
+        rock.name = "Boulder"
+        self.assertEqual((addon.object_for("Rock"), addon.key_of(rock)), (rock, "Rock"))
+        self.assertEqual(roots(addon.export_fbx(["Boulder"], "boulder")), ["Rock"])  # the same model to Unity
+        copy = rock.copy()  # Shift+D: the mark comes along
+        bpy.context.scene.collection.objects.link(copy)
+        bpy.context.view_layer.update()
+        self.assertIsNone(addon.object_for("Rock"))  # two that were "sent as Rock", neither of that name: not guessed
+        self.assertEqual(roots(addon.export_fbx([copy.name], "copy")), [copy.name])  # sent by name, each is its own model again
+        self.assertEqual((addon.sent_as(copy), addon.object_for("Rock")), (copy.name, rock))
+        stranger = bpy.data.objects.new("Rock", rock.data)  # something new takes the old name
+        bpy.context.scene.collection.objects.link(stranger)
+        bpy.context.view_layer.update()
+        self.assertEqual((addon.object_for("Rock"), addon.key_of(stranger)), (rock, "Rock#2"))
+        self.assertEqual(roots(addon.export_fbx(["Rock"], "rock2")), ["Rock#2"])
+        self.assertEqual(addon.object_for("Rock#2"), stranger)
+        twin = stranger.copy()
+        twin.name = "Rock#2"  # a copy that happens to carry the name of the mark: the named one is it
+        self.assertEqual(addon.object_for("Rock#2"), twin)
+
+
+class FakeUnity:
+    """A Unity editor as Blender's side meets it: the registry file its bridge keeps and the socket behind it
+    (ChBridge.cs: a line of JSON in, a line out), with ch_model_follow doing what ChModelFollow.cs does as far as the
+    add-on can tell: models known by their source and roots, whether each follows, and the file each holds."""
+
+    class Refused(Exception):
+        pass
+
+    def __init__(self, home, name="MyGame", hash_="aaaa1111", tools=("ch_import_model", "ch_model_follow"), pid=4242):
+        self.name, self.hash, self.token = name, hash_, "secret"
+        self.models = {}       # asset path -> {"source", "roots", "follow", "data": the bytes of its file}
+        self.calls = []        # (action, params) of every call that got in, in order
+        self.busy = 0          # compiling: this many calls that would change something are told EDITOR_BUSY
+        self.at_work = False   # a request is at work in the project
+        unity = self
+
+        class Handler(socketserver.StreamRequestHandler):
+            def handle(self):
+                request = json.loads(self.rfile.readline().decode("utf-8"))
+                self.wfile.write((json.dumps(unity.answer(request)) + "\n").encode("utf-8"))
+        self.server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.registry = Path(home) / "unity" / f"{hash_}.json"
+        self.registry.parent.mkdir(parents=True, exist_ok=True)
+        self.registry.write_text(json.dumps({"format": "claude-hand/unity-bridge@1", "name": name, "hash": hash_, "pid": pid,
+                                             "port": self.server.server_address[1], "token": self.token,
+                                             "tools": [{"name": tool} for tool in tools]}), encoding="utf-8")
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.registry.unlink(missing_ok=True)
+
+    def did(self, action):
+        return [params for done, params in self.calls if done == action]
+
+    def came(self, manifest, follow=False):
+        """A model as ch_import_model takes it from Claude's "send it to Unity"."""
+        data = json.loads(Path(manifest).read_text(encoding="utf-8"))
+        path = f"Assets/ClaudeHand/Imports/{data['name']}/{data['name']}.fbx"
+        self.models[path] = {"source": data["source"].replace("\\", "/"), "roots": sorted(data["roots"]), "follow": follow,
+                             "data": (Path(manifest).parent / data["model_file"]).read_bytes()}
+        return path
+
+    def answer(self, request):
+        if request.get("token") != self.token:
+            return {"ok": False, "error": {"code": "UNAUTHORIZED", "message": "Wrong token"}}
+        if request.get("tool") != "ch_model_follow":
+            return {"ok": False, "error": {"code": "NOT_FOUND", "message": "No such tool"}}
+        params = request.get("params") or {}
+        try:
+            data = self.follow(params)
+        except FakeUnity.Refused as no:
+            return {"ok": True, "result": {"success": False, "code": str(no), "error": str(no), "data": {"code": str(no), "message": ""}}}
+        self.calls.append((params.get("action", "list"), params))
+        return {"ok": True, "result": {"success": True, "message": "ok", "data": data}}
+
+    def follow(self, p):
+        action = p.get("action", "list")
+        posix = lambda path: str(path or "").replace("\\", "/")
+        same = lambda one, other: posix(one).lower() == posix(other).lower()
+        if action == "list":
+            moved = [path for path, model in self.models.items() if p.get("moved_from") and same(model["source"], p["moved_from"])]
+            for path in moved:
+                self.models[path]["source"] = posix(p["source"])
+            return {"project": self.name, "moved": moved, "models": [
+                {"asset_path": path, "name": Path(path).stem, "source": model["source"], "roots": model["roots"], "follow": model["follow"],
+                 "here": same(model["source"], p.get("source")), "instances": 1,
+                 "file_hash": hashlib.sha256(model["data"]).hexdigest() if model["follow"] and same(model["source"], p.get("source")) else None}
+                for path, model in self.models.items()]}
+        if self.busy:
+            self.busy -= 1
+            raise FakeUnity.Refused("EDITOR_BUSY")
+        if action == "set":
+            model = self.models[p["asset_path"]]
+            model["follow"] = bool(p["follow"]) if "follow" in p else model["follow"]
+            model["source"] = posix(p["source"]) if p.get("source") else model["source"]
+            return {"asset_path": p["asset_path"], "follow": model["follow"], "source": model["source"]}
+        manifest = json.loads(Path(p["manifest"]).read_text(encoding="utf-8"))
+        data = (Path(p["manifest"]).parent / manifest["model_file"]).read_bytes()
+        found = next((path for path, model in self.models.items()
+                      if same(model["source"], manifest["source"]) and model["roots"] == sorted(manifest["roots"])), None)
+        if action == "update":
+            if found is None:
+                return {"state": "missing"}
+            if not self.models[found]["follow"]:
+                return {"state": "off", "asset_path": found}
+            if self.models[found]["data"] == data:
+                return {"state": "unchanged", "asset_path": found}
+            self.models[found]["data"] = data
+            return {"state": "updated", "asset_path": found, "instance_count": 1}
+        if self.at_work:
+            raise FakeUnity.Refused("CONFLICT")
+        path = found or self.came(p["manifest"])
+        self.models[path].update(follow=True, data=data)
+        return {"state": "received", "asset_path": path, "updated": found is not None, "follow": True}
+
+
+class Layout:
+    """Enough of a UILayout to run a draw function without a window: what it would show, in order."""
+
+    def __init__(self, shown=None):
+        self.shown = [] if shown is None else shown
+
+    def label(self, text="", icon="NONE"):
+        self.shown.append(text)
+
+    def operator(self, idname, text="", icon="NONE", emboss=True):
+        self.shown.append(f"[{text}]")
+        return types.SimpleNamespace()
+
+    def column(self, align=False):
+        return Layout(self.shown)
+
+
+@unittest.skipIf(bpy is None, "Blender's bpy module is not installed")
+class FollowTests(unittest.TestCase):
+    """A model that follows this file: sent again to Unity, straight to its bridge, when the file is saved (and after
+    a 되돌리기, when the file is opened, when a Unity opens). Claude Hand is off throughout: none of it needs Claude."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.home, self.exchange, self.blend = root / "home", root / "exchange", root / "rocks.blend"
+        os.environ["CLAUDE_HAND_HOME"] = str(self.home)
+        os.environ["CLAUDE_HAND_EXCHANGE_DIR"] = str(self.exchange)
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        mesh = bpy.data.meshes.new("RockMesh")
+        mesh.from_pydata([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [], [(0, 1, 2)])
+        mesh.materials.append(bpy.data.materials.new("RockMat"))
+        other = mesh.copy()
+        for name, data, parent in (("Rock", mesh, None), ("Pebble", mesh, "Rock"), ("Bystander", other, None)):
+            obj = bpy.data.objects.new(name, data)
+            obj.parent = bpy.data.objects.get(parent) if parent else None
+            bpy.context.scene.collection.objects.link(obj)
+        bpy.ops.wm.save_as_mainfile(filepath=str(self.blend))
+        self.unity = FakeUnity(self.home)
+        self.others = []
+        spec = importlib.util.spec_from_file_location("claude_hand_chat", ADDON)
+        self.addon = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.addon)
+        self.addon.UNITY_LOOK_SECONDS, self.addon.BUSY_WAIT = 0.0, 0.01
+        self.addon.register()
+        self.settle()
+
+    def tearDown(self):
+        self.addon.unregister()
+        for unity in (self.unity, *self.others):
+            unity.close()
+        os.environ.pop("CLAUDE_HAND_HOME", None)
+        os.environ.pop("CLAUDE_HAND_EXCHANGE_DIR", None)
+        self.tmp.cleanup()
+
+    def settle(self):
+        """Until every look that is due has been made and answered."""
+        addon = self.addon
+        idle = lambda: not addon._follow["busy"] and addon._follow["due"] is None and addon._inbox.empty()
+        self.assertTrue(wait_for(lambda: idle() and (addon.tick() or True) and idle(), addon, 20), addon._follow)
+
+    def sent_by_claude(self, roots=("Rock",), name="rock", follow=True):
+        """As after "send it to Unity" through Claude: exported here, taken in there."""
+        return self.unity.came(self.addon.export_fbx(list(roots), name)["manifest"], follow)
+
+    def save(self):
+        bpy.context.view_layer.update()  # what a tick of the UI does: Blender tells what was changed
+        bpy.ops.wm.save_mainfile()
+        self.settle()
+
+    def notices(self):
+        return [e["text"] for e in self.addon._entries if e.get("kind") == "notice"]
+
+    def test_a_model_that_follows_is_sent_when_the_file_is_saved(self):
+        addon, unity, rock = self.addon, self.unity, bpy.data.objects["Rock"]
+        path = self.sent_by_claude(follow=False)
+        rock.location.x += 1
+        self.save()
+        self.assertEqual((unity.did("update"), [(r["name"], r["project"], r["follow"], r["here"]) for r in addon._follow["rows"]]),
+                         ([], [("rock", "MyGame", False, True)]))  # listed, and left alone: it was not told to follow
+        rock.location.x -= 1
+        self.assertEqual(bpy.ops.claude_hand.follow_toggle(index=0), {"FINISHED"})  # the panel's check box
+        self.settle()
+        self.assertEqual((unity.did("set")[0]["follow"], unity.models[path]["follow"], addon._follow["rows"][0]["follow"]), (True, True, True))
+        self.assertEqual(unity.did("update"), [])  # what Claude sent is what a look finds: nothing to send
+        before = unity.models[path]["data"]
+        rock.location.x += 1
+        self.save()
+        self.assertEqual(len(unity.did("update")), 1)
+        self.assertNotEqual(unity.models[path]["data"], before)
+        self.assertRegex(self.notices()[-1], r"^저장 → MyGame: Rock 반영 \(씬 오브젝트 1개\) \(\d\d:\d\d\)$")  # by its name here
+        self.assertEqual(unity.did("update")[0]["why"], "저장")  # Unity's chat window says the same
+        self.assertEqual(addon.entry_rows(addon._entries[-1], None)[0][0][1], "FILE_REFRESH")
+        self.assertEqual([p.name for p in self.exchange.iterdir() if p.name.startswith("follow_")], [])  # nothing piles up
+        self.save()                                     # saved again with nothing done
+        bpy.data.objects["Bystander"].location.x += 1   # ... and with something done that does not go to Unity
+        self.save()
+        self.assertEqual(len(unity.did("update")), 1)
+        bpy.data.objects["Pebble"].location.z += 1      # a child goes with its parent
+        self.save()
+        self.assertEqual((len(unity.did("update")), len(self.notices())), (2, 1))  # the line it had says so, no second line
+        self.assertRegex(self.notices()[-1], r"반영 \(씬 오브젝트 1개\) · 2번째 \(\d\d:\d\d\)$")
+        bpy.ops.claude_hand.follow_toggle(index=0)      # off again
+        self.settle()
+        rock.location.x += 1
+        self.save()
+        self.assertEqual((unity.models[path]["follow"], len(unity.did("update"))), (False, 2))
+
+    def test_two_models_keep_a_line_each_and_a_look_that_fails_costs_only_itself(self):
+        addon, unity = self.addon, self.unity
+        self.sent_by_claude()
+        self.sent_by_claude(("Bystander",), "bystander")
+        self.save()
+        for step in range(3):
+            bpy.data.objects["Rock"].location.x += 1
+            bpy.data.objects["Bystander"].location.x += 1 if step != 1 else 0  # the second save changes one of them only
+            self.save()
+        lines = self.notices()
+        self.assertEqual((len(unity.did("update")), len(lines)), (5, 2))  # five sends, a line for each model
+        self.assertRegex(lines[0], r"^저장 → MyGame: Rock 반영 \(씬 오브젝트 1개\) · 3번째 \(\d\d:\d\d\)$")
+        self.assertRegex(lines[1], r"^저장 → MyGame: Bystander 반영 \(씬 오브젝트 1개\) · 2번째 \(\d\d:\d\d\)$")
+        addon._notice("다른 줄")  # something else in between: after it, a new line
+        bpy.data.objects["Rock"].location.x += 1
+        self.save()
+        self.assertEqual(len(self.notices()), 4)
+        # Blender drops a timer whose function raises, and the panel's timer is the chat's too.
+        real, addon._row = addon._row, lambda entry, model: 1 / 0
+        bpy.data.objects["Rock"].location.x += 1
+        self.save()
+        self.assertEqual((addon._follow["busy"], len(unity.did("update"))), (0, 6))
+        self.assertIn("살펴보다 오류가 났어요: division by zero", addon._follow["status"])
+        addon._row = real
+        self.save()
+        self.assertEqual((len(unity.did("update")), addon._follow["status"]), (7, ""))  # the next look is as good as ever
+
+    def test_a_copy_saved_elsewhere_is_not_this_file_and_another_name_takes_the_models_along(self):
+        addon, unity, rock = self.addon, self.unity, bpy.data.objects["Rock"]
+        path = self.sent_by_claude()
+        self.save()
+        rock.location.x += 1
+        bpy.context.view_layer.update()
+        bpy.ops.wm.save_as_mainfile(filepath=str(self.blend.with_name("backup.blend")), copy=True)  # Save Copy
+        self.settle()
+        self.assertEqual(unity.did("update"), [])
+        renamed = self.blend.with_name("rocks_v2.blend")
+        bpy.ops.wm.save_as_mainfile(filepath=str(renamed))                                         # Save As
+        self.settle()
+        told = [p for p in unity.did("list") if p.get("moved_from")]
+        self.assertEqual((Path(told[0]["moved_from"]), Path(told[0]["source"])), (self.blend, renamed))
+        self.assertEqual((Path(unity.models[path]["source"]), len(unity.did("update")), addon._follow["moved_from"]), (renamed, 1, ""))
+        self.assertEqual(Path(unity.did("update")[0]["manifest"]).name, "follow_aaaa1111_rock.claudehand.json")
+        rock.location.x += 1
+        self.save()
+        self.assertEqual(len(unity.did("update")), 2)  # and it goes on following under the new name
+        self.assertEqual([p for p in unity.did("list") if p.get("moved_from")], told)  # told once
+
+    def test_renamed_and_copied_objects_still_find_their_model(self):
+        addon, unity, rock = self.addon, self.unity, bpy.data.objects["Rock"]
+        self.sent_by_claude()
+        self.save()
+        rock.name = "Boulder"
+        rock.location.x += 1
+        self.save()
+        self.assertEqual((len(unity.did("update")), addon._follow["rows"][0]["objects"]), (1, ["Boulder"]))
+        self.assertRegex(self.notices()[-1], r"^저장 → MyGame: Boulder 반영")
+        copy = rock.copy()
+        bpy.context.scene.collection.objects.link(copy)
+        copy.location.y += 3
+        self.save()
+        row = addon._follow["rows"][0]
+        self.assertEqual((len(unity.did("update")), row["objects"], row["missing"]), (1, None, "Rock"))  # which of the two? not guessed
+        self.assertIn("'Rock'(으)로 보낸 오브젝트가 둘이에요(Boulder, Boulder.001)", row["problem"])
+        shown = Layout()
+        addon.draw_follow(shown, None)
+        self.assertIn("[선택한 오브젝트로 잇기]", shown.shown)
+        bpy.context.view_layer.objects.active = copy
+        self.assertEqual(bpy.ops.claude_hand.follow_adopt(index=0), {"FINISHED"})
+        self.settle()
+        self.assertEqual((addon.sent_as(copy), addon.sent_as(rock), addon._follow["rows"][0]["objects"]), ("Rock", "", ["Boulder.001"]))
+        self.assertEqual(len(unity.did("update")), 2)  # the one that was picked is what Unity has now
+
+    def test_a_mesh_that_never_comes_out_the_same_is_sent_only_when_something_was_done_to_it(self):
+        """A Bevel modifier gives other UVs every time the mesh is worked out, so the file alone cannot tell."""
+        addon, unity = self.addon, self.unity
+        bpy.ops.mesh.primitive_monkey_add()
+        monkey = bpy.context.active_object
+        monkey.name = "Monkey"
+        monkey.modifiers.new("Bevel", "BEVEL")
+        self.assertNotEqual(*(addon._write_fbx([monkey], str(self.home / "probe.fbx")) or (self.home / "probe.fbx").read_bytes() for _ in range(2)))
+        path = self.sent_by_claude(("Monkey",), "monkey")
+        self.save()
+        self.assertEqual(len(unity.did("update")), 1)  # the first look of a file cannot know: sent once
+        self.save()
+        bpy.data.objects["Bystander"].location.x += 1
+        self.save()
+        self.assertEqual(len(unity.did("update")), 1)  # differs from what Unity has, as it always will: nothing was done to it
+        monkey.location.x += 1
+        self.save()
+        self.assertEqual(len(unity.did("update")), 2)
+        monkey.modifiers["Bevel"].width *= 2
+        self.save()
+        self.assertEqual((len(unity.did("update")), unity.models[path]["follow"]), (3, True))
+        monkey.location.z += 1  # changed and saved in one go, as a script does it: Blender has not told of the change yet
+        bpy.ops.wm.save_mainfile()
+        self.settle()
+        self.assertEqual(len(unity.did("update")), 4)
+
+    def test_a_model_that_takes_long_to_export_is_exported_only_when_something_was_done_to_it(self):
+        addon, unity, rock = self.addon, self.unity, bpy.data.objects["Rock"]
+        self.sent_by_claude()
+        self.save()
+        written, real = [], addon._write_fbx
+        addon._write_fbx = lambda objects, path: written.append(path) or real(objects, path)
+        self.save()
+        self.assertEqual(len(written), 1)  # a quick one is exported at every save: the file is what tells for sure
+        next(iter(addon._follow["models"].values()))["took"] = 5.0
+        self.save()
+        bpy.data.objects["Bystander"].location.x += 1
+        self.save()
+        self.assertEqual(len(written), 1)
+        rock.location.x += 1
+        self.save()
+        self.assertEqual((len(written), len(unity.did("update"))), (2, 1))
+        rock.name = "Stone"  # Blender does not tell of a new name, but the names are looked at
+        self.save()
+        self.assertEqual(len(written), 3)
+
+    def test_after_an_undo_the_model_goes_back_in_unity_too(self):
+        addon, unity = self.addon, self.unity
+        path = self.sent_by_claude()
+        self.save()
+        original = unity.models[path]["data"]
+        addon._undo_op(bpy.ops.ed.undo_push, message="Original")
+        addon.mark_undo_point("바위를 옮겨줘")
+        bpy.ops.transform.translate(value=(2, 0, 0))  # the request moves what is selected ...
+        for obj in bpy.context.view_layer.objects:
+            obj.select_set(obj.name == "Rock")
+        bpy.ops.transform.translate(value=(2, 0, 0))
+        self.save()                                    # ... and the user saves: Unity has the moved rock
+        self.assertNotEqual(unity.models[path]["data"], original)
+        self.assertTrue(addon.undo_last_request().startswith("되돌렸어요"))
+        self.settle()
+        self.assertEqual(unity.models[path]["data"], original)  # though nothing was saved since
+        self.assertRegex(self.notices()[-1], r"^되돌리기 → MyGame: Rock 반영")
+        self.assertEqual(unity.did("update")[-1]["why"], "되돌리기")
+
+    def test_a_unity_that_opens_later_and_a_file_that_is_opened_catch_up(self):
+        addon, unity, rock = self.addon, self.unity, bpy.data.objects["Rock"]
+        path = self.sent_by_claude()
+        self.save()
+        stale = unity.models[path]["data"]
+        unity.registry.rename(unity.registry.with_suffix(".closed"))  # Unity is closed
+        rock.location.x += 1
+        self.save()
+        self.assertEqual((unity.did("update"), addon._follow["rows"]), ([], []))
+        unity.registry.with_suffix(".closed").rename(unity.registry)  # ... and opened again
+        self.settle()
+        self.assertEqual(len(unity.did("update")), 1)
+        self.assertRegex(self.notices()[-1], r"^Unity 열림 → MyGame: Rock 반영")
+        unity.models[path]["data"] = stale                            # as if the save had come while Unity was closed
+        bpy.ops.wm.open_mainfile(filepath=str(self.blend))            # the file is opened (in another Blender run, say)
+        self.settle()
+        self.assertEqual(len(unity.did("update")), 2)
+        self.assertRegex(self.notices()[-1], r"^파일 열기 → MyGame: Rock 반영")
+        bpy.ops.wm.open_mainfile(filepath=str(self.blend))
+        self.settle()
+        self.assertEqual(len(unity.did("update")), 2)  # in step: opening sends nothing
+
+    def test_a_unity_that_is_busy_gone_or_too_old(self):
+        addon, unity, rock = self.addon, self.unity, bpy.data.objects["Rock"]
+        self.sent_by_claude()
+        self.save()
+        unity.busy = 2  # compiling for a moment
+        rock.location.x += 1
+        self.save()
+        self.assertEqual((len(unity.did("update")), unity.busy), (1, 0))  # only the calls that got through are counted there
+        unity.busy = 99
+        rock.location.x += 1
+        self.save()
+        self.assertIn("보내지 못했어요(Unity가 컴파일 중이에요). 다음 저장 때 다시 보냅니다.", self.notices()[-1])
+        unity.busy = 0
+        self.save()  # nothing done since, and still it is sent: Unity never got it
+        self.assertEqual(len(unity.did("update")), 2)
+        gone = FakeUnity(self.home, "Gone", "bbbb2222")
+        gone.server.shutdown()
+        gone.server.server_close()  # its registry file is left behind (a crash)
+        self.others.append(gone)
+        old = FakeUnity(self.home, "Old", "cccc3333", tools=("ch_import_model",))  # Claude Hand Tools from before models could follow
+        self.others.append(old)
+        rock.location.x += 1
+        self.save()
+        self.assertEqual((len(unity.did("update")), old.calls, addon._follow["editors"]), (3, [], [("MyGame", "aaaa1111"), ("Gone", "bbbb2222")]))
+        self.assertEqual(addon._follow["status"], "Gone: Unity가 응답하지 않아요")
+
+    def test_sending_from_the_panel_without_claude(self):
+        addon, unity = self.addon, self.unity
+        for obj in bpy.context.view_layer.objects:
+            obj.select_set(obj.name in ("Rock", "Pebble"))
+        bpy.context.view_layer.objects.active = bpy.data.objects["Pebble"]
+        self.assertEqual(addon.selected_roots(), ["Rock"])  # the child goes with its parent anyway
+        unity.at_work = True
+        self.assertEqual(bpy.ops.claude_hand.follow_send(project="aaaa1111"), {"FINISHED"})
+        self.settle()
+        self.assertEqual((unity.models, self.notices()[-1]), ({}, "MyGame: 그 프로젝트에서 Claude가 일하는 중이에요. 끝난 뒤 다시 해 주세요"))
+        unity.at_work = False
+        bpy.ops.claude_hand.follow_send(project="aaaa1111")
+        self.settle()
+        (path, model), = unity.models.items()
+        self.assertEqual((path, model["roots"], model["follow"], Path(model["source"])),
+                         ("Assets/ClaudeHand/Imports/Rock/Rock.fbx", ["Rock"], True, self.blend))
+        self.assertIn("MyGame에 Rock을(를) 보냈어요(씬에 놓음). 저장할 때마다 다시 갑니다.", self.notices()[-1])
+        self.assertIn("[사용자가 Blender 패널에서 'Rock'을(를) Unity MyGame에 직접 보냈음: Assets/ClaudeHand/Imports/Rock/Rock.fbx", addon._undo_note[0])
+        self.assertEqual([(r["name"], r["follow"]) for r in addon._follow["rows"]], [("Rock", True)])
+        bpy.data.objects["Rock"].location.x += 1
+        self.save()
+        self.assertEqual(len(unity.did("update")), 1)  # and from then on it follows
+        self.assertEqual(addon.send_to_unity(["Rock"], "ffff0000"), "그 Unity 프로젝트가 열려 있지 않아요.")
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        self.assertIn("먼저 이 .blend를 저장하세요", addon.send_to_unity(["Rock"], "aaaa1111"))
+
+    def test_the_panel_lists_the_models_and_ties_a_moved_file_to_them_again(self):
+        addon, unity = self.addon, self.unity
+        shown = Layout()
+        addon.draw_follow(shown, None)
+        self.assertEqual(shown.shown, ["이 파일에서 Unity로 간 모델이 없습니다.", "[선택한 오브젝트 보내기 → MyGame]", "[새로 고침]"])
+        path = self.sent_by_claude()
+        unity.models[path]["source"] = "D:/old place/rocks.blend"  # the file was moved outside Blender since
+        unity.models["Assets/Other/Rock.fbx"] = {"source": "D:/another/file.blend", "roots": ["Bystander"], "follow": True, "data": b""}
+        bpy.ops.claude_hand.follow_look()
+        self.settle()
+        # Listed: the model this file's Rock once went to. Not listed: one of another file that merely has an object of that name.
+        self.assertEqual([(r["asset"], r["here"]) for r in addon._follow["rows"]], [(path, False)])
+        shown = Layout()
+        addon.draw_follow(shown, None)
+        self.assertEqual(shown.shown[:2], ["Rock → MyGame · rocks.blend에서 온 것으로 적혀", "있음"])
+        self.assertIn("[이 파일로 잇기]", shown.shown)
+        self.assertEqual(unity.did("update"), [])
+        bpy.ops.claude_hand.follow_relink(index=0)
+        self.settle()
+        self.assertEqual((Path(unity.models[path]["source"]), addon._follow["rows"][0]["here"]), (self.blend, True))
+        shown = Layout()
+        addon.draw_follow(shown, None)
+        self.assertEqual(shown.shown[:2], ["[Rock → MyGame]", "체크한 모델은 이 파일을 저장할 때마다 Unity에서 바뀝니다."])
+        unity.close()
+        self.settle()
+        shown = Layout()
+        addon.draw_follow(shown, None)
+        self.assertEqual(len(shown.shown), 2)  # "열려 있는 Unity가 없습니다 ..." on two lines, and nothing to press
+        self.assertTrue(shown.shown[0].startswith("열려 있는 Unity가 없습니다"))
 
 
 @unittest.skipIf(bpy is None, "Blender's bpy module is not installed")

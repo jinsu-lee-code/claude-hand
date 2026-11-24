@@ -50,7 +50,9 @@ namespace ClaudeHand.Editor
 
         static ChBridge()
         {
-            if (Application.isBatchMode) return;
+            // Without a window nobody talks to the editor. The one exception is the self-test's round trip, where a
+            // real Blender sends this editor a model over the socket (ChSelfTest.Serve), and asks for it by name.
+            if (Application.isBatchMode && Environment.GetEnvironmentVariable("CLAUDE_HAND_BRIDGE_IN_BATCH") != "1") return;
             try
             {
                 Start();

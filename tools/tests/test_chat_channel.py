@@ -642,7 +642,7 @@ class PreviewTests(unittest.TestCase):
     def test_a_window_that_was_only_looked_at_is_not_shown(self):
         self.hub.post_user_message("blender", "props", "의자를 Unity로 보내줘", pin="props@9877")
         for tool, detail in (("ch_scene_snapshot", ""), ("ch_editor_status", ""), ("ch_checkpoint", "list"), ("get_scene_info", ""),
-                             ("find_gameobjects", "Chair"), ("ch_export_model", "")):
+                             ("find_gameobjects", "Chair"), ("ch_export_model", ""), ("ch_model_follow", "list")):
             self.assertTrue(cc.only_looks(tool, detail), tool)
             self.hub.report_action("unity", "MyGame@aaaa1111", tool, detail)
         self.hub.report_action("unity", "MyGame@aaaa1111", "execute_code", "return go.transform.position;", looks=True)  # code a guard has read
@@ -650,7 +650,8 @@ class PreviewTests(unittest.TestCase):
         time.sleep(0.3)
         self.assertEqual(self.shots, [])  # nothing there is different from before
         self.hub.post_user_message("blender", "props", "다시 보내줘", pin="props@9877")
-        for tool, detail in (("ch_import_model", ""), ("ch_checkpoint", "undo"), ("execute_code", "x = 1"), ("manage_gameobject", "find")):
+        for tool, detail in (("ch_import_model", ""), ("ch_checkpoint", "undo"), ("execute_code", "x = 1"), ("manage_gameobject", "find"),
+                             ("ch_model_follow", "set Assets/ClaudeHand/Imports/chair/chair.fbx")):
             self.assertFalse(cc.only_looks(tool, detail), tool)
         self.hub.report_action("unity", "MyGame@aaaa1111", "ch_scene_snapshot", "")
         self.hub.report_action("unity", "MyGame@aaaa1111", "ch_import_model", "")

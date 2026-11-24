@@ -247,7 +247,7 @@ LOOKING_TOOLS = {"ch_scene_snapshot", "ch_editor_status", "ch_capture", "ch_expo
 
 def tool_only_looks(tool: str, detail: str = "") -> bool:
     return tool in LOOKING_TOOLS or tool.startswith(("get_", "read_", "find_", "list_")) or \
-        (tool == "ch_checkpoint" and detail.strip() == "list")
+        (tool in ("ch_checkpoint", "ch_model_follow") and detail.strip() == "list")
 
 
 def python_only_looks(code: str) -> bool:

@@ -914,6 +914,72 @@ class SelftestTests(unittest.TestCase):
                                            tokens=[], unity_projects=[project], unity_batch=lambda p, progress=None: ran.append(p) or [])
             self.assertEqual(ran, [project])
 
+    def test_the_round_trip_with_both_programs_and_no_window(self):
+        """selftest --unity-project, its last part: a Unity without a window, its bridge on, waits while a Blender
+        without a window sends it a model from the add-on's panel and saves. Here both are stand-ins."""
+        class Done:
+            def __init__(self, out="", err=""):
+                self.stdout, self.stderr, self.returncode = out, err, 0
+        ast.parse(handlib.checks.LIVE_ROUND_TRIP_EXPR.format(addon="a.py", folder="tmp"))
+        model = lambda file_hash: [{"asset_path": "Assets/ClaudeHand/Imports/ch_selftest_live/ch_selftest_live.fbx", "follow": True,
+                                    "here": True, "instances": 1, "file_hash": file_hash}]
+        good = {"editors": [["MyGame", "aaaa1111"]], "problem": "", "after_send": model("a" * 64), "after_save": model("b" * 64),
+                "after_same_save": model("b" * 64), "notices": ["MyGame에 ch_selftest_live을(를) 보냈어요(씬에 놓음).",
+                                                               "저장 → MyGame: ch_selftest_live 반영 (씬 오브젝트 1개) (01:33)"]}
+        with tempfile.TemporaryDirectory() as tmp:
+            started, seen = [], []
+
+            class Unity:
+                opens, returncode = True, None
+
+                def __init__(self, cmd, env=None):
+                    started.append(cmd)
+                    self.env = env
+                    registry = Path(env["CLAUDE_HAND_HOME"]) / "unity"
+                    if Unity.opens and not registry.is_dir():
+                        registry.mkdir(parents=True)
+                        (registry / "aaaa1111.json").write_text("{}", encoding="utf-8")  # its bridge is up
+
+                def poll(self):
+                    return None if Unity.opens else 1
+
+                def wait(self, timeout=None):
+                    seen.append(Path(self.env["CLAUDE_HAND_SELFTEST_STOP"]).exists())  # told to stop before it is waited for
+                    self.returncode = 0
+
+            def trip(live, name, err=""):
+                folder = Path(tmp) / name
+                folder.mkdir()
+                ticks = iter(range(10 ** 6))
+
+                def run(cmd, env=None, **kwargs):
+                    self.assertEqual(env["CLAUDE_HAND_BRIDGE_IN_BATCH"], "1")
+                    self.assertNotEqual(Path(env["CLAUDE_HAND_HOME"]), handlib.link.claude_hand_home())  # not the user's list of open editors
+                    return Done("Blender 5.2\n" + (f"LIVE {json.dumps(live)}\n" if live is not None else ""), err)
+                return handlib.checks.live_round_trip(Path(tmp) / "MyGame", Path("Unity.exe"), "blender.exe", folder, run=run, start=Unity,
+                                                      sleep=lambda seconds: None, clock=lambda: float(next(ticks)))
+            found = trip(good, "good")
+            self.assertEqual([(ok, detail) for _, ok, detail in found], [(True, "")] * 3)
+            self.assertEqual((started[0][1:6], seen), (["-batchmode", "-projectPath", str(Path(tmp) / "MyGame"), "-executeMethod",
+                                                        "ClaudeHand.Editor.ChSelfTest.Serve"], [True]))
+            stuck = trip({**good, "after_save": model("a" * 64), "after_same_save": model("a" * 64), "notices": good["notices"][:1]}, "stuck")
+            self.assertEqual([ok for _, ok, _ in stuck], [True, False, False])  # saved, and Unity still has what it had
+            self.assertIn('"after_save"', stuck[1][2])
+            twice = trip({**good, "notices": good["notices"] + ["저장 → MyGame: ch_selftest_live 반영 · 2번째"]}, "twice")
+            self.assertEqual([ok for _, ok, _ in twice], [True, True, False])  # sent again though nothing changed
+            refused = trip({**good, "problem": "먼저 이 .blend를 저장하세요.", "after_send": []}, "refused")
+            self.assertFalse(refused[0][1])
+            crashed = trip(None, "crashed", err="Traceback ...\nAttributeError: module has no attribute 'send_to_unity'")
+            self.assertEqual([(ok, detail) for _, ok, detail in crashed], [(False, "AttributeError: module has no attribute 'send_to_unity'")])
+            self.assertEqual(len(seen), 5)  # Unity is told to stop whatever happened
+            Unity.opens = False  # it never comes up: the package does not compile
+            (Path(tmp) / "closed").mkdir()
+            (Path(tmp) / "closed" / "live-unity.log").write_text("Assets/x.cs(3,5): error CS0103: The name 'Foo' does not exist\n", encoding="utf-8")
+            closed = handlib.checks.live_round_trip(Path(tmp) / "MyGame", Path("Unity.exe"), "blender.exe", Path(tmp) / "closed",
+                                                    run=lambda *a, **kw: self.fail("Blender was started with no Unity to send to"), start=Unity,
+                                                    sleep=lambda seconds: None, clock=lambda: 0.0)
+            self.assertEqual((closed[0][1], "CS0103" in closed[0][2]), (False, True))
+
     def test_says_whether_the_supervisors_transcript_still_gives_tokens(self):
         """The line that says what a request took reads Claude Code's transcripts, a format written down nowhere."""
         skipped = handlib.checks.token_record_check(config={})  # Claude Hand was never started here: nothing to read yet

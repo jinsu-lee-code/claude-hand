@@ -46,6 +46,8 @@ namespace ClaudeHand.Editor
         private const string Key = "ClaudeHand.Checkpoints";
         private const int Kept = 20;
         private const int ReplacedKept = 10;  // requests (or one transfer's folder of files) kept in Library/ClaudeHand/replaced
+        private const int FollowKept = 5;     // earlier files of models that follow their .blend, in replaced/follow (one folder of the ten)
+        private const double QuietSeconds = 30;  // how long after the user's own doing Unity may still tell of that asset
         private const int RemovedKept = 10;   // requests and undos whose assets are kept in Library/ClaudeHand/removed
         private const long MaxKeepBytes = 64L * 1024 * 1024;  // a larger file is not copied before every save (keeps.py MAX_BYTES)
         private const double WorkSeconds = 300;  // with no word that the subagent stopped: how long its last call counts (keeps.py WORK_SECONDS)
@@ -224,8 +226,36 @@ namespace ClaudeHand.Editor
             // made, removed or moved in the hierarchy, components added, properties changed (through Undo or a
             // SerializedObject). Looking at the scene or selecting in it does not, and neither does a change made
             // past Undo, which an undo could not take back anyway.
-            ObjectChangeEvents.changesPublished += (ref ObjectChangeEventStream stream) => Touched();
+            ObjectChangeEvents.changesPublished += (ref ObjectChangeEventStream stream) =>
+            {
+                // A model the user's own save in Blender replaced (UsersOwn): the objects that use it show it anew a
+                // tick or two later, and that is not a change a request made.
+                if (UsersOwnLately() && OnlyAssetsAnew(ref stream)) return;
+                Touched();
+            };
             AssemblyReloadEvents.beforeAssemblyReload += Flush;  // notes not written yet must outlive the reload
+        }
+
+        /// <summary>
+        /// Nothing but assets read anew and the objects made of them brought up to date (what a replaced model gives:
+        /// UpdatePrefabInstances, seen in Unity 6.3): no object was made, moved or edited.
+        /// </summary>
+        private static bool OnlyAssetsAnew(ref ObjectChangeEventStream stream)
+        {
+            for (int i = 0; i < stream.length; i++)
+            {
+                switch (stream.GetEventType(i))
+                {
+                    case ObjectChangeKind.UpdatePrefabInstances:
+                    case ObjectChangeKind.CreateAssetObject:
+                    case ObjectChangeKind.DestroyAssetObject:
+                    case ObjectChangeKind.ChangeAssetObjectProperties:
+                        continue;
+                    default:
+                        return false;
+                }
+            }
+            return true;
         }
 
         /// <summary>Something changed in the editor: the newest mark has something to undo from now on.</summary>
@@ -277,6 +307,9 @@ namespace ClaudeHand.Editor
         /// The request a subagent works for in this project right now, as its guard hook wrote it down before its
         /// last call (tools/handlib/keeps.py), or null: nobody is at work, and what happens to files is the user's own.
         /// </summary>
+        /// <summary>A subagent is at work in this project for some request right now.</summary>
+        internal static bool SomebodyAtWork => RequestAtWork() != null;
+
         private static string RequestAtWork()
         {
             try
@@ -358,10 +391,37 @@ namespace ClaudeHand.Editor
             }
         }
 
+        private static readonly Dictionary<string, double> UsersOwnPaths = new Dictionary<string, double>();  // asset -> until when
+
+        /// <summary>
+        /// Until the returned scope is closed, what happens to `assetPath` is the user's own doing, though a tool of
+        /// this package carries it out: a model that follows its .blend and was sent again because the user saved
+        /// there (ch_model_follow). It is no request's, whichever request is at work in this project: nothing of it
+        /// is noted for an undo, and for a short while afterwards what Unity tells of that asset, and of the scene
+        /// objects that show it anew, does not make the newest mark one with something to undo (a request that only
+        /// looked would get a 되돌리기 that takes nothing back).
+        /// </summary>
+        internal static IDisposable UsersOwn(string assetPath)
+        {
+            _unnoted++;
+            UsersOwnPaths[assetPath] = Now + QuietSeconds;
+            return new UnnotedScope();
+        }
+
+        /// <summary>The user's own doing replaced an asset a short while ago (and Unity may still be telling of it).</summary>
+        private static bool UsersOwnLately()
+        {
+            if (UsersOwnPaths.Count == 0) return false;
+            foreach (var over in UsersOwnPaths.Where(p => p.Value < Now).Select(p => p.Key).ToList()) UsersOwnPaths.Remove(over);
+            return UsersOwnPaths.Count > 0;
+        }
+
         private static string[] NotOwn(string[] paths)
         {
-            if (OwnFolders.Count == 0) return paths;
-            return paths.Where(p => !OwnFolders.Any(folder => Under(p, folder)) && !OwnParents.Contains(p)).ToArray();
+            UsersOwnLately();
+            if (OwnFolders.Count == 0 && UsersOwnPaths.Count == 0) return paths;
+            return paths.Where(p => !OwnFolders.Any(folder => Under(p, folder)) && !OwnParents.Contains(p) &&
+                                    !UsersOwnPaths.ContainsKey(Asset(p))).ToArray();
         }
 
         /// <summary>Unity has imported, lost or moved assets: a change (Touched), and maybe a request's doing (Imported).</summary>
@@ -599,6 +659,21 @@ namespace ClaudeHand.Editor
         }
 
         /// <summary>
+        /// Keep for a model that follows its .blend, replaced because the user saved there: all such files lie in one
+        /// folder, replaced/follow, which counts as one of the newest few (so saving often never pushes out what the
+        /// requests' undos need), and of them only the newest few stay.
+        /// </summary>
+        internal static string KeepFollowed(string file)
+        {
+            var dir = Path.Combine(ChPaths.LibraryDir, "replaced", "follow");
+            Directory.CreateDirectory(dir);
+            Directory.SetCreationTimeUtc(dir, DateTime.UtcNow);  // in use now: not the oldest folder there, which Keep would drop
+            var kept = Keep(file, "follow");
+            Prune(dir, FollowKept);
+            return kept;
+        }
+
+        /// <summary>
         /// Moves an asset (a file, or a folder with what is in it) and its .meta out of the project, into Library/
         /// ClaudeHand/removed, and returns where it went: an asset a request made, when the request is undone, or one a
         /// request deletes. `group` names the folder there: what one undo takes out, or one request deletes, lies
@@ -642,7 +717,7 @@ namespace ClaudeHand.Editor
         }
 
         /// <summary>The two files hold the same bytes (two that are both missing count as the same).</summary>
-        private static bool Same(string one, string other)
+        internal static bool Same(string one, string other)
         {
             var a = new FileInfo(one);
             var b = new FileInfo(other);

@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -327,6 +328,56 @@ print("TOOK " + json.dumps(addon.import_model({manifest!r})))
 """
 
 
+# Run inside Blender, with no window, while a Unity without a window waits with its bridge open (ChSelfTest.Serve):
+# the add-on as it is in this checkout sends an object with its panel's button, changes it and saves, then saves once
+# more with nothing changed. Each time Unity is asked what it has. Timers do not run without a window, so the add-on
+# is ticked by hand.
+LIVE_ROUND_TRIP_EXPR = """import bpy, importlib.util, json, os, time
+spec = importlib.util.spec_from_file_location("claude_hand_chat", {addon!r})
+addon = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(addon)
+bpy.ops.wm.read_factory_settings(use_empty=True)
+def mesh_of(quads):
+    mesh = bpy.data.meshes.new("ChSelfTestLive")
+    verts = [v for q in range(quads) for v in ((q * 2, 0, 0), (q * 2 + 1, 0, 0), (q * 2 + 1, 1, 0), (q * 2, 1, 0))]
+    mesh.from_pydata(verts, [], [tuple(range(q * 4, q * 4 + 4)) for q in range(quads)])
+    return mesh
+obj = bpy.data.objects.new("ch_selftest_live", mesh_of(1))
+bpy.context.scene.collection.objects.link(obj)
+bpy.ops.wm.save_as_mainfile(filepath=os.path.join({folder!r}, "ch_selftest_live.blend"))
+addon.register()
+idle = lambda: not addon._follow["busy"] and addon._follow["due"] is None and addon._inbox.empty()
+def until(done, seconds=90):
+    end = time.time() + seconds
+    while time.time() < end:
+        addon.tick()
+        if done():
+            return True
+        time.sleep(0.1)
+    return False
+out = {{"editors": []}}
+if until(lambda: bool(addon._follow["editors"]) and idle()):
+    out["editors"] = addon._follow["editors"]
+    here = lambda: [m for m in addon.unity_call(addon.unity_projects()[0], "ch_model_follow",
+                                               {{"action": "list", "source": bpy.data.filepath}})["models"] if m["here"]]
+    out["problem"] = addon.send_to_unity(["ch_selftest_live"], addon._follow["editors"][0][1])
+    until(idle)
+    out["after_send"] = here()
+    obj.data = mesh_of(3)
+    bpy.context.view_layer.update()
+    bpy.ops.wm.save_mainfile()
+    until(idle)
+    out["after_save"] = here()
+    bpy.ops.wm.save_mainfile()
+    until(idle)
+    out["after_same_save"] = here()
+    out["notices"] = [e["text"] for e in addon._entries if e.get("kind") == "notice"]
+addon.unregister()
+print("LIVE " + json.dumps(out))
+"""
+LIVE_WAIT = 240  # seconds a Unity without a window may take to open the project and its bridge
+
+
 def marked_json(output: str, mark: str):
     """What a script printed after `mark` on a line of its own (Blender prints much else), or None."""
     found = re.search(rf"^{mark} (.+)$", output or "", re.M)
@@ -362,11 +413,65 @@ def clean_file_checks(project: Path) -> None:
         Path(str(folder) + ".meta").unlink(missing_ok=True)
 
 
-def unity_batch_checks(project: Path, run=subprocess.run, editor=None, blender_exe=None, progress=None) -> list[Check]:
+def live_round_trip(project: Path, editor, blender_exe, folder: Path, run=subprocess.run, start=subprocess.Popen,
+                    sleep=time.sleep, clock=time.time) -> list[tuple]:
+    """The way a model takes in daily use once it follows its .blend, with both programs real and neither showing a
+    window: Unity opens the project with its bridge on (ChSelfTest.Serve), and Blender's add-on sends it an object
+    with the panel's button, changes the object and saves, then saves again with nothing changed. Blender talks to
+    Unity's socket itself, as it does when the user saves. Both get a home folder of their own, so the list of the
+    user's open editors is left alone. Returns (item, ok, detail) for each thing looked at."""
+    home, stop, log = folder / "live-home", folder / "live-stop", folder / "live-unity.log"
+    env = {**os.environ, "CLAUDE_HAND_HOME": str(home), "CLAUDE_HAND_EXCHANGE_DIR": str(folder / "live-exchange"),
+           "CLAUDE_HAND_BRIDGE_IN_BATCH": "1", "CLAUDE_HAND_SELFTEST_STOP": str(stop),
+           "CLAUDE_HAND_SELFTEST_OUT": str(folder / "live-result.json")}
+    last = lambda text: (str(text or "").strip().splitlines() or ["출력 없음"])[-1][:200]
+    unity = start([str(editor), "-batchmode", "-projectPath", str(project), "-executeMethod", "ClaudeHand.Editor.ChSelfTest.Serve",
+                   "-logFile", str(log)], env=env)
+    try:
+        deadline = clock() + LIVE_WAIT
+        registered = lambda: (home / "unity").is_dir() and any((home / "unity").glob("*.json"))
+        while clock() < deadline and unity.poll() is None and not registered():
+            sleep(0.5)
+        if not registered():
+            text = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
+            errors = re.findall(r"^.*error CS\d+.*$", text, re.M)
+            return [("한 바퀴: 창 없는 Unity가 통로를 엶", False, errors[0][:300] if errors else "통로 등록 파일이 생기지 않음: " + last(text))]
+        proc = run([str(blender_exe), "--background", "--factory-startup", "--python-expr",
+                    LIVE_ROUND_TRIP_EXPR.format(addon=str(constants.CHAT_ADDON_SOURCE), folder=str(folder))], env=env,
+                   capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+        live = marked_json(proc.stdout, "LIVE")
+        if not isinstance(live, dict) or not live.get("editors"):
+            return [("한 바퀴: Blender가 열린 Unity를 찾아 보냄", False,
+                     "Unity의 통로 등록 파일을 Blender가 읽지 못함" if isinstance(live, dict) else last(proc.stderr or proc.stdout))]
+    finally:
+        stop.write_text("stop", encoding="utf-8")  # Unity deletes what came in, and ends
+        try:
+            unity.wait(120)
+        except subprocess.TimeoutExpired:
+            unity.kill()
+    one = lambda key: (live.get(key) or [{}])[0] if len(live.get(key) or []) == 1 else {}
+    sent, saved, same = one("after_send"), one("after_save"), one("after_same_save")
+    told = sum("반영" in str(notice) for notice in live.get("notices") or [])
+    said = json.dumps(live, ensure_ascii=False)[:400]
+    found = [
+        ("한 바퀴: Blender 패널에서 보낸 모델이 Unity에 들어와 씬에 놓이고, 저장을 따라가게 됨",
+         not live.get("problem") and sent.get("follow") is True and sent.get("instances") == 1),
+        ("한 바퀴: Blender에서 고쳐 저장하면 Unity의 모델이 제자리에서 바뀜",
+         bool(sent.get("file_hash")) and saved.get("asset_path") == sent.get("asset_path") and
+         saved.get("file_hash") not in (None, sent.get("file_hash")) and told >= 1),
+        ("한 바퀴: 바뀐 것 없이 저장하면 Unity의 모델은 그대로",
+         bool(saved.get("file_hash")) and same.get("file_hash") == saved.get("file_hash") and told == 1),
+    ]
+    return [(item, bool(ok), "" if ok else said) for item, ok in found]
+
+
+def unity_batch_checks(project: Path, run=subprocess.run, editor=None, blender_exe=None, progress=None, start=None) -> list[Check]:
     """Open a closed Unity project without a window and run Claude Hand Tools' own self-test in it (ChSelfTest.cs): a
     model comes in, comes in again and is replaced in place, takes the project's materials, and goes back out. With
-    Blender installed the model is one its add-on really exported, and what Unity sends back is read by Blender again.
-    The test works in a scene it never saves and deletes the assets it made."""
+    Blender installed the model is one its add-on really exported, what Unity sends back is read by Blender again,
+    and at the end Unity is opened once more, its bridge on, for a Blender that sends it a model and saves
+    (live_round_trip; start: how that Unity is started, subprocess.Popen unless `run` is a stand-in). The test works
+    in a scene it never saves and deletes the assets it made."""
     area, checks = f"Unity 안 테스트 ({project.name})", []
     progress = progress or (lambda message: None)
     add = lambda item, ok, detail="", fix="": checks.append(Check(area, item, ok, detail, fix))
@@ -428,6 +533,11 @@ def unity_batch_checks(project: Path, run=subprocess.run, editor=None, blender_e
             add("Unity가 보낸 모델을 Blender가 받음 (import_model)", bool(took and took.get("added")),
                 ", ".join(took["added"]) if took and took.get("added") else
                 ((proc.stderr or proc.stdout).strip().splitlines() or ["출력 없음"])[-1][:200])
+        start = start or (subprocess.Popen if run is subprocess.run else None)
+        if blender_exe and start:
+            progress("창 없는 Unity에 통로를 열고, Blender가 모델을 보내고 저장하는 중 (30초쯤)...")
+            for item, ok, detail in live_round_trip(project, editor, blender_exe, Path(tmp), run, start):
+                add(item, ok, detail)
     return checks
 
 

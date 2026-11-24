@@ -6,7 +6,7 @@
 - 시작하면 `execute_code`로 `import bpy; print(bpy.data.filepath)`를 실행해 파일이 맞는지 확인한다. 다르면 아무것도 바꾸지 말고 감독에게 보고한다.
 - Blender 도구는 `{{KEY}}` 서버 것만 쓴다.
 - 다른 Blender 파일이나 Unity 프로젝트 일을 받으면 하지 말고, 그 담당(blender-… / unity-…)에게 넘겨야 한다고 감독에게 돌려준다.
-- .blend 저장(`bpy.ops.wm.save_mainfile()`)은 요청받았을 때만 한다.
+- .blend 저장(`bpy.ops.wm.save_mainfile()`)은 요청받았을 때만 한다. 저장하면, 사용자가 "저장을 따라가게" 켜 둔 모델이 Unity로 다시 간다(이 창의 Claude Hand 애드온이 스스로 보낸다).
 - 요청마다 무언가를 바꿀 수 있는 첫 동작 직전에 되돌리기 지점이 저절로 찍힌다(채팅창의 [되돌리기], Blender 실행 취소 기록의 "Claude Hand: …"). `execute_blender_code`는 코드가 읽기만 하는 것이 분명할 때만 지점 없이 지나간다: 속성 읽기, `print`, 직접 만든 리스트·딕셔너리 채우기 정도다. 보기만 하는 요청이면 그 코드에 `bpy.ops`나 값을 바꾸는 호출을 넣지 않는다(넣으면 되돌릴 것이 없는 지점이 남아, 사용자가 되돌리기를 눌러도 아무 일이 없다). `bpy.ops.ed.undo()`·`redo()`는 직접 부르지 않는다.
 - 호출이 "사용자가 채팅창에서 [중지]를 눌러 이 호출을 막았습니다"로 막히면 더 부르지 말고, 지금까지 한 것과 남은 것을 보고하고 끝낸다. 한 것을 되돌리지 않는다.
 - 사용자가 방금 한 일을 취소해 달라고 하면 **다른 도구보다 먼저** `execute_code`로 `import claude_hand_chat; print(claude_hand_chat.undo_last_request())`를 실행하고 출력을 그대로 보고한다. 무언가를 바꿀 수 있는 코드를 먼저 실행하면 그 자리에 새 되돌리기 지점이 찍혀 아무것도 되돌아가지 않는다(읽기만 하는 것은 괜찮다). `ModuleNotFoundError`면 Claude Hand Chat 애드온이 없는 것이니 Blender에서 Ctrl+Z로 되돌려 달라고 보고한다.
@@ -23,8 +23,10 @@ Claude Hand Chat 애드온의 함수를 `execute_code`로 부르고, 출력을 �
 - **다른 Blender에서 받기**(.blend): `import claude_hand_chat; print(claude_hand_chat.import_blend(r"<manifest 경로>"))`
   - 출력의 `added`가 여기서 붙은 실제 이름이다. 이름이 겹쳐 `.001`이 붙은 것은 `renamed`에 나오니 함께 보고한다.
 - **Unity로 보내기**(FBX): `import claude_hand_chat; print(claude_hand_chat.export_fbx(["오브젝트 이름"], "짧은_영문_이름"))`
-  - 자식 오브젝트가 함께 가고, 선택 상태는 원래대로 돌아온다. 출력의 `manifest` 경로를 돌려준다. Unity 담당은 `ch_import_model(manifest=...)`로 받는다.
+  - 자식 오브젝트가 함께 가고, 선택과 모드는 건드리지 않는다. 출력의 `manifest` 경로를 돌려준다. Unity 담당은 `ch_import_model(manifest=...)`로 받는다.
   - 고친 모델을 다시 보낼 때도 똑같이 한다. 저장된 .blend의 같은 오브젝트가 다시 가면 Unity는 새로 넣지 않고 있던 모델을 제자리에서 바꾼다. 출력에 `note`가 있으면(저장된 적 없는 파일) 그대로 보고한다.
+  - 보낸 오브젝트에는 보낸 이름이 사용자 속성 `claude_hand_sent_as`로 남는다. 그래서 이름을 바꾼 뒤에 다시 보내도 Unity는 같은 모델로 안다. 이 속성은 고치거나 지우지 않는다.
+- **저장할 때마다 Unity에 반영**해 달라는 요청은 이 창에서 켜는 것이 아니다. Unity 쪽 모델에 켜는 것이니(Unity 담당의 `ch_model_follow`), 먼저 보내고 그 manifest 경로와 함께 그렇게 감독에게 돌려준다. 켜진 뒤에는 사용자가 저장할 때 애드온이 스스로 보낸다. 네가 저장마다 `export_fbx`를 부를 일이 아니다.
 - **Unity에서 받기**(FBX·OBJ·GLB): `import claude_hand_chat; print(claude_hand_chat.import_model(r"<manifest 경로>"))`
   - Unity 담당이 `ch_export_model`로 보낸 것이다. 출력의 `added`가 여기서 붙은 실제 이름이다.
 - `ModuleNotFoundError`가 나면 Claude Hand Chat 애드온이 없는 것이고, `AttributeError`(함수가 없음)가 나면 예전 버전인 것이다. 아무것도 바꾸지 말고, `uv run tools/claude_hand.py update`를 한 뒤 Blender를 다시 열어야 한다고 감독에게 보고한다.

@@ -45,7 +45,7 @@ namespace ClaudeHand.Editor
         private JObject _offer;             // a request asked here that changed other windows too: {request, label, ts, windows} (see DrawUndo)
         [SerializeField] private bool _showOthers = true;
         private int _unread;                // replies and permission prompts that came while this window had no focus
-        [SerializeField] private string _undoNote;  // goes along with the next message after "되돌리기"
+        [SerializeField] private string _undoNote;  // goes along with the next message: what happened here without Claude (NoteForClaude)
         private bool _followNewest = true;  // scrolled to the bottom: new messages keep it there; reading older ones: stay put
         private float _contentHeight;
         private bool _includeSelection = true;
@@ -78,6 +78,8 @@ namespace ClaudeHand.Editor
             public string Caption;
             public bool Alert;        // "notice" from the channel: a dialog stopped the window doing the work
             public bool Cost;         // "notice" from the channel: what the request took, a quiet line under its result
+            public string Key;        // "notice" from this editor (Tell): what it is about; the same again changes this line
+            public int Count;         // ... and how often it was told
         }
 
         private readonly Dictionary<string, Texture2D> _images = new Dictionary<string, Texture2D>();  // by file; null = gone
@@ -93,6 +95,41 @@ namespace ClaudeHand.Editor
         private static void Open()
         {
             GetWindow<ChChatWindow>("Claude Hand");
+        }
+
+        /// <summary>
+        /// Something happened in this project without Claude (ch_model_follow: a model was replaced because its .blend
+        /// was saved, or was sent from Blender's panel): a quiet line in the open chat windows, and a note that goes
+        /// along with the next message so that Claude knows. The same thing again (the same key) changes the line it
+        /// has instead of adding one, also when two models take turns: saving often must not fill the window.
+        /// </summary>
+        internal static void Tell(string key, string text, string note)
+        {
+            foreach (var window in Resources.FindObjectsOfTypeAll<ChChatWindow>())
+            {
+                // The lines of this kind at the end of the window: is this one's among them?
+                var same = window._entries.AsEnumerable().Reverse().TakeWhile(e => e.Kind == "notice" && e.Key != null)
+                    .FirstOrDefault(e => e.Key == key);
+                if (same != null)
+                {
+                    same.Count++;
+                    same.Text = $"{text} · {same.Count}번째 ({DateTime.Now:HH:mm})";
+                }
+                else
+                {
+                    window._entries.Add(new Entry { Kind = "notice", Key = key, Count = 1, Text = $"{text} ({DateTime.Now:HH:mm})" });
+                }
+                window.NoteForClaude(note);
+                if (window._followNewest) window._scroll.y = float.MaxValue;
+                window.Repaint();
+            }
+        }
+
+        /// <summary>Goes along with the next message, once: Claude would otherwise still count on what is no longer so.</summary>
+        private void NoteForClaude(string note)
+        {
+            if (string.IsNullOrEmpty(note) || (_undoNote ?? string.Empty).Contains(note)) return;
+            _undoNote = string.IsNullOrEmpty(_undoNote) ? note : _undoNote + "\n" + note;
         }
 
         private void OnEnable()
@@ -575,7 +612,7 @@ namespace ClaudeHand.Editor
                         DrawPermission(entry);
                         break;
                     case "notice":  // from this window (되돌리기) or the channel (a dialog stopped another window, what a request took)
-                        if (entry.Cost) EditorGUILayout.LabelField(entry.Text, EditorStyles.wordWrappedMiniLabel);
+                        if (entry.Cost || entry.Key != null) EditorGUILayout.LabelField(entry.Text, EditorStyles.wordWrappedMiniLabel);
                         else EditorGUILayout.HelpBox(entry.Text, entry.Alert ? MessageType.Warning : MessageType.Info);
                         break;
                     case "image":
@@ -695,8 +732,8 @@ namespace ClaudeHand.Editor
             if (undone == null) return null;
             var done = undone.report?.Summary();
             _entries.Add(new Entry { Kind = "notice", Text = $"되돌렸어요: '{undone.label}' ({undone.time}) 이후의 변경." + (done != null ? " " + done : "") });
-            _undoNote = $"[사용자가 채팅창에서 '{undone.label}' ({undone.time}) 요청 이후의 Unity 변경을 Undo로 되돌렸음" +
-                        (done != null ? ". " + done : "") + "]";
+            NoteForClaude($"[사용자가 채팅창에서 '{undone.label}' ({undone.time}) 요청 이후의 Unity 변경을 Undo로 되돌렸음" +
+                          (done != null ? ". " + done : "") + "]");
             _followNewest = true;
             _scroll.y = float.MaxValue;
             return undone;

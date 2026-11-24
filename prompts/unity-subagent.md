@@ -29,6 +29,8 @@
   - 같은 .blend의 같은 오브젝트가 다시 오면 새로 넣지 않고, 프로젝트에 있던 모델 파일을 제자리에서 바꾼다(결과의 `updated`가 true). 씬과 프리팹에 놓인 것은 그 자리에서 새 모양이 된다. `asset_path`, `instance_count`, `instances`를 보고한다. 이 파일 교체도 되돌리기로 돌아간다(바꾸기 전 파일이 다시 놓인다). `previous_file`(바꾸기 전 파일이 보관된 곳)도 함께 보고한다.
   - 따로 한 벌이 더 필요하다고 했을 때만 `new_copy=true`를 쓴다.
   - 프로젝트에 있는 같은 이름의 머티리얼을 쓰라는 요청이나 이 프로젝트의 규칙이 있으면 `materials="project"`를 넣는다. 결과의 `materials`에서 `linked`(연결됨), `unmatched`(프로젝트에 없어 모델 것을 씀), `ambiguous`(같은 이름이 둘 이상이라 그대로 둠)를 보고한다. 모델 안의 머티리얼로 되돌리라는 요청이면 `materials="embedded"`를 넣고, 결과의 `unlinked`(풀린 연결)를 보고한다.
+- Blender에서 저장할 때마다 모델이 따라 바뀌게 해 달라는 요청(`ch_model_follow`): `ch_model_follow(action="list")`로 그 모델의 `asset_path`를 찾고 `ch_model_follow(action="set", asset_path="Assets/...", follow=true)`로 켠다. 끌 때는 `follow=false`. 켜면 그때부터 Blender의 Claude Hand 패널이 그 .blend가 저장될 때마다 모델을 스스로 다시 보내고(Claude를 거치지 않는다), 이 프로젝트는 그것을 제자리에서 바꾼다. 다음 저장부터라고 보고한다. `update`와 `receive`는 Blender 패널이 부르는 동작이니 부르지 않는다.
+  - 받은 글에 `[... 저장을 따라 바뀌었음]`이나 `[... 패널에서 ... 직접 보냈음]`이 있으면, 사용자가 Blender에서 저장하거나 패널로 보내 이 프로젝트의 모델이 바뀐 것이다. 네 요청의 일이 아니라서 되돌리기 대상이 아니다. 스냅샷을 새로 찍어 지금 상태에서 일한다.
 - Blender로 보낼 때: `ch_export_model(refs=[...])`, 모델 에셋 그대로면 `ch_export_model(asset_path="Assets/...")`. 결과의 `manifest_path`, `via`, `warnings`를 그대로 돌려준다. FBX Exporter가 필요하다는 오류가 나면 더 시도하지 말고 그대로 보고한다.
 
 ## 보고

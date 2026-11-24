@@ -7,6 +7,9 @@ It is also what that subagent calls, through MCP for Blender's execute_code, for
 Blender: undo points (mark_undo_point, undo_last_request) and moving objects to another Blender or to and from Unity
 (export_blend, import_blend, export_fbx, import_model).
 
+And one thing it does with no Claude at all: a model that was told in Unity to follow this file is sent there again
+whenever the file is saved, straight to that Unity editor's own bridge (see "models that follow this file").
+
 Messages go to the claude-hand-chat channel (tools/chat_channel.py in the claude-hand repo), which
 the supervisor Claude Code session runs; the supervisor hands them to blender-<file> and answers here.
 Networking runs on a background thread; everything that touches bpy runs on the main thread
@@ -18,7 +21,7 @@ Install: `uv run tools/claude_hand.py blender-install-chat` (or Preferences > Ad
 bl_info = {
     "name": "Claude Hand Chat",
     "author": "claude-hand",
-    "version": (0, 15, 0),
+    "version": (0, 16, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar (N) > Claude Hand",
     "description": "Chat with this Blender window's claude-hand subagent",
@@ -26,12 +29,15 @@ bl_info = {
 }
 
 import base64
+import contextlib
 import datetime
 import functools
+import hashlib
 import json
 import os
 import queue
 import re
+import socket
 import subprocess
 import sys
 import textwrap
@@ -66,6 +72,11 @@ IMAGE_LINES = 8         # what a result preview counts for when the panel decide
 ALERT_FRESH_SECONDS = 30.0  # older items (history shown again after a restart) never blink the taskbar
 UNDO_KEPT = 20          # undo points kept for the newest requests
 UNDO_PROP = "claude_hand_undo"  # on every scene: "<this run>:<newest undo point set before this state>"
+SENT_AS = "claude_hand_sent_as"  # on an object that went to Unity: the name it went under, which Unity knows its model by
+FOLLOW_TOOL = "ch_model_follow"  # Claude Hand Tools' tool for models that follow their .blend (0.16 and later)
+UNITY_LOOK_SECONDS = 5.0         # how often the panel looks whether another Unity editor has opened
+HEAVY_SECONDS = 1.0              # a model whose export took longer than this is exported on a save only when it was touched
+BUSY_TRIES, BUSY_WAIT = 8, 2.5   # how long a send waits for a Unity that is compiling or reloading its scripts
 
 _entries = []            # main thread only
 _status = ["연결 중..."]  # main thread only
@@ -89,6 +100,22 @@ _undo_note = [""]         # main thread only: goes along with the next message a
 _undo_run = f"{os.getpid()}-{int(time.time())}"  # undo points of another Blender run never match
 _native_input = [None]    # main thread only: the Windows input box (a PowerShell process) while it is open
 _previews = [None]        # main thread only: thumbnails of result previews (bpy.utils.previews), by file path
+# Main thread only: the models in Unity that came from this file, and the looks that send the ones that follow it.
+_follow = {
+    "path": "",        # this file's path at the last look: a save under another name shows against it
+    "moved_from": "",  # ... and what it was before such a save, until an open Unity has been told
+    "due": None,       # why a look is due ("save", "undo", "open", "unity", "look"), or None
+    "busy": 0,         # how many worker threads are talking to Unity (a look, a button of the panel): no look starts meanwhile
+    "rows": [],        # what the panel lists: one dict per model (_row)
+    "editors": [],     # the Unity editors that are open, as the panel offers them: [(name, hash)]
+    "unity": None,     # (hash, pid) of those editors at the last look; None before the first
+    "looked": 0.0,     # when the editors were last looked for
+    "seen": set(),     # (hash, asset) of the models compared with Unity once since this file was opened
+    "models": {},      # (hash, asset) -> {"seq", "snapshot", "took"}: as of the last time each was found in step
+    "status": "",      # the panel's line about the last look
+}
+# Main thread only: what Blender said was changed, and when (a running count). "own": a look is exporting right now.
+_touched = {"seq": 0, "objects": {}, "other": 0, "own": False}
 
 
 # --------------------------------------------------------------------------- server access (any thread)
@@ -599,7 +626,8 @@ def _undo_newest(note=False):
                               "Blender의 실행 취소 기록에서 밀려났습니다.")
     _marks.pop()
     if note:
-        _undo_note[0] = f"[사용자가 채팅창에서 '{describe_mark(mark)}' 요청 이후의 Blender 변경을 실행 취소로 되돌렸음]"
+        _note_for_claude(f"[사용자가 채팅창에서 '{describe_mark(mark)}' 요청 이후의 Blender 변경을 실행 취소로 되돌렸음]")
+    _follow_due("undo")  # a model that follows this file goes back in Unity too, though nothing was saved
     return True, _notice(f"되돌렸어요: '{describe_mark(mark)}' 이후의 변경")
 
 
@@ -751,32 +779,141 @@ def import_blend(manifest):
     return {"added": added, "renamed": renamed}
 
 
-def export_fbx(roots, name="model"):
-    """Export the named objects and their children as an FBX in the exchange folder, set up for Unity (Y up, -Z
-    forward, textures embedded). Returns {"manifest": path for Unity's ch_import_model, "objects": names exported}.
-    The selection is put back as it was. Sending the same objects of the same saved .blend again makes Unity replace
-    the model it already has in place; from a file that was never saved it cannot tell, and adds a new one."""
-    roots, objects = _with_children(roots)
-    name, transfer_id = _transfer_id(name)
+def _stable_hash(key):
+    """In place of Python's hash(), which gives another number in every Blender run."""
+    return int.from_bytes(hashlib.blake2b(repr(key).encode("utf-8"), digest_size=8).digest(), "little", signed=True)
+
+
+@contextlib.contextmanager
+def _same_numbers():
+    """While this is open, Blender's FBX exporter numbers what it writes by name alone. It makes those numbers with
+    hash(), which Python seeds anew in every run, so the same model came out as other bytes after each restart of
+    Blender, and whether Unity has this already could not be told from the file. The exporter's own hash() is back
+    afterwards, with the numbers it had handed out, so an export the user starts is as it always was. With an
+    exporter built another way nothing is done: the file is right all the same, only different in every run."""
+    try:
+        from io_scene_fbx import fbx_utils
+        kept = dict(fbx_utils._keys_to_uuids), dict(fbx_utils._uuids_to_keys)
+    except Exception:
+        yield
+        return
+    fbx_utils._keys_to_uuids.clear()
+    fbx_utils._uuids_to_keys.clear()
+    fbx_utils.hash = _stable_hash  # the module's own name now comes before the built-in
+    try:
+        yield
+    finally:
+        vars(fbx_utils).pop("hash", None)
+        for mine, theirs in zip(kept, (fbx_utils._keys_to_uuids, fbx_utils._uuids_to_keys)):
+            theirs.clear()
+            theirs.update(mine)
+
+
+WRITTEN_AT = ((b"Year", 1970), (b"Month", 1), (b"Day", 1), (b"Hour", 0), (b"Minute", 0), (b"Second", 0), (b"Millisecond", 0))
+
+
+def _without_time(path):
+    """Take the time of writing out of an FBX (CreationTimeStamp, seven whole numbers near its start: nothing reads
+    them), so that two exports of the same thing are the same file."""
+    with open(path, "r+b") as f:
+        head = bytearray(f.read(4096))
+        at = head.find(b"CreationTimeStamp")
+        if at < 0:
+            return
+        for field, value in WRITTEN_AT:
+            key = bytes([len(field)]) + field + b"I"  # a node's name, then one int32
+            found = head.find(key, at, at + 400)
+            if found >= 0:
+                head[found + len(key):found + len(key) + 4] = value.to_bytes(4, "little")
+        f.seek(0)
+        f.write(head)
+
+
+def _write_fbx(objects, path):
+    """Write the objects as an FBX set up for Unity (Y up, -Z forward, textures embedded). Nothing in the scene is
+    touched: the exporter is handed what to take instead of having it selected, so the selection, the active object
+    and the mode stay as they are (also in the middle of editing a mesh). The same objects give the same file whenever
+    and in whichever Blender run they are written (_same_numbers, _without_time): the file itself tells whether Unity
+    has this already. One exception is a mesh with a Bevel modifier, whose UVs Blender works out a little differently
+    every time."""
     layer = bpy.context.view_layer
     missing = [o.name for o in objects if o.name not in layer.objects]
     if missing:
         raise ValueError("지금 뷰 레이어에 없는 오브젝트는 내보낼 수 없습니다: " + ", ".join(missing))
-    selected, active = {o.name for o in layer.objects if o.select_get()}, layer.objects.active
-    for obj in layer.objects:
-        obj.select_set(False)
-    for obj in objects:
-        obj.select_set(True)
-    layer.objects.active = objects[0]
-    try:
-        bpy.ops.export_scene.fbx(filepath=os.path.join(exchange_dir(), transfer_id + ".fbx"), use_selection=True,
-                                 apply_scale_options="FBX_SCALE_ALL", axis_forward="-Z", axis_up="Y", path_mode="COPY",
-                                 embed_textures=True)
-    finally:
-        for obj in layer.objects:
-            obj.select_set(obj.name in selected)
-        layer.objects.active = active
-    manifest = _write_manifest(name, transfer_id, {"format": "claude-hand/model@1", "model_file": transfer_id + ".fbx", "roots": roots,
+    options = dict(filepath=path, use_selection=True, apply_scale_options="FBX_SCALE_ALL", axis_forward="-Z", axis_up="Y",
+                   path_mode="COPY", embed_textures=True)
+    active = layer.objects.active
+    mode = active.mode if active is not None else "OBJECT"
+    with _same_numbers():
+        if hasattr(bpy.context, "temp_override"):
+            with bpy.context.temp_override(selected_objects=list(objects)):
+                bpy.ops.export_scene.fbx(**options)
+        else:  # Blender before 3.2: select them, and put the selection back
+            selected = {o.name for o in layer.objects if o.select_get()}
+            for obj in layer.objects:
+                obj.select_set(obj in objects)
+            try:
+                bpy.ops.export_scene.fbx(**options)
+            finally:
+                for obj in layer.objects:
+                    obj.select_set(obj.name in selected)
+    if active is not None and layer.objects.active == active and active.mode != mode:
+        bpy.ops.object.mode_set(mode=mode)  # an older exporter leaves the mesh that was being edited in Object Mode
+    _without_time(path)
+
+
+def sent_as(obj):
+    """The name this object went to Unity under ("" when it never did)."""
+    value = obj.get(SENT_AS)
+    return value if isinstance(value, str) else ""
+
+
+def object_for(key):
+    """The object Unity knows as `key`: the one that was sent under that name, whatever it is called by now, so
+    renaming an object does not cut it off from its model. A copy of it carries the mark too: then it is the one that
+    still has the name, and when neither has, none (which was meant cannot be told: the panel asks). An object from
+    before there were marks is found by its name."""
+    marked = [o for o in bpy.data.objects if sent_as(o) == key]
+    if len(marked) == 1:
+        return marked[0]
+    named = bpy.data.objects.get(key)
+    if marked:
+        return named if named is not None and named in marked else None
+    return named
+
+
+def key_of(obj):
+    """The name Unity knows this object's model by: the one it was sent under while that is still this object's (a
+    copy of it is another thing), else its own name, or that with a number when an object that was renamed since
+    still goes by it."""
+    key = sent_as(obj)
+    if key and object_for(key) == obj:
+        return key
+    key, n = obj.name, 2
+    while any(sent_as(other) == key for other in bpy.data.objects if other != obj):
+        key, n = f"{obj.name}#{n}", n + 1
+    return key
+
+
+def _mark_sent(obj):
+    key = key_of(obj)
+    if sent_as(obj) != key:
+        obj[SENT_AS] = key
+    return key
+
+
+def export_fbx(roots, name="model"):
+    """Export the named objects and their children as an FBX in the exchange folder, set up for Unity (Y up, -Z
+    forward, textures embedded). Returns {"manifest": path for Unity's ch_import_model, "objects": names exported}.
+    The selection, the active object and the mode are left as they are. Sending the same objects of the same saved
+    .blend again makes Unity replace the model it already has in place, also after they were renamed here: each
+    object sent keeps the name it went under as a custom property (claude_hand_sent_as). From a file that was never
+    saved Unity cannot tell, and adds a new model."""
+    roots, objects = _with_children(roots)
+    name, transfer_id = _transfer_id(name)
+    _write_fbx(objects, os.path.join(exchange_dir(), transfer_id + ".fbx"))
+    keys = [_mark_sent(bpy.data.objects[root]) for root in roots]
+    manifest = _write_manifest(name, transfer_id, {"format": "claude-hand/model@1", "model_file": transfer_id + ".fbx", "roots": keys,
                                                    "objects": sorted(o.name for o in objects)})
     result = {"manifest": manifest, "objects": sorted(o.name for o in objects)}
     if not bpy.data.filepath:
@@ -812,6 +949,531 @@ def import_model(manifest):
     return {"added": sorted(o.name for o in bpy.data.objects if o not in before), "file": path.replace("\\", "/")}
 
 
+# --------------------------------------------------------------------------- models that follow this file
+#
+# A model that went to Unity can be told there to follow this .blend (Claude Hand Tools' ch_model_follow keeps that
+# with the model: the project that gets changed has the say). From then on this add-on sends it again by itself
+# whenever the file is saved, straight to that Unity editor's own bridge. No Claude takes part: it costs no tokens
+# and no minute of waiting, and it works with Claude Hand closed.
+#
+# One "look" does it all: ask every open Unity editor which of its models came from this file, export the ones that
+# follow, and send those that are not what Unity has already. A look is due after a save, after 되돌리기, when a
+# file is opened, when a Unity editor opens, and when the panel asks. Everything that touches bpy runs on the main
+# thread (from tick); talking to Unity runs on a worker thread, and its answers come back through the inbox.
+
+
+class UnityError(Exception):
+    def __init__(self, code, message=""):
+        super().__init__(message or code)
+        self.code, self.message = code, message
+
+
+def unity_projects():
+    """The Unity editors that are open with Claude Hand Tools new enough for models that follow their .blend, as
+    their bridges register them in ~/.claude-hand/unity (ChBridge.cs): [{"name", "hash", "port", "token", "pid"}]."""
+    home = os.environ.get("CLAUDE_HAND_HOME") or os.path.join(os.path.expanduser("~"), ".claude-hand")
+    folder, found = os.path.join(home, "unity"), []
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return found
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(folder, name), encoding="utf-8") as f:
+                entry = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if isinstance(entry, dict) and entry.get("format") == "claude-hand/unity-bridge@1" and \
+                any(isinstance(tool, dict) and tool.get("name") == FOLLOW_TOOL for tool in entry.get("tools") or []):
+            found.append(entry)
+    return found
+
+
+def _unity_once(entry, tool, params, timeout):
+    payload = json.dumps({"token": entry.get("token", ""), "tool": tool, "params": params, "timeout": int(max(5, timeout - 5))}) + "\n"
+    try:
+        with socket.create_connection(("127.0.0.1", int(entry["port"])), 1.0) as sock:
+            sock.sendall(payload.encode("utf-8"))
+            sock.settimeout(timeout)
+            buffer = b""
+            while not buffer.endswith(b"\n"):
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                buffer += chunk
+        reply = json.loads(buffer.decode("utf-8") or "{}")
+    except (OSError, KeyError, ValueError) as exc:
+        raise UnityError("UNREACHABLE", str(exc)) from exc
+    if not reply.get("ok"):
+        error = reply.get("error") or {}
+        raise UnityError(error.get("code", "FAILED"), error.get("message", ""))
+    result = reply.get("result") or {}
+    if result.get("success") is False:  # the tool itself said no
+        raise UnityError(result.get("code", "FAILED"), (result.get("data") or {}).get("message", ""))
+    return result.get("data") or {}
+
+
+def unity_call(entry, tool, params, timeout=30.0, tries=1):
+    """One call to a Unity editor's own bridge: a line of JSON in, a line out (as tools/unity_bridge.py does it for
+    the subagents). Returns the tool's data, or raises UnityError. With tries, it waits for an editor that is
+    compiling, and for one that reloads its scripts: its socket is away for a moment and comes back on another port,
+    so the registry is read again. Any thread."""
+    last = UnityError("UNREACHABLE", "")
+    for attempt in range(tries):
+        if attempt:
+            time.sleep(BUSY_WAIT)
+            entry = next((e for e in unity_projects() if e.get("hash") == entry.get("hash")), None)
+            if entry is None:  # closed meanwhile
+                break
+        try:
+            return _unity_once(entry, tool, params, timeout)
+        except UnityError as exc:
+            last = exc
+            if exc.code not in ("EDITOR_BUSY", "UNREACHABLE", "UNAUTHORIZED"):
+                raise
+    raise last
+
+
+def _why(exc):
+    """A UnityError in the user's words."""
+    return {"EDITOR_BUSY": "Unity가 컴파일 중이에요", "UNREACHABLE": "Unity가 응답하지 않아요",
+            "TIMEOUT": "Unity가 제때 답하지 않았어요(대화상자가 떠 있을 수 있어요)",
+            "CONFLICT": "그 프로젝트에서 Claude가 일하는 중이에요. 끝난 뒤 다시 해 주세요",
+            "NOT_FOUND": "그 프로젝트의 Claude Hand Tools가 오래된 버전이에요"}.get(exc.code) or exc.message or exc.code
+
+
+def _follow_due(reason):
+    """A look is due. A save outranks the other reasons: it sends whatever state the file is in."""
+    if _follow["due"] != "save":
+        _follow["due"] = reason
+
+
+def _same_path(one, other):
+    return os.path.normcase(os.path.abspath(one)) == os.path.normcase(os.path.abspath(other)) if one and other else one == other
+
+
+@bpy.app.handlers.persistent
+def _on_saved(*args):
+    """After a save. Saving a copy elsewhere (Save Copy) is not a save of this file; saving under another name is,
+    and takes the models along: Unity is told with the next look that they belong to the new file."""
+    path = bpy.data.filepath
+    if args and isinstance(args[0], str) and args[0] and not _same_path(args[0], path):
+        return
+    if _follow["path"] and path and not _same_path(_follow["path"], path):
+        _follow["moved_from"] = _follow["path"]
+    _follow["path"] = path
+    _follow_due("save")
+
+
+@bpy.app.handlers.persistent
+def _on_loaded(*_args):
+    """Another file: nothing known of the one before holds, and what is saved in it may be news to Unity."""
+    _follow.update(path=bpy.data.filepath, moved_from="", due=None, rows=[], seen=set(), models={}, status="")
+    _touched.update(seq=0, objects={}, other=0)
+    _follow_due("open")
+
+
+@bpy.app.handlers.persistent
+def _on_touched(scene, depsgraph):
+    """What Blender says was changed (moved, edited, a modifier or material value set): kept as a running count, so
+    a look can tell whether anything was done to a model since it was last found in step with Unity. Selecting and
+    the like come with no such flag. Counted only while a model follows this file, and not what a look's own export
+    makes Blender work out anew."""
+    if not _follow["models"] or _touched["own"]:
+        return
+    for update in depsgraph.updates:
+        if not (update.is_updated_geometry or update.is_updated_transform or update.is_updated_shading):
+            continue
+        _touched["seq"] += 1
+        if isinstance(update.id, bpy.types.Object):
+            _touched["objects"][update.id.name] = _touched["seq"]
+        else:  # a mesh, a material: whose it is does not show here, so it counts for every model
+            _touched["other"] = _touched["seq"]
+
+
+def _follow_tick(now):
+    """From tick: start the look that is due, and notice a Unity editor that was not open before."""
+    if not _follow["path"]:
+        _follow["path"] = bpy.data.filepath  # the file the add-on was turned on in
+    if _follow["busy"]:
+        return
+    if now - _follow["looked"] >= UNITY_LOOK_SECONDS:
+        _follow["looked"] = now
+        editors = unity_projects()
+        _follow["editors"] = [(str(e.get("name")), str(e.get("hash"))) for e in editors]
+        open_now = {(e.get("hash"), e.get("pid")) for e in editors}
+        if _follow["unity"] is None or open_now - _follow["unity"]:
+            _follow_due("unity")
+        _follow["unity"] = open_now
+        if not editors and _follow["rows"]:
+            _follow["rows"] = []
+            _redraw()
+    if _follow["due"]:
+        reason, _follow["due"] = _follow["due"], None
+        _start_look(reason)
+
+
+WHY_LOOKED = {"save": "저장", "undo": "되돌리기", "open": "파일 열기", "unity": "Unity 열림", "look": "확인"}
+
+
+def _start_look(reason):
+    path, editors = bpy.data.filepath, unity_projects()
+    _follow["editors"] = [(str(e.get("name")), str(e.get("hash"))) for e in editors]
+    if not path or not editors:
+        _follow["rows"] = []
+        return
+    # What is saved goes to Unity, or the state right after a 되돌리기. A file with changes that are not saved yet
+    # is only listed when it is opened or a Unity opens: its next save sends.
+    send = reason in ("save", "undo", "look") or not bpy.data.is_dirty
+    _follow["busy"] += 1
+    threading.Thread(target=_look, args=(editors, path, _follow["moved_from"], reason, send), daemon=True).start()
+
+
+def _look(editors, path, moved_from, reason, send):
+    """Worker thread: ask each open Unity editor for its models that came from Blender."""
+    found = []
+    for entry in editors:
+        params = {"action": "list", "source": path, "from_panel": True}
+        if moved_from:
+            params["moved_from"] = moved_from
+        try:
+            found.append((entry, unity_call(entry, FOLLOW_TOOL, params, timeout=20).get("models") or [], None))
+        except UnityError as exc:
+            found.append((entry, [], exc))
+    _inbox.put(("follow_listed", {"found": found, "path": path, "moved_from": moved_from, "reason": reason, "send": send}))
+
+
+def _row(entry, model):
+    """One model of a Unity project as the panel lists it, with the objects here that it is made of ("objects": their
+    names, None when they cannot be told) and what stands in the way of sending it ("problem")."""
+    row = {"project": str(entry.get("name")), "hash": str(entry.get("hash")), "asset": str(model.get("asset_path")),
+           "name": str(model.get("name")), "roots": [str(key) for key in model.get("roots") or []], "follow": bool(model.get("follow")),
+           "here": bool(model.get("here")), "source": str(model.get("source") or ""), "objects": [], "problem": "", "missing": ""}
+    for key in row["roots"]:
+        obj = object_for(key)
+        if obj is None:
+            twins = [o.name for o in bpy.data.objects if sent_as(o) == key]
+            row.update(objects=None, missing=key, problem=(
+                f"'{key}'(으)로 보낸 오브젝트가 둘이에요({', '.join(twins[:3])}). 이 모델로 갈 것을 고르고 [선택한 오브젝트로 잇기]를 누르세요."
+                if twins else f"이 파일에 '{key}' 오브젝트가 없어요. 이름을 바꿨으면 그 오브젝트를 고르고 [선택한 오브젝트로 잇기]를 누르세요."))
+            break
+        row["objects"].append(obj.name)
+    row["label"] = _names(row["objects"] or row["roots"])
+    return row
+
+
+def _names(names):
+    """A model by the objects it is made of here, as the user knows it: "Chair", "Chair, Table", "Chair, Table 외 2개"."""
+    return ", ".join(names[:2]) + (f" 외 {len(names) - 2}개" if len(names) > 2 else "")
+
+
+def _snapshot(objects):
+    """What Blender does not tell of when it changes: the names of the objects that go, and the image files their
+    materials read (an image painted on or edited elsewhere, then saved)."""
+    images = set()
+    for obj in objects:
+        for slot in getattr(obj, "material_slots", ()):
+            tree = slot.material.node_tree if slot.material is not None else None
+            for node in (tree.nodes if tree is not None else ()):
+                image = getattr(node, "image", None)
+                if image is None or not image.filepath:
+                    continue
+                path = bpy.path.abspath(image.filepath, library=image.library)
+                try:
+                    stat = os.stat(path)
+                    images.add((path, stat.st_mtime_ns, stat.st_size))
+                except OSError:
+                    images.add((path, 0, 0))
+    return tuple(sorted(o.name for o in objects)), tuple(sorted(images))
+
+
+def _file_hash(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _export_followed(row, objects):
+    """Export a model that follows this file, under a name of its own in the exchange folder (always the same name:
+    the file is not kept, and its name gets into the FBX). Returns (manifest, the files written)."""
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", os.path.splitext(os.path.basename(row["asset"]))[0]).strip("_") or "model"
+    transfer_id = f"follow_{row['hash']}_{stem}"[:80]
+    model = os.path.join(exchange_dir(), transfer_id + ".fbx")
+    _touched["own"] = True
+    try:
+        _write_fbx(objects, model)
+        bpy.context.view_layer.update()  # what the export itself stirred up is told now, and passed over (_on_touched)
+    finally:
+        _touched["own"] = False
+    manifest = _write_manifest(row["name"], transfer_id, {"format": "claude-hand/model@1", "model_file": transfer_id + ".fbx",
+                                                         "roots": row["roots"], "objects": sorted(o.name for o in objects)})
+    return manifest, [model, manifest]
+
+
+def _discard(files):
+    for path in files:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _compare(row, model, first_look):
+    """Main thread: export a model that follows and say whether it is to be sent ({"row", "manifest", "files"}) or not
+    (None). It is sent when the file that comes out is not the one Unity has (its hash is in the list). Two things
+    keep that from sending what did not change:
+      - A model whose export took long is not exported at all while Blender tells of nothing done to it.
+      - A mesh with a Bevel modifier comes out differently every time. So when the file differs though nothing was
+        done to the model, it is exported once more: two exports that differ from each other say nothing changed."""
+    key = (row["hash"], row["asset"])
+    known = _follow["models"].setdefault(key, {"seq": -1, "snapshot": None, "took": 0.0})
+    _, objects = _with_children(row["objects"])
+    snapshot, seq = _snapshot(objects), _touched["seq"]
+    touched = first_look or known["seq"] < 0 or snapshot != known["snapshot"] or _touched["other"] > known["seq"] or \
+        any(_touched["objects"].get(o.name, 0) > known["seq"] for o in objects)
+    if not touched and known["took"] > HEAVY_SECONDS:
+        return None
+    started = time.perf_counter()
+    manifest, files = _export_followed(row, objects)
+    known["took"] = time.perf_counter() - started
+    written = _file_hash(files[0])
+    if written == model.get("file_hash"):
+        known.update(seq=seq, snapshot=snapshot)
+        _discard(files)
+        return None
+    if not touched:
+        _export_followed(row, objects)
+        if _file_hash(files[0]) != written:  # never twice the same: what Unity has is as good as this
+            _discard(files)
+            return None
+    return {"row": row, "manifest": manifest, "files": files, "seq": seq, "snapshot": snapshot}
+
+
+def _follow_listed(payload):
+    """Main thread: what the open Unity editors hold of this file. Lists it for the panel and, when this look sends,
+    exports the models that follow and hands on the ones Unity does not have yet."""
+    if not _same_path(payload["path"], bpy.data.filepath):  # another file was opened meanwhile
+        _worker_over()
+        return
+    if payload["moved_from"] and _follow["moved_from"] == payload["moved_from"] and any(error is None for _, _, error in payload["found"]):
+        _follow["moved_from"] = ""  # an open Unity knows now
+    if payload["send"]:
+        # What was changed just before (a script that edits and saves in one go) is told now, while it still counts:
+        # a look's own export would take it for its own stirring.
+        bpy.context.view_layer.update()
+    rows, jobs, unreachable = [], [], []
+    for entry, models, error in payload["found"]:
+        if error is not None:
+            unreachable.append(f"{entry.get('name')}: {_why(error)}")
+        for model in models:
+            row = _row(entry, model)
+            if row["here"] or (row["objects"] and all(sent_as(bpy.data.objects[name]) for name in row["objects"])):
+                rows.append(row)  # of this file, or of another one that this file's objects once went to (it was moved)
+            if not (payload["send"] and row["here"] and row["follow"] and row["objects"]):
+                continue
+            key = (row["hash"], row["asset"])
+            try:
+                job = _compare(row, model, key not in _follow["seen"])
+            except Exception as exc:  # an export that fails must not take the others along
+                row["problem"] = f"내보내지 못했어요: {exc}"
+                continue
+            _follow["seen"].add(key)
+            if job is not None:
+                jobs.append(job)
+    _follow["rows"] = rows
+    _follow["status"] = "; ".join(unreachable)
+    if jobs:
+        threading.Thread(target=_send, args=(jobs, payload["reason"]), daemon=True).start()  # the look goes on
+    else:
+        _worker_over()
+    _redraw()
+
+
+def _send(jobs, reason):
+    """Worker thread: hand each exported model to its Unity editor, which replaces the one it has in place."""
+    results = []
+    for job in jobs:
+        entry = next((e for e in unity_projects() if e.get("hash") == job["row"]["hash"]), None)
+        try:
+            if entry is None:
+                raise UnityError("UNREACHABLE", "")
+            results.append((job, unity_call(entry, FOLLOW_TOOL, {"action": "update", "manifest": job["manifest"], "from_panel": True,
+                                                                 "why": WHY_LOOKED.get(reason, "저장")}, timeout=120, tries=BUSY_TRIES), None))
+        except UnityError as exc:
+            results.append((job, {}, exc))
+    _inbox.put(("follow_sent", {"results": results, "reason": reason}))
+
+
+def _follow_sent(payload):
+    """Main thread: how the sends went. A model Unity took is in step from now on; one it could not take is sent
+    again with the next look."""
+    why = WHY_LOOKED.get(payload["reason"], "저장")
+    for job, data, error in payload["results"]:
+        row, known = job["row"], _follow["models"].setdefault((job["row"]["hash"], job["row"]["asset"]), {"seq": -1, "snapshot": None, "took": 0.0})
+        _discard(job["files"])
+        state = data.get("state")
+        if error is not None:
+            known.update(seq=-1, snapshot=None)
+            _tell(f"follow-failed:{row['hash']}:{row['asset']}",
+                  f"{why} → {row['project']}: {row['label']}을(를) 보내지 못했어요({_why(error)}). 다음 저장 때 다시 보냅니다.")
+        elif state == "updated":
+            known.update(seq=job["seq"], snapshot=job["snapshot"])
+            uses = int(data.get("instance_count") or 0)
+            _tell(f"follow:{row['hash']}:{row['asset']}",
+                  f"{why} → {row['project']}: {row['label']} 반영" + (f" (씬 오브젝트 {uses}개)" if uses else ""))
+        elif state == "unchanged":
+            known.update(seq=job["seq"], snapshot=job["snapshot"])
+        elif state == "missing":
+            _tell(f"follow-gone:{row['hash']}:{row['asset']}", f"{row['project']}에 {row['label']} 모델이 더 없어서 보내지 않았어요.")
+    _worker_over()
+
+
+def _tell(key, text):
+    """A line in the panel about something that happens again and again (a model sent because the file was saved).
+    The same thing again changes the line it has instead of adding one, also when two models take turns: saving
+    often must not fill the panel."""
+    stamp = time.strftime("%H:%M")
+    for entry in reversed(_entries):  # the lines of this kind at the end of the panel: is this one's among them?
+        if entry.get("kind") != "notice" or not entry.get("key"):
+            break
+        if entry["key"] == key:
+            entry["count"] = entry.get("count", 1) + 1
+            entry["text"] = f"{text} · {entry['count']}번째 ({stamp})"
+            _redraw()
+            return
+    _entries.append({"kind": "notice", "key": key, "text": f"{text} ({stamp})"})
+    del _entries[:-KEPT_ENTRIES]
+    _redraw()
+
+
+def _follow_safely(handler, *args, **kwargs):
+    """Run a step of a look. Blender drops a timer whose function raises, and this one is the chat panel's too: a
+    look that goes wrong must cost only that look."""
+    try:
+        handler(*args, **kwargs)
+    except Exception as exc:
+        _worker_over()
+        _follow["status"] = f"Unity로 보낸 모델을 살펴보다 오류가 났어요: {exc}"
+        _redraw()
+
+
+def _worker_over():
+    """A worker thread's answer has been dealt with: the next look may start."""
+    _follow["busy"] = max(0, _follow["busy"] - 1)
+
+
+def _note_for_claude(note):
+    """Goes along with the next message, once: what the user did here without Claude, which it would not know of."""
+    if note and note not in _undo_note[0]:
+        _undo_note[0] = "\n".join(filter(None, [_undo_note[0], note]))
+
+
+def _from_panel(row, params, done):
+    """Worker thread for a button of the panel: one call to the row's Unity editor, the outcome back through the inbox."""
+    def run():
+        entry = next((e for e in unity_projects() if e.get("hash") == row["hash"]), None)
+        try:
+            if entry is None:
+                raise UnityError("UNREACHABLE", "")
+            _inbox.put((done, {"row": row, "data": unity_call(entry, FOLLOW_TOOL, {**params, "from_panel": True}, timeout=120, tries=BUSY_TRIES),
+                               "error": None}))
+        except UnityError as exc:
+            _inbox.put((done, {"row": row, "data": {}, "error": exc}))
+    _follow["busy"] += 1
+    threading.Thread(target=run, daemon=True).start()
+
+
+def follow_set(row, on):
+    """The panel's check box: this model follows the file from now on (and is sent right away), or no longer does."""
+    _from_panel(row, {"action": "set", "asset_path": row["asset"], "follow": bool(on)}, "follow_set")
+
+
+def follow_relink(row):
+    """The panel's [이 파일로 잇기]: a model Unity has from another .blend (this file was moved, or renamed outside
+    Blender) is this file's from now on."""
+    _from_panel(row, {"action": "set", "asset_path": row["asset"], "source": bpy.data.filepath}, "follow_set")
+
+
+def follow_adopt(key, obj):
+    """The panel's [선택한 오브젝트로 잇기]: `obj` is the one Unity knows as `key` (it was renamed before it carried
+    a mark, or a copy of it carries the same mark). No other object goes by that name any longer."""
+    for other in bpy.data.objects:
+        if other != obj and sent_as(other) == key:
+            del other[SENT_AS]
+    obj[SENT_AS] = key
+    _follow_due("look")
+
+
+def send_to_unity(roots, project):
+    """The panel's [선택한 오브젝트 보내기]: send these objects (and their children) to an open Unity project
+    (`project`: its hash) without Claude. Unity brings the model in, places it in the scene, sets an undo point of its
+    own for it (its chat window's 되돌리기 takes it out again) and lets it follow this file. Returns "" when the send
+    is under way, else why it cannot be."""
+    if not bpy.data.filepath:
+        return "먼저 이 .blend를 저장하세요. 저장된 파일이어야 Unity가 같은 모델인지 알고, 저장할 때 다시 보낼 수 있어요."
+    entry = next((e for e in unity_projects() if e.get("hash") == project), None)
+    if entry is None:
+        return "그 Unity 프로젝트가 열려 있지 않아요."
+    try:
+        result = export_fbx(roots, roots[0])
+    except Exception as exc:
+        return f"내보내지 못했어요: {exc}"
+    row = {"project": str(entry.get("name")), "hash": str(entry.get("hash")), "asset": "", "name": roots[0], "label": _names(roots)}
+    _from_panel(row, {"action": "receive", "manifest": result["manifest"]}, "follow_received")
+    return ""
+
+
+def selected_roots():
+    """What [선택한 오브젝트 보내기] sends: the selected objects that are not under another selected one (each goes
+    with its children anyway), the active one first: it names the model."""
+    layer = bpy.context.view_layer
+    selected = [o for o in layer.objects if o.select_get()]
+    names = {o.name for o in selected}
+
+    def under_selected(obj):
+        parent = obj.parent
+        while parent is not None:
+            if parent.name in names:
+                return True
+            parent = parent.parent
+        return False
+    roots = [o.name for o in selected if not under_selected(o)]
+    active = layer.objects.active
+    if active is not None and active.name in roots:
+        roots.remove(active.name)
+        roots.insert(0, active.name)
+    return roots
+
+
+def follow_label(row):
+    """A model in the panel's list, by its objects here: "Chair → hand_test", and for one that Unity has from another
+    file, which."""
+    text = f"{row['label']} → {row['project']}"
+    if not row["here"]:
+        text += f" · {os.path.basename(row['source']) or '다른 파일'}에서 온 것으로 적혀 있음"
+    return text
+
+
+def _follow_done(payload, received=False):
+    """Main thread: a button of the panel did its work in Unity (or did not)."""
+    row, data, error = payload["row"], payload["data"], payload["error"]
+    _worker_over()
+    if error is not None:
+        _notice(f"{row['project']}: {_why(error)}")
+        return
+    if received:
+        asset = str(data.get("asset_path") or "")
+        _notice(f"{row['project']}에 {row['label']}을(를) 보냈어요" + ("(있던 모델을 바꿈)" if data.get("updated") else "(씬에 놓음)") +
+                ". 저장할 때마다 다시 갑니다. Unity 채팅창의 되돌리기로 뺄 수 있어요.")
+        _note_for_claude(f"[사용자가 Blender 패널에서 '{row['label']}'을(를) Unity {row['project']}에 직접 보냈음: {asset} "
+                         "(Claude를 거치지 않음, 저장할 때마다 다시 감)]")
+    _follow_due("look")
+
+
 def apply_event(event, payload):
     if event == "status":
         _status[0] = payload if payload is not None else (STARTING_MESSAGE if starting() else describe_missing_server())
@@ -843,6 +1505,14 @@ def apply_event(event, payload):
             _notice("다른 창은 되돌리지 못했습니다: " + str(payload.get("error", "Claude Hand가 받지 않았습니다")))
     elif event == "undone_sent":
         pass  # telling the channel is a nicety
+    elif event == "follow_listed":
+        _follow_safely(_follow_listed, payload)
+    elif event == "follow_sent":
+        _follow_safely(_follow_sent, payload)
+    elif event == "follow_set":
+        _follow_safely(_follow_done, payload)
+    elif event == "follow_received":
+        _follow_safely(_follow_done, payload, received=True)
     elif event == "native_text":
         if not send_text(payload, bpy.context.window_manager.claude_hand_chat_context):  # the box is empty again by now
             _notice("보내지 못했습니다. 앞 메시지가 Claude Hand가 켜지기를 기다리는 중이니 잠시 뒤 다시 보내 주세요.")
@@ -883,6 +1553,10 @@ def tick():
             break
         apply_event(event, payload)
         changed = True
+    try:
+        _follow_tick(time.time())
+    except Exception as exc:  # as _follow_safely: this timer is the chat panel's too
+        _follow["status"] = f"Unity로 보낸 모델을 살펴보다 오류가 났어요: {exc}"
     report_context()
     if _progress[0] is not None and time.time() - _progress[0][1] > PROGRESS_STALE:
         _progress[0] = None
@@ -1037,6 +1711,138 @@ class CLAUDEHAND_OT_stop(bpy.types.Operator):
         window, pin = window_identity()
         post_in_background("/v1/stop", {"app": "blender", "window": window, "pin": pin}, "stop_sent")
         return {"FINISHED"}
+
+
+def _follow_row(index):
+    return _follow["rows"][index] if 0 <= index < len(_follow["rows"]) else None
+
+
+class CLAUDEHAND_OT_follow_toggle(bpy.types.Operator):
+    bl_idname = "claude_hand.follow_toggle"
+    bl_label = "저장할 때 다시 보내기"
+    bl_description = ("Send this model to Unity again whenever this file is saved (Unity replaces it in place, without "
+                      "Claude), or stop doing so")
+
+    index: bpy.props.IntProperty()
+
+    def execute(self, context):
+        row = _follow_row(self.index)
+        if row is None:
+            return {"CANCELLED"}
+        follow_set(row, not row["follow"])
+        return {"FINISHED"}
+
+
+class CLAUDEHAND_OT_follow_relink(bpy.types.Operator):
+    bl_idname = "claude_hand.follow_relink"
+    bl_label = "이 파일로 잇기"
+    bl_description = ("Unity has this model from another .blend (this file was moved or renamed outside Blender): "
+                      "make it this file's from now on")
+
+    index: bpy.props.IntProperty()
+
+    def execute(self, context):
+        row = _follow_row(self.index)
+        if row is None:
+            return {"CANCELLED"}
+        follow_relink(row)
+        return {"FINISHED"}
+
+
+class CLAUDEHAND_OT_follow_adopt(bpy.types.Operator):
+    bl_idname = "claude_hand.follow_adopt"
+    bl_label = "선택한 오브젝트로 잇기"
+    bl_description = "The active object is the one this Unity model is made of (it was renamed, or a copy carries its mark)"
+
+    index: bpy.props.IntProperty()
+
+    def execute(self, context):
+        row, obj = _follow_row(self.index), context.view_layer.objects.active
+        if row is None or not row["missing"]:
+            return {"CANCELLED"}
+        if obj is None:
+            self.report({"WARNING"}, "이 모델로 갈 오브젝트를 먼저 고르세요")
+            return {"CANCELLED"}
+        follow_adopt(row["missing"], obj)
+        return {"FINISHED"}
+
+
+class CLAUDEHAND_OT_follow_send(bpy.types.Operator):
+    bl_idname = "claude_hand.follow_send"
+    bl_label = "선택한 오브젝트 보내기"
+    bl_description = ("Send the selected objects to this Unity project now, without Claude: the model is brought in, "
+                      "placed in the scene, and follows this file from then on. Unity's chat window can undo it")
+
+    project: bpy.props.StringProperty()
+
+    def execute(self, context):
+        roots = selected_roots()
+        problem = send_to_unity(roots, self.project) if roots else "보낼 오브젝트를 먼저 고르세요."
+        if problem:
+            self.report({"WARNING"}, problem)
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class CLAUDEHAND_OT_follow_look(bpy.types.Operator):
+    bl_idname = "claude_hand.follow_look"
+    bl_label = "새로 고침"
+    bl_description = "Ask the open Unity projects again which models came from this file, and send the ones that follow it"
+
+    def execute(self, context):
+        _follow_due("look")
+        return {"FINISHED"}
+
+
+def draw_follow(layout, width):
+    """The models the open Unity projects have from this file, a check box each: checked, the model is sent again
+    whenever the file is saved. What stands in a model's way is said in words under it, with the button that sets it
+    right."""
+    if not _follow["editors"]:
+        for line in wrap("열려 있는 Unity가 없습니다(Claude Hand Tools 0.16 이상이 든 프로젝트).", width):
+            layout.label(text=line)
+        return
+    rows = _follow["rows"]
+    col = layout.column(align=True)
+    if not bpy.data.filepath:
+        for line in wrap("저장한 적 없는 파일입니다. 저장하면 여기서 Unity로 보낼 수 있어요.", width):
+            col.label(text=line)
+    elif not rows:
+        col.label(text="이 파일에서 Unity로 간 모델이 없습니다.")
+    for index, row in enumerate(rows):
+        if row["here"]:
+            col.operator(CLAUDEHAND_OT_follow_toggle.bl_idname, text=follow_label(row), emboss=False,
+                         icon="CHECKBOX_HLT" if row["follow"] else "CHECKBOX_DEHLT").index = index
+        else:
+            for i, line in enumerate(wrap(follow_label(row), width)[:3]):
+                col.label(text=line, icon="DOT" if i == 0 else "BLANK1")
+            col.operator(CLAUDEHAND_OT_follow_relink.bl_idname, text="이 파일로 잇기", icon="LINKED").index = index
+        if row["problem"]:
+            for line in wrap(row["problem"], width)[:5]:
+                col.label(text=line)
+            if row["missing"]:
+                col.operator(CLAUDEHAND_OT_follow_adopt.bl_idname, text="선택한 오브젝트로 잇기", icon="RESTRICT_SELECT_OFF").index = index
+    if any(row["here"] for row in rows):
+        for line in wrap("체크한 모델은 이 파일을 저장할 때마다 Unity에서 바뀝니다.", width):
+            layout.label(text=line)
+    for line in wrap(_follow["status"], width)[:3] if _follow["status"] else ():
+        layout.label(text=line)
+    col = layout.column(align=True)
+    for name, project in _follow["editors"]:
+        col.operator(CLAUDEHAND_OT_follow_send.bl_idname, text=f"선택한 오브젝트 보내기 → {name}", icon="EXPORT").project = project
+    col.operator(CLAUDEHAND_OT_follow_look.bl_idname, text="새로 고침", icon="FILE_REFRESH")
+
+
+class CLAUDEHAND_PT_follow(bpy.types.Panel):
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Claude Hand"
+    bl_label = "Unity로 보낸 모델"
+    bl_parent_id = "CLAUDEHAND_PT_chat"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        draw_follow(self.layout, panel_metrics(context))
 
 
 class CLAUDEHAND_PT_chat(bpy.types.Panel):
@@ -1256,7 +2062,7 @@ def entry_rows(entry, width):
         return [], 0
     if kind == "notice":  # from this panel (되돌리기) or the channel (a dialog stopped the window doing the work, what a request took)
         lines = wrap(entry_text(entry), width)[:ENTRY_LINES]
-        first = "ERROR" if entry.get("alert") else "TIME" if entry.get("cost") else "LOOP_BACK"
+        first = "ERROR" if entry.get("alert") else "TIME" if entry.get("cost") else "FILE_REFRESH" if entry.get("key") else "LOOP_BACK"
         return [(line, first if i == 0 else "NONE") for i, line in enumerate(lines)], 0
     if kind == "image":  # the picture itself is drawn after these rows (draw_image)
         return [(entry.get("caption") or "결과 미리보기", "IMAGE_DATA")], 0
@@ -1296,7 +2102,11 @@ def visible_entries(width):
 
 
 CLASSES = (CLAUDEHAND_OT_send, CLAUDEHAND_OT_start, CLAUDEHAND_OT_permission, CLAUDEHAND_OT_copy, CLAUDEHAND_OT_undo,
-           CLAUDEHAND_OT_native_input, CLAUDEHAND_OT_open_image, CLAUDEHAND_OT_stop, CLAUDEHAND_PT_chat)
+           CLAUDEHAND_OT_native_input, CLAUDEHAND_OT_open_image, CLAUDEHAND_OT_stop, CLAUDEHAND_OT_follow_toggle,
+           CLAUDEHAND_OT_follow_relink, CLAUDEHAND_OT_follow_adopt, CLAUDEHAND_OT_follow_send, CLAUDEHAND_OT_follow_look,
+           CLAUDEHAND_PT_chat, CLAUDEHAND_PT_follow)
+HANDLERS = (("load_post", _forget_undo_points), ("load_post", _on_loaded), ("save_post", _on_saved),
+            ("depsgraph_update_post", _on_touched))
 
 
 def register():
@@ -1308,8 +2118,10 @@ def register():
         name="선택 항목 함께 보내기", default=True)
     # Defined here (not a custom property) so the Properties editor does not list it.
     setattr(bpy.types.Scene, UNDO_PROP, bpy.props.StringProperty(options={"HIDDEN"}))
-    if _forget_undo_points not in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.append(_forget_undo_points)
+    for name, handler in HANDLERS:
+        if handler not in getattr(bpy.app.handlers, name):
+            getattr(bpy.app.handlers, name).append(handler)
+    _follow.update(path="", unity=None, looked=0.0)  # the first tick looks for open Unity editors (bpy.data is not to be read here)
     if _previews[0] is None:
         _previews[0] = bpy.utils.previews.new()
     _stop.clear()
@@ -1328,8 +2140,9 @@ def unregister():
         _previews[0] = None
     if bpy.app.timers.is_registered(tick):
         bpy.app.timers.unregister(tick)
-    if _forget_undo_points in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.remove(_forget_undo_points)
+    for name, handler in HANDLERS:
+        if handler in getattr(bpy.app.handlers, name):
+            getattr(bpy.app.handlers, name).remove(handler)
     delattr(bpy.types.Scene, UNDO_PROP)
     del bpy.types.WindowManager.claude_hand_chat_input
     del bpy.types.WindowManager.claude_hand_chat_context

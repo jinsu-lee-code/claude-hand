@@ -55,7 +55,7 @@ namespace ClaudeHand.Editor
         }
 
         /// <summary>What is coming in: the file, and where it came from (what a re-send is recognized by).</summary>
-        private sealed class Incoming
+        internal sealed class Incoming
         {
             public string ModelPath;
             public string Extension;
@@ -68,16 +68,29 @@ namespace ClaudeHand.Editor
         /// Kept in the model's .meta (AssetImporter.userData), so it travels with the asset: moving or renaming the
         /// model in the Project window does not lose it, and there is no separate list to fall out of step.
         /// </summary>
-        private sealed class Record
+        internal sealed class Record
         {
             public string source;
             public List<string> roots = new List<string>();
             public string materials;
+
+            /// <summary>
+            /// The model follows its .blend: when that is saved, Blender's Claude Hand panel sends the model again by
+            /// itself and it is replaced here in place (ch_model_follow). Kept on this side, with the model: what gets
+            /// changed is this project, so the say is here, and a model that is deleted takes it along.
+            /// </summary>
+            [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
+            public bool follow;
         }
 
         public static object HandleCommand(JObject @params)
         {
-            var p = @params?.ToObject<Parameters>() ?? new Parameters();
+            return Import(@params?.ToObject<Parameters>() ?? new Parameters(), false);
+        }
+
+        /// <summary>follow: the model follows its .blend from now on (sent from Blender's panel, ch_model_follow receive).</summary>
+        internal static object Import(Parameters p, bool follow)
+        {
             if (string.IsNullOrWhiteSpace(p.manifest))
             {
                 return ChErrors.Make(ChErrors.InvalidArgs, "manifest is required.", "after_fix",
@@ -178,7 +191,8 @@ namespace ClaudeHand.Editor
             }
             if (incoming.Source != null && p.new_copy != true)
             {
-                dirty |= WriteRecord(importer, model, new Record { source = incoming.Source, roots = incoming.Roots, materials = mode }, warnings);
+                dirty |= WriteRecord(importer, model, new Record { source = incoming.Source, roots = incoming.Roots, materials = mode,
+                                                                   follow = follow || record?.follow == true }, warnings);
             }
             if (dirty)
             {
@@ -249,26 +263,61 @@ namespace ClaudeHand.Editor
             });
         }
 
+        /// <summary>
+        /// The model at `assetPath` gets the file that came in, in place, because its .blend was saved (ch_model_follow
+        /// update). That is the user's own doing, not a request's: nothing is noted for an undo, nothing is placed in
+        /// the scene, and the file it replaces is kept apart from the requests' files. Returns where that file is kept.
+        /// </summary>
+        internal static string ReplaceFollowed(Incoming incoming, string assetPath, List<string> warnings)
+        {
+            using (ChCheckpoint.UsersOwn(assetPath))
+            {
+                var target = Path.Combine(ChPaths.ProjectRoot, assetPath);
+                var previous = ChCheckpoint.KeepFollowed(target);
+                File.Copy(incoming.ModelPath, target, true);
+                AssetDatabase.ImportAsset(assetPath, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                var importer = AssetImporter.GetAtPath(assetPath);
+                var model = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
+                if (model != null && ReadRecord(importer)?.materials == "project")
+                {
+                    // A material the model has only now gets its project material too, as chosen when the model first came.
+                    bool dirty = false;
+                    UseProjectMaterials(importer as ModelImporter, model, assetPath, warnings, ref dirty);
+                    if (dirty) importer.SaveAndReimport();
+                }
+                return previous;
+            }
+        }
+
         // ------------------------------------------------------------------ what came before
 
-        /// <summary>The model this project already has from the same source, if a re-send should replace it.</summary>
-        private static string FindExisting(Incoming incoming)
+        /// <summary>Every model here that carries a record of where it came from, with that record.</summary>
+        internal static IEnumerable<KeyValuePair<string, Record>> Recorded()
         {
-            if (incoming.Source == null) return null;
             foreach (var guid in AssetDatabase.FindAssets("l:" + ImportLabel))
             {
                 var path = AssetDatabase.GUIDToAssetPath(guid);
                 if (!path.StartsWith("Assets/", StringComparison.Ordinal)) continue;
-                if (!string.Equals(Path.GetExtension(path), incoming.Extension, StringComparison.OrdinalIgnoreCase)) continue;
                 if (!File.Exists(Path.Combine(ChPaths.ProjectRoot, path))) continue;
                 var record = ReadRecord(AssetImporter.GetAtPath(path));
-                if (record == null || !string.Equals(record.source, incoming.Source, StringComparison.OrdinalIgnoreCase)) continue;
-                if ((record.roots ?? new List<string>()).SequenceEqual(incoming.Roots, StringComparer.Ordinal)) return path;
+                if (record != null) yield return new KeyValuePair<string, Record>(path, record);
+            }
+        }
+
+        /// <summary>The model this project already has from the same source, if a re-send should replace it.</summary>
+        internal static string FindExisting(Incoming incoming)
+        {
+            if (incoming.Source == null) return null;
+            foreach (var found in Recorded())
+            {
+                if (!string.Equals(Path.GetExtension(found.Key), incoming.Extension, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!string.Equals(found.Value.source, incoming.Source, StringComparison.OrdinalIgnoreCase)) continue;
+                if ((found.Value.roots ?? new List<string>()).SequenceEqual(incoming.Roots, StringComparer.Ordinal)) return found.Key;
             }
             return null;
         }
 
-        private static Record ReadRecord(AssetImporter importer)
+        internal static Record ReadRecord(AssetImporter importer)
         {
             if (importer == null || string.IsNullOrEmpty(importer.userData)) return null;
             try
@@ -282,7 +331,7 @@ namespace ClaudeHand.Editor
         }
 
         /// <summary>Returns whether the .meta changed. Leaves userData alone when another tool already wrote its own there.</summary>
-        private static bool WriteRecord(AssetImporter importer, GameObject model, Record record, List<string> warnings)
+        internal static bool WriteRecord(AssetImporter importer, GameObject model, Record record, List<string> warnings)
         {
             var text = JsonConvert.SerializeObject(new { claude_hand_import = record });
             if (importer.userData == text) return false;
@@ -298,7 +347,7 @@ namespace ClaudeHand.Editor
         }
 
         /// <summary>Roots of the prefab instances of this model in the loaded scenes (also ones nested in other prefabs).</summary>
-        private static List<GameObject> InstancesInOpenScenes(GameObject model)
+        internal static List<GameObject> InstancesInOpenScenes(GameObject model)
         {
             var found = new List<GameObject>();
             if (model == null) return found;
@@ -385,7 +434,7 @@ namespace ClaudeHand.Editor
 
         // ------------------------------------------------------------------ the incoming file
 
-        private static bool TryResolveModel(string input, out Incoming incoming, out ChError error)
+        internal static bool TryResolveModel(string input, out Incoming incoming, out ChError error)
         {
             incoming = new Incoming();
             error = null;
