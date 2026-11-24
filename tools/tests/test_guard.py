@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -199,20 +200,22 @@ class ProgressTests(unittest.TestCase):
             home = self.home(tmp)
             marks = []
             event = {"tool_name": "mcp__unity_mygame__manage_gameobject", "tool_input": {"action": "create", "name": "Cube"}}
-            for reply in ({"new_request": True, "label": "큐브 만들어줘"}, {"new_request": False}, None):
-                guard.report_progress(event, self.PIN, self.SERVER, "unity", home=home, post=lambda req, r=reply: r,
-                                      mark=lambda app, pin, label: marks.append((app, pin, label)))
+            note = lambda app, pin, label, key="": marks.append((app, pin, label, key))
+            for reply in ({"new_request": True, "label": "큐브 만들어줘", "point": "1116-101500-7"}, {"new_request": False}, None):
+                guard.report_progress(event, self.PIN, self.SERVER, "unity", home=home, post=lambda req, r=reply: r, mark=note,
+                                      folder=lambda pin: None)
             guard.report_progress({"tool_name": "mcp__blender_props__execute_code", "tool_input": {"code": "x = 1"}},
                                   "props@9876", "blender_props", "blender", home=home,
-                                  post=lambda req: {"new_request": True, "label": "의자"}, mark=lambda *a: marks.append(a))
+                                  post=lambda req: {"new_request": True, "label": "의자"}, mark=note)
             # "cancel that" starts with the undo: no fresh point in front of it
             new = lambda req: {"new_request": True, "label": "방금 거 취소해줘"}
             guard.report_progress({"tool_name": "mcp__unity_mygame_ch__ch_checkpoint", "tool_input": {"action": "undo"}},
-                                  self.PIN, self.SERVER, "unity", home=home, post=new, mark=lambda *a: marks.append(a))
+                                  self.PIN, self.SERVER, "unity", home=home, post=new, mark=note, folder=lambda pin: None)
             guard.report_progress({"tool_name": "mcp__blender_props__execute_code",
                                    "tool_input": {"code": "import claude_hand_chat; print(claude_hand_chat.undo_last_request())"}},
-                                  "props@9876", "blender_props", "blender", home=home, post=new, mark=lambda *a: marks.append(a))
-        self.assertEqual(marks, [("unity", self.PIN, "큐브 만들어줘"), ("blender", "props@9876", "의자")])  # once per request
+                                  "props@9876", "blender_props", "blender", home=home, post=new, mark=note)
+        # once per request, under the name the channel gives the request
+        self.assertEqual(marks, [("unity", self.PIN, "큐브 만들어줘", "1116-101500-7"), ("blender", "props@9876", "의자", "")])
 
     def test_blender_code_that_only_looks_is_reported_as_looking(self):
         """execute_code runs any Python, so its name does not say whether the request has changed anything yet: a
@@ -235,7 +238,7 @@ class ProgressTests(unittest.TestCase):
     def test_a_subagents_own_undo_point_is_refused_while_claude_hand_sets_them(self):
         with tempfile.TemporaryDirectory() as tmp:
             home, marks = self.home(tmp), []
-            mark = lambda app, pin, label: marks.append(label)
+            mark = lambda app, pin, label, key="": marks.append(label)
             own = {"tool_name": "mcp__unity_mygame_ch__ch_checkpoint", "tool_input": {"action": "mark", "label": "Import CH_Capsule"}}
             going = lambda req: {"ok": True, "chat_id": "unity-mygame", "new_request": False, "label": ""}
             reason = guard.report_progress(own, self.PIN, self.SERVER, "unity", home=home, post=going, mark=mark)
@@ -299,7 +302,40 @@ class ProgressTests(unittest.TestCase):
             sys.modules["unity_bridge"].request = lambda entry, tool, params, timeout: calls.append((entry["hash"], tool, params))
             guard.mark_checkpoint("unity", self.PIN, "큐브 만들어줘")
             guard.mark_checkpoint("unity", "Other@ffff0000", "x")  # not open: nothing to mark
-        self.assertEqual(calls, [("aaaa1111", "ch_checkpoint", {"action": "mark", "label": "큐브 만들어줘"})])
+            guard.mark_checkpoint("unity", self.PIN, "큐브 지워줘", key="1116-101500-7")
+        self.assertEqual(calls, [("aaaa1111", "ch_checkpoint", {"action": "mark", "label": "큐브 만들어줘"}),
+                                 ("aaaa1111", "ch_checkpoint", {"action": "mark", "label": "큐브 지워줘", "request": "1116-101500-7"})])
+
+    def test_undo_point_waits_for_an_editor_that_is_reloading_scripts(self):
+        """A request that follows one which changed a script starts while Unity reloads, with its bridge away for some
+        seconds. Without its own undo point, its changes could only be undone together with the earlier request's."""
+        class Away(Exception):
+            def __init__(self, code):
+                super().__init__(code)
+                self.code = code
+
+        def bridge(failures, clock=None):
+            calls, waits = [], []
+
+            def request(entry, tool, params, timeout):
+                calls.append(entry["port"])
+                if clock is not None:
+                    clock.append(clock[-1] + 8.0)  # the attempt ran into its timeout
+                if failures:
+                    raise Away(failures.pop(0))
+            module = unittest.mock.Mock(find_project=lambda hash_: {"hash": hash_, "port": 100 + len(calls)})
+            with unittest.mock.patch.dict(sys.modules, {"unity_bridge": module}):
+                try:
+                    guard.mark_checkpoint("unity", self.PIN, "x", request=request, sleep=waits.append,
+                                          **({"clock": lambda: clock[-1]} if clock is not None else {}))
+                    return calls, waits, None
+                except Away as exc:
+                    return calls, waits, exc.code
+        self.assertEqual(bridge(["UNREACHABLE", "EDITOR_BUSY"]), ([100, 101, 102], [guard.MARK_WAIT] * 2, None))  # found again each time
+        calls, waits, code = bridge(["UNREACHABLE"] * 20)
+        self.assertEqual((len(calls), len(waits), code), (guard.MARK_TRIES, guard.MARK_TRIES - 1, "UNREACHABLE"))  # not for ever
+        self.assertEqual(bridge(["INVALID_ARGS"]), ([100], [], "INVALID_ARGS"))  # not a matter of waiting
+        self.assertEqual(bridge(["UNREACHABLE"], clock=[0.0]), ([100], [], "UNREACHABLE"))  # stuck, not away: the call is not held up longer
 
     def test_blender_undo_point_goes_to_the_chat_addon(self):
         sent = []
@@ -312,11 +348,117 @@ class ProgressTests(unittest.TestCase):
               "print": lambda *_: None})
         self.assertEqual(namespace["label"], "의자를 '빨갛게'")  # the request text arrives as it was, quotes and all
 
+    def test_as_the_stop_hook_it_says_in_the_project_that_the_work_is_over(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home, project = self.home(tmp), Path(tmp) / "MyGame"
+            event = {"tool_name": "mcp__unity_mygame__manage_gameobject", "tool_input": {"action": "create"}}
+            guard.report_progress(event, self.PIN, self.SERVER, "unity", home=home, post=lambda req: {"point": "1116-101500-7"},
+                                  folder=lambda pin: project)
+            work = json.loads((project / "Library/ClaudeHand/at-work.json").read_text(encoding="utf-8"))
+            self.assertEqual((work["request"], work["stopped"]), ("1116-101500-7", 0))
+            guard.report_stop({}, self.PIN, "unity", home=home, post=lambda req: {}, folder=lambda pin: project)
+            self.assertGreater(json.loads((project / "Library/ClaudeHand/at-work.json").read_text(encoding="utf-8"))["stopped"], 0)
+            guard.report_stop({}, self.PIN, "unity", home=home, post=lambda req: {}, folder=lambda pin: 1 / 0)  # never raises
+            guard.report_stop({}, "props@9876", "blender", home=home, post=lambda req: {}, folder=lambda pin: 1 / 0)  # not asked for Blender
+
     def test_action_summary(self):
         self.assertEqual(guard.action_summary({"action": "create", "name": "Cube", "position": [0, 0, 0]}), "create Cube")
         self.assertEqual(guard.action_summary({"code": "import bpy\n\nbpy.ops.mesh.primitive_uv_sphere_add()"}),
                          "bpy.ops.mesh.primitive_uv_sphere_add()")
         self.assertEqual(guard.action_summary({}), "")
+
+
+class FileTests(unittest.TestCase):
+    """Before a call that may write files, the files it names are copied into the project's Library, under the name
+    of the request: undoing the request puts them back (handlib/keeps.py, ChCheckpoint.cs)."""
+    PIN = "MyGame@aaaa1111"
+    SERVER = "unity_mygame"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "home"
+        (self.home / "chat").mkdir(parents=True)
+        (self.home / "chat" / "server.json").write_text(json.dumps({"port": 8765, "token": "t"}), encoding="utf-8")
+        self.project = Path(os.path.realpath(self.tmp.name)) / "MyGame"
+        self.script = self.project / "Assets" / "Scripts" / "Player.cs"
+        self.script.parent.mkdir(parents=True)
+        self.script.write_text("class Player {}", encoding="utf-8")
+        self.marks = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def call(self, tool, tool_input, reply, app="unity", pin=None, **more):
+        post = reply if callable(reply) else (lambda req: reply)
+        more.setdefault("folder", lambda pin: self.project)
+        server = self.SERVER if app == "unity" else "blender_props"
+        return guard.report_progress({"tool_name": f"mcp__{server}{'_ch' if tool.startswith('ch_') else ''}__{tool}", "tool_input": tool_input},
+                                     pin or self.PIN, server, app, home=self.home, post=post,
+                                     mark=lambda app, pin, label, key="": self.marks.append((label, key)), **more)
+
+    def work(self):
+        return json.loads((self.project / "Library/ClaudeHand/at-work.json").read_text(encoding="utf-8"))
+
+    def kept(self, key):
+        folder = self.project / "Library" / "ClaudeHand" / "replaced" / f"req_{key}"
+        lines = (folder / "kept.jsonl").read_text(encoding="utf-8").splitlines() if (folder / "kept.jsonl").exists() else []
+        return [json.loads(line)["path"] for line in lines]
+
+    def test_the_file_a_call_names_is_kept_under_the_requests_name(self):
+        edit = {"action": "update", "name": "Player", "path": "Assets/Scripts", "contents": "class Player { int hp; }"}
+        going = {"chat_id": "unity-mygame", "new_request": True, "label": "체력 넣어줘", "point": "1116-101500-7"}
+        self.assertIsNone(self.call("manage_script", edit, going))
+        self.assertEqual(self.marks, [("체력 넣어줘", "1116-101500-7")])  # the undo point carries the same name
+        self.assertEqual((self.work()["request"], self.work()["stopped"]), ("1116-101500-7", 0))
+        self.assertEqual(self.kept("1116-101500-7"), ["Assets/Scripts/Player.cs"])
+        self.script.write_text("class Player { int hp; }", encoding="utf-8")
+        self.call("apply_text_edits", {"uri": "unity://path/Assets/Scripts/Player.cs", "edits": []}, {**going, "new_request": False})
+        self.assertEqual(self.kept("1116-101500-7"), ["Assets/Scripts/Player.cs"])  # once: the copy is the file before the request
+        self.assertEqual(len(self.marks), 1)
+
+    def test_not_for_tools_that_only_look_nor_for_claude_hands_own(self):
+        going = {"chat_id": "unity-mygame", "new_request": False, "label": "", "point": "1116-101500-7"}
+        self.call("read_console", {"filter": "Assets/Scripts/Player.cs"}, going)
+        self.call("find_gameobjects", {"search_term": "Player"}, going)
+        self.call("ch_scene_snapshot", {"root": "Assets/Scripts/Player.cs"}, going)
+        self.call("ch_import_model", {"manifest": "Assets/Scripts/Player.cs"}, going)  # keeps what it replaces itself
+        self.assertEqual(self.kept("1116-101500-7"), [])
+        self.assertEqual(self.work()["request"], "1116-101500-7")  # at work all the same: Unity notes what happens meanwhile
+
+    def test_without_claude_hand_the_work_that_goes_on_is_one_request(self):
+        edit = {"name": "Player", "path": "Assets/Scripts", "contents": "x"}
+        self.assertIsNone(self.call("manage_script", edit, lambda req: 1 / 0))  # no channel answers
+        first = self.work()["request"]
+        self.assertTrue(first.startswith("local-"))
+        self.assertEqual(self.kept(first), ["Assets/Scripts/Player.cs"])
+        self.call("manage_gameobject", {"action": "create"}, {})  # a channel with nothing to say about this window
+        self.assertEqual(self.work()["request"], first)
+        time.sleep(0.005)
+        # The subagent sets an undo point of its own (nobody else does): what follows is a new request, and the point takes its name.
+        self.assertIsNone(self.call("ch_checkpoint", {"action": "mark", "label": "새 일"}, {}))
+        second = self.work()["request"]
+        self.assertNotEqual(second, first)
+        self.call("manage_script", edit, {})
+        self.assertEqual((self.kept(second), self.marks), (["Assets/Scripts/Player.cs"], []))
+
+    def test_a_refused_call_keeps_nothing_and_a_failure_never_holds_the_call_up(self):
+        edit = {"name": "Player", "path": "Assets/Scripts", "contents": "x"}
+        self.assertIn("중지", self.call("manage_script", edit, {"stop": True, "point": "k"}))
+        self.assertIn("다른 하위 세션", self.call("manage_script", edit, {"busy": True, "point": "k"}))
+        self.assertFalse((self.project / "Library").exists())
+        self.assertIsNone(self.call("manage_script", edit, {"point": "k"}, folder=lambda pin: 1 / 0))
+        self.assertIsNone(self.call("manage_script", edit, {"point": "k"}, folder=lambda pin: None))  # the editor is not registered
+        self.assertFalse((self.project / "Library").exists())
+        with unittest.mock.patch("handlib.keeps.named_files", side_effect=RuntimeError("boom")):
+            self.assertIsNone(self.call("manage_script", edit, {"point": "k", "new_request": True, "label": "x"}))
+        self.assertEqual(self.marks, [("x", "k")])  # the undo point is set whatever becomes of the copies
+
+    def test_blender_is_left_alone(self):
+        self.assertIsNone(self.call("execute_blender_code", {"code": "open('Assets/Scripts/Player.cs')"},
+                                    {"new_request": True, "label": "의자", "point": "1116-101500-7"}, app="blender", pin="props@9876",
+                                    folder=lambda pin: 1 / 0))
+        self.assertEqual(self.marks, [("의자", "1116-101500-7")])
+        self.assertFalse((self.project / "Library").exists())
 
 
 if __name__ == "__main__":

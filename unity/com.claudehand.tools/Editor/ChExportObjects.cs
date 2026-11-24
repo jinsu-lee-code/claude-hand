@@ -86,6 +86,9 @@ namespace ClaudeHand.Editor
                 },
             };
 
+            // The prefabs staged in the project are gone again before this returns: not something the request at work
+            // did to the project's files, so its undo point takes no note of them.
+            using (ChCheckpoint.Unnoted(stagingFolder))
             try
             {
                 if (objects.Count > 0) ChPaths.EnsureAssetFolder(stagingFolder);

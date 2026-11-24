@@ -56,6 +56,7 @@ from handlib.agents import AgentInfo, installed_agents, prompt_template, refresh
 from handlib.capture import capture_window  # noqa: E402
 from handlib.constants import VERSION  # noqa: E402
 from handlib.link import claude_hand_home, supervisor_running  # noqa: E402
+from handlib.looks import LOOKING_TOOLS, tool_only_looks as only_looks  # noqa: E402,F401  (tools that leave a window as it was)
 from unity_bridge import describe_dialogs, find_project, waiting_dialogs  # noqa: E402
 
 SERVER_NAME = "claude-hand-chat"
@@ -109,9 +110,6 @@ STOP_SECONDS = 180.0   # a panel's 중지 holds until its request is answered, b
 EARLY_SECONDS = 120.0  # an answer sent before any work was seen: how long that work may still take to start (see _asking)
 SEEN_SECONDS = 90.0    # a panel asks for news every MAX_WAIT_SECONDS at the latest: one silent for this long has been closed
 
-# Tools that leave a window as it was. A window that did nothing else for a request is not one the request changed:
-# its picture under the answer would show nothing new (see report_action).
-LOOKING_TOOLS = {"ch_scene_snapshot", "ch_editor_status", "ch_capture", "ch_export_model", "ch_export_objects"}
 # A reply has to say whether the work still goes on. The tool definition asks for it, but Claude Code does not hold
 # a call to that, and a supervisor that has answered without it for days goes on doing so (a hint in the result
 # changed nothing; being refused once did, as with the request tag on hand-outs). So the first few replies without
@@ -122,10 +120,6 @@ WORKING_ASK = ("Not sent: say whether the work for this request still goes on. S
                "no work). The panel's work line, its 중지 button and the alert that an answer came depend on it. Say it on "
                "every reply from now on.")
 
-
-def only_looks(tool: str, detail: str = "") -> bool:
-    return tool in LOOKING_TOOLS or tool.startswith(("get_", "read_", "find_", "list_")) or \
-        (tool == "ch_checkpoint" and detail.strip() == "list")
 
 CONTEXT_TOOL = {
     "name": "current_context",
@@ -832,7 +826,9 @@ class ChatHub:
     def report_action(self, app: str, pin: str, tool: str, detail: str, agent_id: str = "", looks: bool = False) -> dict | None:
         """A window's subagent is about to run a Unity/Blender tool (its guard hook says so): show it in that
         window's panel. new_request is true for the first action of a request (the guard sets an undo point then),
-        with label: the panel message it answers, if any. busy is true when another subagent is still at work in
+        with label: the panel message it answers, if any. point names the request the window works for now (its id,
+        or when nobody knows whose it is, the start of its work line): the guard keeps the files this call may write
+        over under that name, and the undo point carries it. busy is true when another subagent is still at work in
         that window: two at once overwrite each other, so the guard refuses the call. looks: the guard read the
         code this call runs and it can only look (a tool that runs any code does not show it in its name). None for
         a pin no generated subagent has."""
@@ -883,9 +879,10 @@ class ChatHub:
             entry.update(tool=tool[:80], detail=detail[:120], actions=entry["actions"] + 1, updated=now)
             self._bump_progress(agent.name)
             label = " ".join(str(asked.get("text", "")).split())[:40] if asked is not None and first else ""
+            key = str(asked.get("request") or f"item-{asked['seq']}") if known else f"bar-{int(entry['started'] * 1000)}"
             self._log("action", request=self._request_for(agent.name), chat_id=agent.name, pin=pin, tool=tool[:80], detail=detail[:120],
                       agent_id=agent_id, first=first or None)
-        return {"chat_id": agent.name, "new_request": first, "label": label}
+        return {"chat_id": agent.name, "new_request": first, "label": label, "point": key}
 
     def agent_stopped(self, app: str, pin: str, agent_id: str = "") -> dict | None:
         """A window's subagent finished its turn (its Stop hook says so): the window is free for another, and the

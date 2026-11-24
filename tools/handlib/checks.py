@@ -18,7 +18,12 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from handlib import agents, chatsetup, constants, discovery, install, launch, link
+from handlib import agents, chatsetup, constants, discovery, install, keeps, launch, link
+
+# The Unity self-test writes over this file directly, the way MCP for Unity writes a script: Unity is told nothing
+# beforehand, so only the copy the guard hook makes can bring it back (ChSelfTest.FileChecks has the same two names).
+SELFTEST_REQUEST = "selftest-files"
+SELFTEST_DIRECT = "Assets/ClaudeHand/SelfTest/ChSelfTestDirect.txt"
 
 
 @dataclass
@@ -331,6 +336,32 @@ def marked_json(output: str, mark: str):
         return None
 
 
+def prepare_file_checks(project: Path) -> bool:
+    """What the guard hook does before a call that names a file, done with the hook's own code for the file the
+    Unity self-test then writes over: Unity without a window runs no hook. True when the copy is made."""
+    try:
+        shutil.rmtree(keeps.request_folder(project, SELFTEST_REQUEST), ignore_errors=True)  # an earlier run's copy
+        direct = project / SELFTEST_DIRECT
+        direct.parent.mkdir(parents=True, exist_ok=True)
+        direct.write_text("before", encoding="utf-8")
+        return bool(keeps.keep(project, SELFTEST_REQUEST, keeps.named_files(project, {"path": SELFTEST_DIRECT})))
+    except OSError:
+        return False
+
+
+def clean_file_checks(project: Path) -> None:
+    """The self-test deletes its folder when it runs to the end. When it did not, what was put there goes here."""
+    direct = project / SELFTEST_DIRECT
+    for path in (direct, Path(str(direct) + ".meta")):
+        path.unlink(missing_ok=True)
+    for folder in (direct.parent, direct.parent.parent):
+        try:
+            folder.rmdir()  # only when nothing else is in it
+        except OSError:
+            break
+        Path(str(folder) + ".meta").unlink(missing_ok=True)
+
+
 def unity_batch_checks(project: Path, run=subprocess.run, editor=None, blender_exe=None, progress=None) -> list[Check]:
     """Open a closed Unity project without a window and run Claude Hand Tools' own self-test in it (ChSelfTest.cs): a
     model comes in, comes in again and is replaced in place, takes the project's materials, and goes back out. With
@@ -368,6 +399,7 @@ def unity_batch_checks(project: Path, run=subprocess.run, editor=None, blender_e
             add("Blender가 보낸 모델(FBX)로 시험", bool(fixtures) or None,
                 "export_fbx로 같은 오브젝트를 두 번 내보냄" if fixtures else "내보내지 못해 OBJ 파일로 대신함: " +
                 ((proc.stderr or proc.stdout).strip().splitlines() or ["출력 없음"])[-1][:200])
+        prepare_file_checks(project)  # without it the self-test says that it skipped the file written over directly
         progress(f"Unity {version}를 창 없이 열어 시험하는 중 (1~2분)...")
         try:
             proc = run([str(editor), "-batchmode", "-projectPath", str(project), "-executeMethod", "ClaudeHand.Editor.ChSelfTest.Run",
@@ -375,6 +407,8 @@ def unity_batch_checks(project: Path, run=subprocess.run, editor=None, blender_e
         except subprocess.TimeoutExpired:
             add("Unity 실행", False, "15분 안에 끝나지 않음", "Unity가 대화상자를 띄웠는지 작업 관리자에서 확인하세요")
             return checks
+        finally:
+            clean_file_checks(project)
         try:
             result = json.loads(out.read_text(encoding="utf-8"))
         except (OSError, ValueError):

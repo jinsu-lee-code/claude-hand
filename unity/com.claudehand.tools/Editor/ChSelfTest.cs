@@ -26,6 +26,9 @@ namespace ClaudeHand.Editor
         private const string Work = "Assets/ClaudeHand/SelfTest";
         private const string Transfers = "Assets/ClaudeHand/Transfers";
         private const double PackageSeconds = 120;
+        // The same two names in tools/handlib/checks.py, which makes the guard hook's copy of the file beforehand.
+        private const string FilesRequest = "selftest-files";
+        private const string FilesDirect = Work + "/ChSelfTestDirect.txt";
 
         private static readonly List<object> Checks = new List<object>();
         private static bool _failed;
@@ -323,13 +326,100 @@ namespace ClaudeHand.Editor
                 Check("a change in the scene: undone with its mark", told && Ok(undone) && _sceneCube == null &&
                       EditorSceneManager.GetActiveScene().rootCount == _rootsBefore && ChCheckpoint.Marks.Count == _marksBefore, Describe(undone));
                 if (_sceneCube != null) UnityEngine.Object.DestroyImmediate(_sceneCube);
+                FileChecks();
             }
             catch (Exception ex)
             {
                 EditorApplication.update -= SceneTick;
-                Check("scene: ran to the end", false, ex.ToString());
+                Check("scene and files: ran to the end", false, ex.ToString());
             }
             Finish();
+        }
+
+        /// <summary>
+        /// 9. What a request does to files with any tool, taken back with it: an asset made, one saved through Unity,
+        /// a file written over directly, an asset deleted, one renamed. No guard hook runs here, so the test says
+        /// itself that a request is at work (ChCheckpoint.SetWork), and the copy the hook makes of a file a call
+        /// names was made by `claude_hand.py selftest` with the hook's own code, before Unity started. An asset made
+        /// once the work is over is not the request's, and stays.
+        /// </summary>
+        private static void FileChecks()
+        {
+            ChPaths.EnsureAssetFolder(Work);
+            var shader = Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard");
+            string saved = $"{Work}/ChSelfTestSaved.mat", gone = $"{Work}/ChSelfTestDeleted.mat", renamed = $"{Work}/ChSelfTestRenamed.mat";
+            string renamedTo = $"{Work}/ChSelfTestRenamedTo.mat", made = $"{Work}/ChSelfTestMade.mat", byHand = $"{Work}/ChSelfTestByHand.mat";
+            foreach (var path in new[] { saved, gone, renamed }) AssetDatabase.CreateAsset(new Material(shader), path);
+            AssetDatabase.SaveAssets();
+            Func<string, string> file = path => Path.Combine(ChPaths.ProjectRoot, path);
+            var savedBefore = File.ReadAllBytes(file(saved));
+            string goneGuid = AssetDatabase.AssetPathToGUID(gone), renamedGuid = AssetDatabase.AssetPathToGUID(renamed);
+            bool copied = File.Exists(file(FilesDirect));  // there only when the selftest command prepared it, with the hook's copy
+
+            JObject marked, staged;
+            bool deleted;
+            string renameError;
+            try
+            {
+                ChCheckpoint.SetWork(FilesRequest);
+                marked = Call(ChCheckpoint.HandleCommand, new { action = "mark", label = "self-test files", request = FilesRequest });
+                AssetDatabase.CreateAsset(new Material(shader), made);
+                var material = AssetDatabase.LoadAssetAtPath<Material>(saved);
+                material.enableInstancing = !material.enableInstancing;
+                EditorUtility.SetDirty(material);
+                AssetDatabase.SaveAssets();
+                if (copied)
+                {
+                    File.WriteAllText(file(FilesDirect), "after");  // past Unity, as MCP for Unity writes a script
+                    AssetDatabase.ImportAsset(FilesDirect, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                }
+                deleted = AssetDatabase.DeleteAsset(gone);
+                renameError = AssetDatabase.RenameAsset(renamed, Path.GetFileNameWithoutExtension(renamedTo));
+                // An export stages prefabs in the project and removes them again: this package's own business, not the request's.
+                var cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                cube.name = "ChSelfTestStaged";
+                var builder = ChRefs.Begin();
+                var reference = builder.Add(cube, cube.name);
+                builder.Save();
+                staged = Call(ChExportObjects.HandleCommand, new { refs = new[] { reference }, name = Name + "_staged" });
+                UnityEngine.Object.DestroyImmediate(cube);
+            }
+            finally
+            {
+                ChCheckpoint.SetWork(null);
+            }
+            AssetDatabase.CreateAsset(new Material(shader), byHand);  // the work is over: this one is the user's own
+
+            Check("files: set up (an asset made, one saved, one deleted, one renamed while a request is at work)",
+                Ok(marked) && File.Exists(file(made)) && !File.ReadAllBytes(file(saved)).SequenceEqual(savedBefore) && deleted &&
+                !File.Exists(file(gone)) && string.IsNullOrEmpty(renameError) && File.Exists(file(renamedTo)) && !File.Exists(file(renamed)),
+                $"{Describe(marked)} / deleted {deleted} / rename '{renameError}'");
+            var undone = Call(ChCheckpoint.HandleCommand, new { action = "undo" });
+            var data = undone["data"];
+            Func<string, string, bool> told = (list, path) => Ok(undone) && data[list].Values<string>().Contains(path);
+            Check("files: an asset the request made is out of the project, kept with its .meta",
+                told("removed", made) && !File.Exists(file(made)) && AssetDatabase.LoadAssetAtPath<Material>(made) == null && KeptOutside(made),
+                Describe(undone));
+            Check("files: an asset saved through Unity is as it was before",
+                told("restored", saved) && File.ReadAllBytes(file(saved)).SequenceEqual(savedBefore), Describe(undone));
+            Check("files: a file written over directly is back from the copy the guard hook made",
+                !copied || (told("restored", FilesDirect) && File.ReadAllText(file(FilesDirect)) == "before"),
+                copied ? Describe(undone) : "skipped: `claude_hand.py selftest --unity-project` makes the copy before Unity starts");
+            Check("files: a deleted asset is back with its GUID",
+                told("returned", gone) && File.Exists(file(gone)) && AssetDatabase.AssetPathToGUID(gone) == goneGuid &&
+                AssetDatabase.LoadAssetAtPath<Material>(gone) != null, Describe(undone));
+            var named = AssetDatabase.LoadAssetAtPath<Material>(renamed);
+            Check("files: a renamed asset has its name back, in its file too, with its GUID",
+                told("moved", renamed) && File.Exists(file(renamed)) && !File.Exists(file(renamedTo)) &&
+                AssetDatabase.AssetPathToGUID(renamed) == renamedGuid && named != null && named.name == Path.GetFileNameWithoutExtension(renamed),
+                $"{(named != null ? named.name : "not loaded")} / {Describe(undone)}");
+            Check("files: what an export staged in the project meanwhile is not the request's doing",
+                Ok(staged) && Ok(undone) && !undone.ToString(Formatting.None).Contains("_staged") &&
+                !AssetDatabase.IsValidFolder($"{Transfers}/{staged["data"].Value<string>("transfer_id")}"),
+                Describe(staged) + " / " + Describe(undone));
+            Check("files: an asset made after the work was over stays, and nothing is left unsaid",
+                Ok(undone) && File.Exists(file(byHand)) && data["unkept"].Count() == 0 && data["problems"].Count() == 0,
+                Ok(undone) ? $"unkept {data["unkept"].ToString(Formatting.None)} / problems {data["problems"].ToString(Formatting.None)}" : Describe(undone));
         }
 
         private static void FinishPackageChecks(JObject status)

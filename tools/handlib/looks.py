@@ -1,4 +1,5 @@
-"""Whether code a subagent is about to run in Blender can only look.
+"""Whether what a subagent is about to do can only look: a tool by its name (tool_only_looks), code for Blender by
+reading it (python_only_looks).
 
 A request gets its undo point just before the first action that may change the window. MCP for Blender's
 execute_code runs any Python, so it counted as such an action whatever the code did, and a request that only asked
@@ -237,6 +238,16 @@ class Code:
         if isinstance(func, ast.Attribute):
             return bool(self.module_of(func)) or func.attr in METHODS or (func.attr in OWN_METHODS and self.own(func.value))
         return False  # the result of a call, called: getattr(obj, "select_set")(True)
+
+
+# Tools that leave a window as it was, by their name. A window that did nothing else for a request is not one the
+# request changed (its picture under the answer would show nothing new), gets no undo point, and has no file kept.
+LOOKING_TOOLS = {"ch_scene_snapshot", "ch_editor_status", "ch_capture", "ch_export_model", "ch_export_objects"}
+
+
+def tool_only_looks(tool: str, detail: str = "") -> bool:
+    return tool in LOOKING_TOOLS or tool.startswith(("get_", "read_", "find_", "list_")) or \
+        (tool == "ch_checkpoint" and detail.strip() == "list")
 
 
 def python_only_looks(code: str) -> bool:

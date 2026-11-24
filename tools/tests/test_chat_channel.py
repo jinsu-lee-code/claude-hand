@@ -424,16 +424,20 @@ class ProgressTests(unittest.TestCase):
         self.hub.initialized = True
         self.hub.post_user_message("unity", "MyGame", "큐브 세 개를   일렬로 놓아줘")
         first = self.hub.report_action("unity", "MyGame@aaaa1111", "manage_gameobject", "create Cube")
-        self.assertEqual(first, {"chat_id": "unity-mygame", "new_request": True, "label": "큐브 세 개를 일렬로 놓아줘"})
-        self.assertFalse(self.hub.report_action("unity", "MyGame@aaaa1111", "manage_scene", "save")["new_request"])
+        request = self.hub.logs["unity-mygame"][-1]["request"]  # the point is named after the request: its files are kept under it
+        self.assertEqual(first, {"chat_id": "unity-mygame", "new_request": True, "label": "큐브 세 개를 일렬로 놓아줘", "point": request})
+        again = self.hub.report_action("unity", "MyGame@aaaa1111", "manage_scene", "save")
+        self.assertEqual((again["new_request"], again["point"]), (False, request))
         state = self.hub.poll("unity-mygame", 0, 0)
         self.assertEqual((state["progress"]["tool"], state["progress"]["detail"], state["progress"]["actions"]),
                          ("manage_scene", "save", 2))
         self.hub.reply("unity-mygame", "다 했어요")
         self.assertIsNone(self.hub.poll("unity-mygame", 0, 0)["progress"])
         # the next request (here asked in the Claude app, so no panel text) gets its own undo point
-        self.assertEqual(self.hub.report_action("unity", "MyGame@aaaa1111", "manage_scene", "get_hierarchy"),
-                         {"chat_id": "unity-mygame", "new_request": True, "label": ""})
+        later = self.hub.report_action("unity", "MyGame@aaaa1111", "manage_scene", "get_hierarchy")
+        self.assertEqual((later["chat_id"], later["new_request"], later["label"]), ("unity-mygame", True, ""))
+        self.assertTrue(later["point"].startswith("bar-"))  # nobody's request by name: the start of its work line stands for it
+        self.assertEqual(self.hub.report_action("unity", "MyGame@aaaa1111", "manage_scene", "save")["point"], later["point"])
 
     def test_a_working_on_it_reply_is_not_the_answer(self):
         self.hub.initialized = True
@@ -1258,6 +1262,7 @@ class WorkerTests(unittest.TestCase):
         self.assertFalse(look["new_request"])  # looking: nothing to undo yet
         first = self.hub.report_action("unity", "Props@bbbb2222", "ch_import_model", "", "ccc")
         self.assertEqual((first["new_request"], first["label"]), (True, "의자를 Props로 보내줘"))
+        self.assertEqual((look["point"], first["point"]), (theirs, theirs))  # the point carries the id of the request asked in Blender
         self.hub.post_user_message("unity", "Props", "바닥 색 바꿔줘")  # the Props panel asks for something of its own meanwhile
         self.hub.reply("unity-props", "지금 하는 일이 끝나면 바로 할게요.")
         self.assertIsNotNone(self.hub.poll("unity-props", 0, 0)["progress"])  # the line of the work going on stays
@@ -1270,7 +1275,7 @@ class WorkerTests(unittest.TestCase):
         self.hub.reply("blender-props", "Props에 놓았어요")
         self.hub.assign("unity-props", self.request_of("unity-props"))  # now the Props panel's own request: its own point
         own = self.act("ccc", pin="Props@bbbb2222")
-        self.assertEqual((own["new_request"], own["label"]), (True, "바닥 색 바꿔줘"))
+        self.assertEqual((own["new_request"], own["label"], own["point"]), (True, "바닥 색 바꿔줘", self.request_of("unity-props")))
         self.assertFalse(self.act("ccc", pin="Props@bbbb2222")["new_request"])
 
     def test_code_that_only_looks_sets_no_undo_point(self):

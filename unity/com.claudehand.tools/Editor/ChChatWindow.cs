@@ -622,14 +622,16 @@ namespace ClaudeHand.Editor
             var mark = marks[marks.Count - 1];
             if (!GUILayout.Button($"되돌리기: {mark.label} ({mark.time})", EditorStyles.miniButton)) return;
             // What the request did to files goes back too (ChCheckpoint): say so before, since it is not Unity's own Undo.
-            var notes = mark.files ?? new List<ChCheckpoint.FileNote>();
-            int replaced = notes.Where(n => n.kind == "replaced").Select(n => n.path).Distinct().Count();
-            int added = notes.Count(n => n.kind == "added");
-            var files = (replaced > 0 ? $"\n이 요청이 바꾼 파일 {replaced}개는 이전 것으로 돌아갑니다." : "") +
-                        (added > 0 ? $"\n이 요청이 가져온 에셋 {added}개는 프로젝트에서 빠집니다({ChCheckpoint.RemovedFolder}에 보관)." : "");
+            var plan = ChCheckpoint.Plan(mark);
+            var files = (plan.restore > 0 ? $"\n이 요청이 바꾼 파일 {plan.restore}개는 이전 것으로 돌아갑니다." : "") +
+                        (plan.remove > 0 ? $"\n이 요청으로 생긴 에셋 {plan.remove}개는 프로젝트에서 빠집니다({ChCheckpoint.RemovedFolder}에 보관)." : "") +
+                        (plan.putBack > 0 ? $"\n이 요청이 지운 에셋 {plan.putBack}개는 되살아납니다." : "") +
+                        (plan.moveBack > 0 ? $"\n이 요청이 옮기거나 이름을 바꾼 에셋 {plan.moveBack}개는 원래 자리로 갑니다." : "") +
+                        (plan.unkept.Count > 0 ? $"\n이전 내용이 보관되지 않은 파일 {plan.unkept.Count}개는 그대로 남습니다({ChCheckpoint.Few(plan.unkept)})." : "");
             var ok = EditorUtility.DisplayDialog("Claude Hand 되돌리기",
                 $"'{mark.label}' 요청({mark.time}) 이후 이 Unity에서 바뀐 것을 모두 되돌립니다.\n" +
-                "그 뒤에 직접 고친 것도 함께 되돌아갑니다. 저장해 둔 씬 파일은 다시 저장해야 바뀝니다." + files, "되돌리기", "취소");
+                "그 뒤에 직접 고친 것도 함께 되돌아갑니다(파일은 이 요청이 일하는 동안 바뀐 것만). " +
+                "저장해 둔 씬 파일은 다시 저장해야 바뀝니다." + files, "되돌리기", "취소");
             if (!ok) return;
             var undone = ChCheckpoint.UndoLast();
             if (undone == null) return;

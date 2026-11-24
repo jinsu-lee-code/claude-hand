@@ -10,7 +10,9 @@
 It refuses any call that would reach a project or Blender other than the subagent's own, any Unity call while a
 dialog stops that editor, and any call while another subagent is still at work in the same window. For a call it
 lets through it also tells the chat channel what the subagent is about to do (the panel's work line) and, on the
-first action of a request, sets an undo point in that window. A call it refuses goes into the event log.
+first action of a request, sets an undo point in that window. In a Unity project it writes down which request is at
+work and copies the files the call names, so that undoing the request puts them back (handlib/keeps.py). A call it
+refuses goes into the event log.
 
   guard.py --pin ... --server ... --app ... --stop       the same subagents' Stop hook: tells the chat channel the
                                                          subagent finished its turn. Never refuses anything.
@@ -24,7 +26,7 @@ So as the PreToolUse hook this process only ever ends with 0 or 2: bad arguments
 refuse the call. (As the Stop hook it always ends with 0: there, 2 would keep the subagent from stopping.) That is
 also why the guard lives in a small file of its own with nothing but the standard library at import time: a
 mistake elsewhere in claude-hand cannot make it end with another code. What comes after the decision (work line,
-undo point) is best effort and loads its helpers only then.
+undo point, kept files) is best effort and loads its helpers only then.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -147,38 +150,107 @@ def post_to_channel(path: str, body: dict, home: Path | None = None, post=None) 
     return (post or (lambda r: json.loads(urllib.request.urlopen(r, timeout=0.5).read() or b"{}")))(req) or {}
 
 
-def report_progress(event: dict, pin: str, server: str, app: str, home: Path | None = None, post=None, mark=None) -> str | None:
+def project_folder(pin: str) -> Path | None:
+    """Where the subagent's Unity project lies, as its editor registered it. None while that editor is not open."""
+    import unity_bridge
+    path = (unity_bridge.find_project(hash_=pin.rpartition("@")[2]) or {}).get("project_path")
+    return Path(path) if path else None
+
+
+def work_begins(app: str, pin: str, reply: dict, fresh: bool, folder=None) -> tuple[Path | None, str]:
+    """Write down, in the Unity project itself, which request this subagent is about to work for (handlib/keeps.py):
+    Claude Hand Tools counts what happens to files meanwhile as that request's doing, and an undo takes it back.
+    The chat channel names the request (point); without Claude Hand the work that goes on is one request until it
+    pauses or the subagent sets an undo point of its own (fresh). Returns (the project folder, the request's name);
+    the folder is None for Blender, a project that is not open, or when anything goes wrong."""
+    key = str(reply.get("point") or "")
+    if app != "unity":
+        return None, key
+    try:
+        from handlib import keeps
+        project = (folder or project_folder)(pin)
+        if project is None:
+            return None, key
+        key = key or keeps.local_key(keeps.read_work(project), time.time(), fresh)
+        keeps.begin_work(project, key)
+        return project, key
+    except Exception:
+        return None, key
+
+
+def work_ends(app: str, pin: str, folder=None) -> None:
+    """The subagent finished its turn: what happens to the project's files from now on is the user's own. Best effort."""
+    if app != "unity":
+        return
+    try:
+        from handlib import keeps
+        project = (folder or project_folder)(pin)
+        if project is not None:
+            keeps.end_work(project)
+    except Exception:
+        pass
+
+
+def keep_named_files(project: Path | None, key: str, tool: str, tool_input: dict) -> None:
+    """Just before a call that may write files: copy the ones its input names, so that undoing the request can put
+    them back (MCP for Unity writes a script or a shader directly, and Unity learns of it when the old one is gone).
+    Not for claude-hand's own ch_* tools, which keep what they replace themselves, nor for tools that only look.
+    Best effort: the call goes ahead whatever happens here."""
+    if project is None or not key or tool.startswith("ch_"):
+        return
+    try:
+        from handlib import keeps, looks
+        if not looks.tool_only_looks(tool):
+            keeps.keep(project, key, keeps.named_files(project, tool_input))
+    except Exception:
+        pass
+
+
+def report_progress(event: dict, pin: str, server: str, app: str, home: Path | None = None, post=None, mark=None,
+                    folder=None) -> str | None:
     """Tell the chat channel what this subagent is about to do, so its window's panel can show it, and on the first
-    action of a request set an undo point in that window (the chat panel's "되돌리기"). Best effort: no Claude Hand,
-    a slow server or any error just skips it; the tool call itself never waits more than a moment.
+    action of a request set an undo point in that window (the chat panel's "되돌리기"). In a Unity project it also
+    says which request is at work and keeps the files the call names (see work_begins, keep_named_files). Best
+    effort: no Claude Hand, a slow server or any error just skips it; the tool call itself never waits more than a
+    moment (but for an editor that is reloading scripts, whose undo point is worth some seconds: mark_checkpoint).
     Returns a denial reason when the channel says another subagent is still at work in this window."""
     tool = str(event.get("tool_name", ""))
     short = next((tool[len(prefix):] for prefix in (f"mcp__{server}_ch__", f"mcp__{server}__") if tool.startswith(prefix)), "")
     if not short:
         return None
+    tool_input = event.get("tool_input") or {}
+    reply = {}
     try:
-        tool_input = event.get("tool_input") or {}
         body = {"app": app, "pin": pin, "tool": short, "agent_id": str(event.get("agent_id") or ""), "detail": action_summary(tool_input)}
         if only_looks(app, tool_input):
             body["looks"] = True  # the channel goes by the tool's name otherwise, and this one runs any code
         reply = post_to_channel("/v1/progress", body, home, post)
+    except Exception:  # no channel to tell: the call goes ahead, and its files are still kept
+        pass
+    try:
         if reply.get("stop"):
             return ("사용자가 채팅창에서 [중지]를 눌러 이 호출을 막았습니다. 더 부르지 말고, 지금까지 한 것과 남은 것을 그대로 "
                     "감독에게 보고하고 끝내세요. 한 것을 되돌리지는 마세요(되돌릴지는 사용자가 정합니다).")
         if reply.get("busy"):
             return (f"이 창({pin})은 지금 다른 하위 세션이 작업 중이라 이 호출을 막았습니다. 같은 대상에 둘이 동시에 일하면 서로 "
                     "덮어씁니다. 더 부르지 말고 이 내용을 그대로 감독에게 보고하세요.")
-        own_mark =short == "ch_checkpoint" and str(tool_input.get("action") or "mark").strip().lower() == "mark"
+        own_mark = short == "ch_checkpoint" and str(tool_input.get("action") or "mark").strip().lower() == "mark"
         # A "cancel that" request starts with the undo itself: a fresh point there would leave nothing to undo.
         undoing = (short == "ch_checkpoint" and not own_mark) or "undo_last_request" in str(tool_input.get("code", ""))
+        project, key = work_begins(app, pin, reply, own_mark, folder)
+        marked = True
         if reply.get("new_request") and not undoing:
-            (mark or mark_checkpoint)(app, pin, str(reply.get("label") or ""))
-        if own_mark and reply.get("chat_id"):
+            try:
+                (mark or mark_checkpoint)(app, pin, str(reply.get("label") or ""), key=key)
+            except Exception:
+                marked = False  # the window does not answer: no undo point, but the call goes ahead and its files are kept
+        if own_mark and reply.get("chat_id") and marked:
             # With Claude Hand running, every request has its point already (set here, named after what the user
             # asked). A second one from the subagent would take over the chat window's 되돌리기 button under a name
             # the user never typed, and leave the first behind with nothing to undo.
             return ("이 요청의 되돌리기 지점은 Claude Hand가 이미 찍어 두었습니다(채팅창의 [되돌리기]). 따로 찍지 않아도 되니 "
                     "이 호출 없이 하던 일을 이어서 하세요. 문제가 아니므로 보고에 적지 않아도 됩니다.")
+        keep_named_files(project, key, short, tool_input)
     except Exception:  # progress is a nicety; the guard's answer must not depend on it
         pass
     return None
@@ -195,27 +267,46 @@ def note_refusal(event: dict, pin: str, app: str, reason: str, write=None) -> No
         pass
 
 
-def report_stop(event: dict, pin: str, app: str, home: Path | None = None, post=None) -> None:
+def report_stop(event: dict, pin: str, app: str, home: Path | None = None, post=None, folder=None) -> None:
     """The subagent finished its turn: its window is free for another subagent, and the chat channel can tell when
     the supervisor owes the panel an answer. Best effort."""
     try:
         post_to_channel("/v1/stopped", {"app": app, "pin": pin, "agent_id": str(event.get("agent_id") or "")}, home, post)
     except Exception:
         pass
+    work_ends(app, pin, folder)
 
 
-def mark_checkpoint(app: str, pin: str, label: str, request=None) -> None:
+MARK_TRIES = 6      # an editor that reloads scripts has its bridge away for some seconds: a request that follows one
+MARK_WAIT = 2.0     # which changed a script starts just then, and must not go without its undo point
+MARK_SLOW = 3.0     # an attempt that took this long did not find the bridge away: the editor is stuck, and asking again will not help
+
+
+def mark_checkpoint(app: str, pin: str, label: str, request=None, key: str = "", sleep=time.sleep, clock=time.time) -> None:
     """Set an undo point in the subagent's window: in Unity through Claude Hand Tools' own bridge (ch_checkpoint), in
-    Blender through MCP for Blender's execute_code into the Claude Hand Chat add-on (nothing happens without it)."""
+    Blender through MCP for Blender's execute_code into the Claude Hand Chat add-on (nothing happens without it).
+    key: the name of the request the point is for (see work_begins); the Unity point carries it, and the files
+    kept under that name go back with it."""
     if app == "blender":
         from handlib import link
         code = f"import claude_hand_chat\nprint(claude_hand_chat.mark_undo_point({label!r}))"
         (request or link.blender_request)(int(pin.rpartition("@")[2]), {"type": "execute_code", "params": {"code": code}}, 5.0)
         return
     import unity_bridge
-    entry = unity_bridge.find_project(hash_=pin.rpartition("@")[2])
-    if entry:
-        (request or unity_bridge.request)(entry, "ch_checkpoint", {"action": "mark", "label": label}, timeout=8.0)
+    params = {"action": "mark", "label": label, **({"request": key} if key else {})}
+    for attempt in range(MARK_TRIES):
+        entry = unity_bridge.find_project(hash_=pin.rpartition("@")[2])  # anew each time: the port may change over a reload
+        if not entry:
+            return
+        started = clock()
+        try:
+            (request or unity_bridge.request)(entry, "ch_checkpoint", params, timeout=8.0)
+            return
+        except Exception as exc:
+            away = getattr(exc, "code", "") in ("UNREACHABLE", "EDITOR_BUSY") and clock() - started < MARK_SLOW
+            if not away or attempt == MARK_TRIES - 1:
+                raise
+            sleep(MARK_WAIT)
 
 
 # --------------------------------------------------------------------------- the hook
