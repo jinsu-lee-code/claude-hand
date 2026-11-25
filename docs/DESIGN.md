@@ -60,6 +60,18 @@ MCP for Unity 기본 도구(씬·오브젝트·스크립트)는 MCP for Unity를
 ### 결정 3: 고정은 세 겹으로 한다
 
 1. **서버 고정:** `--default-instance`. 인자 없이 부른 호출은 고정된 프로젝트로 간다.
+   - `--default-instance`는 기본값일 뿐이고 포트는 신분증이 아니다(1.0.1에서 알게 됨, MCP for Unity 10.3.0).
+     - 고정한 창이 서버의 목록에서 잠깐 빠지면(연결이 꺼짐, 스크립트를 60초 넘게 다시 읽음, 0.3초 안에 답하지 못함) 서버가 다른 창을 고른다: 미들웨어가 "하나뿐인 창"을 골라 세션에 남기고, 보내다 실패한 명령은 응답하는 아무 포트로 다시 보낸다.
+     - Unity 쪽은 다시 읽은 뒤 포트를 3초 안에 못 잡으면 6400부터 비어 있는 가장 낮은 포트로 옮긴다. 방금까지 다른 창의 포트였을 수 있고, 연결의 첫인사에는 프로젝트가 없다.
+     - Unity 쪽은 새 연결이 오면 기존 연결을 모두 닫는다. 서버는 창을 찾을 때 모든 창의 포트에 붙어 보므로, 창이 둘이면 서버들이 서로의 연결을 끊는다.
+   - 그래서 서버에 장치를 건다(`tools/unity_pin/sitecustomize.py`). `sync`가 정의 파일의 서버 환경에 `PYTHONPATH`(그 폴더)와 `CLAUDE_HAND_UNITY_PIN`을 적고, Python이 시작하며 그 파일을 읽는다.
+     - 창 찾기(`PortDiscovery.discover_all_unity_instances`, `discover_unity_port`)가 그 해시의 창만 돌려준다. 고를 다른 창이 없다.
+     - 응답 확인(`_try_probe_unity_mcp`)은 자기 창의 포트에만, 그것도 연결을 쥐고 있지 않을 때만 붙는다. 남의 연결도 자기 명령도 끊지 않는다.
+     - 새 연결(`UnityConnection.connect`)은 그 너머의 창에게 `get_project_info`로 Assets 경로를 물어, 그 해시가 고정한 것일 때만 쓴다. 연결은 붙은 창에 머무니 연결마다 한 번이면 된다. 답이 없거나 알 수 없으면 쓰지 않는다(막는 쪽).
+   - 호출마다 `unity_instance`를 넣는 방법은 시험해 보고 버렸다: 미들웨어 쪽은 막지만, 명령이 가는 도중에 창이 다시 읽기를 시작하면 여전히 다른 창으로 다시 보낸다.
+   - 환경 변수로 거는 까닭: 등록된 서버 명령(uvx, 버전)을 그대로 쓸 수 있다. 서버의 것이 아닌 Python(uv의 보조 프로세스)에서는 아무것도 하지 않고, 구조가 다른 서버에서는 전부 걸지 못했다고 stderr에 남긴 채 서버를 그대로 띄운다(일부만 거는 일은 없다). 걸렸는지는 `doctor`가 묻는다(`CLAUDE_HAND_UNITY_PIN_CHECK`: 답하고 끝내며 서버는 뜨지 않는다).
+   - claude-hand 자신의 창 찾기(`discovery.discover_stdio`)도 포트에 붙지 않는다. 상태 파일이 15초 안에 쓰였는지(연결이 살아 있으면 0.5초마다 쓰인다)로 본다.
+   - 연결이 꺼진 채 남는 것은 Claude Hand Tools가 다시 켠다(`ChMcpLink`). MCP for Unity는 다시 읽은 뒤 여섯 번 켜 보고 포기하는데, Unity가 옛 포트를 놓지 않아 그 여섯 번이 다 실패할 수 있다. 2초마다 `StdioBridgeHost.IsRunning`을 이름으로 찾아 보고, 컴파일 · 가져오기 중이 아닌데 20초 넘게 꺼져 있으면 `TransportManager.StartAsync(Stdio)`(없으면 `StartAutoConnect`)를 부른다. 20초는 MCP for Unity의 빠른 시도(0 · 1 · 3 · 5 · 10초)가 먼저 지나가게 둔 것이다. 이름으로 찾으므로 MCP for Unity 없이도 컴파일되고, 구조가 다르면 아무것도 하지 않는다.
 2. **도구 허용 목록:** `tools: mcp__<자기서버>__*, mcp__<자기서버>_ch__*, Read, Glob, Grep`. 부모의 `unityMCP` 도구는 아예 보이지 않는다. `_ch` 서버는 시작 인자(`--hash`)로 자기 프로젝트에만 붙으니 다른 프로젝트를 고를 방법이 없다.
 3. **PreToolUse 훅 (`tools/guard.py`):** 서버 고정이 막지 못하는 경우를 막는다.
    - 호출마다 넣을 수 있는 `unity_instance` 인자

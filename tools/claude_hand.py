@@ -530,7 +530,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     started = time.time()
     progress = None if args.json else (lambda message: print("  " + message, file=sys.stderr, flush=True))
     results = checks.doctor_checks([Path(p).expanduser() for p in args.unity_project], discovery.parse_ports(args.blender_ports),
-                           progress=progress, server_starts=checks.unity_server_starts)
+                           progress=progress, server_starts=checks.unity_server_starts, server_pinned=checks.unity_server_pinned)
     if args.json:
         print(json.dumps([asdict(c) for c in results], ensure_ascii=False, indent=2))
         return 0

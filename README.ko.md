@@ -456,7 +456,7 @@ Blender 쪽 일은 MCP for Blender의 Python 실행 도구로 합니다. 옮기�
 
 ## 안전장치
 
-- **하위 세션은 자기 창만.** 정의 파일의 `tools` 허용 목록에 자기 전용 MCP 서버만 들어 있습니다. Unity 서버는 `--default-instance <Name@hash>`로, Blender 서버는 `--port <포트>`로 고정됩니다.
+- **하위 세션은 자기 창만.** 정의 파일의 `tools` 허용 목록에 자기 전용 MCP 서버만 들어 있습니다. Unity 서버는 `--default-instance <Name@hash>`로, Blender 서버는 `--port <포트>`로 고정됩니다. Unity 서버(Stdio)에는 장치가 하나 더 걸립니다(`tools/unity_pin`): 맡은 창만 보고, 다른 창의 포트에는 연결하지 않고, 새 연결은 그 창이 맡은 프로젝트라고 답할 때만 씁니다. `--default-instance`는 기본값일 뿐이어서, 맡은 창의 연결이 잠깐 꺼지거나 응답이 늦으면 서버가 다른 Unity 창을 대신 골랐기 때문입니다. 이제 그런 호출은 실패하고, 창이 돌아오면 이어집니다. `doctor`가 이 장치가 걸려 있는지 확인합니다.
 - **호출마다 검사.** 안전장치 훅(`tools/guard.py`)이 Unity 호출을 하나하나 검사해, 다른 프로젝트를 가리키는 `unity_instance`와 대상 변경(`set_active_instance`)을 막습니다. `batch_execute` 안에 들어 있는 명령도 봅니다.
 - **보호 규칙.** 같은 훅이 호출을 그 창의 [보호 규칙](#건드리면-안-되는-것-정해-두기-보호-규칙)과 견줍니다. 호출이 끝난 뒤에도 한 번 더 돌아, 창이 막았거나 되돌린 것을 하위 세션에게 알립니다.
 - **잘못되면 막는 쪽.** 훅 안에서 무엇이 잘못되든 호출을 막습니다(잘못된 인자, 읽을 수 없는 입력, 판단 중 오류, 확인할 수 없는 보호 규칙).
@@ -471,6 +471,8 @@ Blender 쪽 일은 MCP for Blender의 Python 실행 도구로 합니다. 옮기�
 - 작업 표시줄 알림, 한글 입력창, 대화상자 감지, Claude Hand 창 자동 최소화는 Windows에서만 됩니다. macOS · Linux에서는 실제 창으로 확인하지 않았습니다.
 - 개발 중인 체크아웃에서 `unity-install`을 하면 Claude Hand Tools가 이 PC의 폴더 경로(`file:`)로 들어가서, 그 프로젝트는 다른 PC에서 열리지 않습니다. 릴리스 태그(예: `v1.0.0`)를 받은 체크아웃에서는 GitHub 주소로 들어갑니다. `unity-install --dry-run`이 어느 쪽인지 알려 줍니다.
 - Blender 하위 세션이 처음 연결을 확인할 때와 `sync` · `doctor`가 파일 이름을 읽을 때, Blender 안에서 읽기 전용 Python(`print(bpy.data.filepath)`)이 실행됩니다.
+- 한 Unity 창의 MCP for Unity 연결이 꺼지면(Window > MCP for Unity가 Connected가 아님) 그 창의 하위 세션 호출은 실패합니다. 다른 창으로 가지는 않습니다. Claude Hand Tools가 20초쯤 뒤에 다시 켜고, 안 켜지면 그 창의 Window > MCP for Unity에서 연결합니다. 감독 세션이나 다른 Claude Code 세션에 붙은 MCP for Unity 서버가 시작하거나 쓰일 때 Unity 쪽 연결이 한 번 끊길 수 있습니다(그 서버들은 장치 밖입니다).
+- 하위 세션의 서버가 맡은 Unity 창만 보게 하는 장치는 MCP for Unity를 Stdio로 쓸 때만 걸립니다. HTTP 방식에서는 하위 세션이 첫 호출로 대상을 정하는 것에 기대고, 그 길은 Unity 창 둘로 시험하지 않았습니다. Unity 창을 여럿 쓰면 Stdio를 쓰세요.
 
 **Unity ↔ Unity**
 
@@ -528,6 +530,16 @@ Blender 쪽 일은 MCP for Blender의 Python 실행 도구로 합니다. 옮기�
 ## 버전별 변경 내용
 
 번호는 저장소 루트의 `VERSION`을 따릅니다. 태그는 `v0.9.0`과 `v1.0.0`에 붙어 있습니다. 버전마다 무엇이 왜 바뀌었는지 자세한 기록은 [docs/CHANGELOG.md](docs/CHANGELOG.md)에 있습니다.
+
+### 1.0.1 (2026-11-25): 하위 세션이 다른 Unity 창을 건드리던 것, 연결이 끊기던 것
+
+Unity 창을 둘 이상 열어 두고 쓰면, 한 창의 하위 세션이 한 일이 다른 창에 들어가는 일이 있었습니다. 맡은 창의 MCP for Unity 연결이 잠깐 꺼지거나 응답이 늦으면 서버가 응답하는 다른 창을 대신 골랐고, 한 번 넘어가면 그 하위 세션이 끝날 때까지 거기 붙어 있었습니다. 연결이 끊기는 데는 claude-hand도 한몫했습니다: Unity 쪽은 새 연결이 오면 기존 연결을 닫는데, 창을 찾을 때마다 그 포트에 붙어 보고 있었습니다.
+
+- 각 하위 세션의 서버는 맡은 창만 보고, 다른 창의 포트에는 연결하지 않고, 새 연결은 그 창이 맡은 프로젝트라고 답할 때만 씁니다(`tools/unity_pin`). 창이 응답하지 않으면 그 호출은 실패하고, 창이 돌아오면 이어집니다.
+- claude-hand가 창을 찾을 때 Unity의 포트에 붙지 않습니다. 일하던 하위 세션의 연결을 끊지 않습니다.
+- 받는 법: `update`(또는 `sync`)로 하위 세션 정의를 다시 쓴 뒤 Claude Hand를 다시 켭니다. `doctor`의 "MCP for Unity 서버가 맡은 창만 봄"이 OK인지 보세요.
+- 확인: MCP for Unity 서버의 실제 코드와 가짜 창 둘로, 고치기 전에는 다른 창으로 가던 경우들이 고친 뒤에는 가지 않는 것을 자동 테스트로 봅니다. 실제 Unity 창 하나(hand_test)로 봤고, 창 둘을 함께 열고는 아직 보지 않았습니다([검증 순서](docs/TEST-PLAN.md) 33단계).
+- 한 창의 MCP for Unity 연결이 꺼지면 Claude Hand Tools가 20초쯤 뒤에 다시 켭니다. 그동안 그 창의 호출은 실패하고, 다른 창으로 가지는 않습니다.
 
 ### 1.0.0 (2026-11-24, 태그 `v1.0.0`): 첫 정식 버전
 

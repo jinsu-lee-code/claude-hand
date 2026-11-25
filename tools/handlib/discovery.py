@@ -9,7 +9,7 @@ import argparse
 import json
 import os
 import re
-import socket
+import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -85,18 +85,26 @@ def project_name_from_assets_path(project_path: str) -> str:
     return name or "Unknown"
 
 
-def probe_port(port: int, timeout: float = 0.4) -> bool:
-    """MCP for Unity's listener greets every connection with a handshake containing FRAMING=1."""
+HEARTBEAT_FRESH = 15.0  # seconds. A listening bridge rewrites its status file twice a second (StdioBridgeHost.ProcessCommands)
+RELOAD_PATIENCE = 300.0  # seconds a status file may say "reloading" before the editor counts as gone
+
+
+def listening(file: Path, data: dict, now: float | None = None) -> bool:
+    """Whether the editor's MCP for Unity bridge is up, told from its status file alone. Never by connecting: the
+    bridge closes every other connection when a new one arrives (StdioBridgeHost.HandleClientAsync, "only ever one
+    active Python server"), so a look by socket cut whatever subagent was working in that editor."""
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout) as s:
-            s.settimeout(timeout)
-            return b"FRAMING=1" in s.recv(512)
+        age = (time.time() if now is None else now) - file.stat().st_mtime
     except OSError:
         return False
+    if data.get("reloading"):
+        return age <= RELOAD_PATIENCE
+    return age <= HEARTBEAT_FRESH and data.get("reason") not in ("stopped", "start_failed")
 
 
-def discover_stdio(directory: Path | None = None, probe=probe_port) -> list[Instance]:
-    """Read ~/.unity-mcp/unity-mcp-status-<hash>.json files written by the Unity side (stdio bridge)."""
+def discover_stdio(directory: Path | None = None, probe=None, now: float | None = None) -> list[Instance]:
+    """Read ~/.unity-mcp/unity-mcp-status-<hash>.json files written by the Unity side (stdio bridge).
+    probe(port) -> bool stands in for the heartbeat in tests; left out, no socket is opened."""
     directory = directory or status_dir()
     by_port: dict[object, tuple[Instance, float]] = {}
     entries = []
@@ -106,18 +114,24 @@ def discover_stdio(directory: Path | None = None, probe=probe_port) -> list[Inst
         except (OSError, ValueError):
             continue
     ports = sorted({d.get("unity_port") for _, d in entries if isinstance(d.get("unity_port"), int)})
-    with ThreadPoolExecutor(max_workers=max(1, min(16, len(ports)))) as pool:  # stale files cost a timeout each
-        answering = dict(zip(ports, pool.map(probe, ports)))
+    answering: dict = {}
+    if probe is not None:
+        with ThreadPoolExecutor(max_workers=max(1, min(16, len(ports)))) as pool:
+            answering = dict(zip(ports, pool.map(probe, ports)))
     for file, data in entries:
         project_path = data.get("project_path") or ""
         port = data.get("unity_port")
+        if probe is None:  # each file speaks for its own editor: two files can name one port when an editor took another's over
+            alive = isinstance(port, int) and listening(file, data, now)
+        else:
+            alive = bool(isinstance(port, int) and answering.get(port)) or bool(data.get("reloading"))
         inst = Instance(
             name=project_name_from_assets_path(project_path),
             hash=file.stem.replace("unity-mcp-status-", ""),
             path=project_path[: -len("/Assets")] if project_path.endswith(("/Assets", "\\Assets")) else project_path,
             port=port if isinstance(port, int) else None,
             unity_version=data.get("unity_version") or "",
-            alive=bool(isinstance(port, int) and answering.get(port)) or bool(data.get("reloading")),
+            alive=alive,
             source=str(file),
         )
         mtime = file.stat().st_mtime

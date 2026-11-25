@@ -19,6 +19,12 @@ GUARD_SCRIPT = TOOLS_DIR / "guard.py"
 SUPERVISOR_HOOK_SCRIPT = TOOLS_DIR / "supervisor_hook.py"
 CHAT_CHANNEL_SCRIPT = TOOLS_DIR / "chat_channel.py"
 UNITY_BRIDGE_SCRIPT = TOOLS_DIR / "unity_bridge.py"
+# On the PYTHONPATH of every Unity subagent's MCP for Unity server: its sitecustomize.py shows the server its own
+# editor and no other, so a call can never land in another open project.
+UNITY_PIN_DIR = TOOLS_DIR / "unity_pin"
+UNITY_PIN_ENV = "CLAUDE_HAND_UNITY_PIN"
+UNITY_PIN_CHECK_ENV = "CLAUDE_HAND_UNITY_PIN_CHECK"  # set by doctor: the pin says whether it holds, and the server does not start
+UNITY_PIN_OK = "claude-hand unity pin ok"
 SKILL_SOURCE = REPO_ROOT / "skills" / "orchestrator" / "SKILL.md"
 PROMPTS_DIR = REPO_ROOT / "prompts"  # the subagents' prompts, with {{PLACEHOLDERS}}
 START_SCRIPT = REPO_ROOT / ("start-supervisor.cmd" if sys.platform == "win32" else "start-supervisor.sh")

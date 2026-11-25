@@ -36,6 +36,7 @@ namespace ClaudeHand.Editor
                 editor_time_seconds = Math.Round(EditorApplication.timeSinceStartup, 3),
                 utc_now = DateTime.UtcNow.ToString("o"),
                 exchange_dir = ChPaths.ToPosix(ChPaths.ExchangeDir),
+                mcp_for_unity = ChMcpLink.Describe(),
                 echo = p.echo,
             });
         }

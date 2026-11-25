@@ -5,6 +5,7 @@ blender-<file>.md), the prompts in them, and the supervisor skill.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -47,6 +48,19 @@ def pinned_args(args: list[str], pin: str) -> list[str]:
             continue
         out.append(a)
     return out + ["--default-instance", pin]
+
+
+def pinned_env(env: dict[str, str], pin: str, separator: str = os.pathsep) -> dict[str, str]:
+    """`env` for a stdio MCP for Unity server that is to see the editor `pin` and no other. --default-instance alone
+    does not hold: when that editor does not answer for a moment, the server takes another one that does, and the
+    subagent's work lands in the wrong project. With tools/unity_pin first on PYTHONPATH, Python imports its
+    sitecustomize.py as the server starts, and that leaves the server nothing else to find."""
+    out = dict(env)
+    folder = constants.UNITY_PIN_DIR.as_posix()
+    rest = [part for part in out.get("PYTHONPATH", "").split(separator) if part and part != folder]
+    out["PYTHONPATH"] = separator.join([folder, *rest])
+    out[constants.UNITY_PIN_ENV] = pin
+    return out
 
 
 def q(value: str) -> str:
@@ -124,7 +138,7 @@ def render_agent(inst: discovery.Instance, name: str, server: discovery.ServerCo
     if server.transport == "http":
         lines += ["      type: http", f"      url: {q(server.url)}"]
     else:
-        env = dict(server.env)
+        env = pinned_env(server.env, inst.id)
         if not focus_nudge:
             env.setdefault("UNITY_MCP_DISABLE_FOCUS_NUDGE", "1")
         lines += [
@@ -132,9 +146,8 @@ def render_agent(inst: discovery.Instance, name: str, server: discovery.ServerCo
             f"      command: {q(server.command)}",
             "      args: " + json.dumps(pinned_args(server.args, inst.id), ensure_ascii=False),
         ]
-        if env:
-            lines.append("      env:")
-            lines += [f"        {k}: {q(v)}" for k, v in sorted(env.items())]
+        lines.append("      env:")
+        lines += [f"        {k}: {q(v)}" for k, v in sorted(env.items())]
     # claude-hand's own server for the ch_* tools (talks to ChBridge in the editor; does not depend on
     # MCP for Unity exposing custom tools).
     runner_parts = runner.split()

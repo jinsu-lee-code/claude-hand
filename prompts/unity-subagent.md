@@ -25,6 +25,7 @@
 3. 바꾼 뒤에는 스냅샷을 다시 찍어 결과를 확인한다. `STALE_REF`가 나오면 새 스냅샷의 ref를 쓴다.
 4. 오류의 `retry`가 `safe`면 그대로 다시, `after_fix`면 인자를 고쳐서, `check_first`면 상태부터 확인하고 다시 한다.
 5. `ch_*` 도구가 "응답하지 않는다"고 하면 `ch_bridge_status`로 이유를 본다. Unity가 스크립트를 다시 불러오는 중이면 몇 초 뒤 다시 하고, 프로젝트가 닫혀 있거나 Claude Hand Tools가 컴파일되지 않았으면 감독에게 보고한다.
+6. MCP for Unity 도구가 `No Unity Editor instances found`, `Could not connect to Unity`, `Unity is reloading`으로 실패하면 이 프로젝트의 Unity가 잠깐 응답하지 않는 것이다(스크립트를 다시 읽는 중, 큰 가져오기, 닫힘). 몇 초 뒤 다시 하고, 세 번쯤 해도 그대로면 한 것과 남은 것을 감독에게 보고한다. `ch_editor_status`의 `mcp_for_unity.running`이 false면 연결이 꺼진 것이고, Claude Hand Tools가 20초쯤 뒤에 다시 켠다. 이 서버는 이 프로젝트의 Unity만 본다. 다른 프로젝트로 돌려서 부르지 않는다.
 
 ## 다른 프로젝트와 오브젝트 주고받기
 - 보낼 때: 스냅샷으로 ref 확인 → `ch_export_objects(refs=[...], name="...")` → 결과의 `manifest_path`를 그대로 감독에게 돌려준다.

@@ -495,7 +495,7 @@ The undo point is placed before the first action of a request that could change 
 
 ## Safeguards
 
-- **A subagent has only its own window.** The `tools` allow-list in its definition file contains only its own MCP server. The Unity server is pinned with `--default-instance <Name@hash>`, the Blender server with `--port <port>`.
+- **A subagent has only its own window.** The `tools` allow-list in its definition file contains only its own MCP server. The Unity server is pinned with `--default-instance <Name@hash>`, the Blender server with `--port <port>`. A Unity server (Stdio) gets one more device (`tools/unity_pin`): it sees only its own window, connects to no other window's port, and uses a new connection only after that window has said it is the pinned project. `--default-instance` is only a default: when the pinned window's connection dropped for a moment or it was slow to answer, the server picked another Unity window that did. Such a call now fails, and work goes on once the window is back. `doctor` checks that this is in place.
 - **Every call is checked.** The guard hook (`tools/guard.py`) inspects each Unity call and blocks a `unity_instance` that points at another project and any change of target (`set_active_instance`). It looks inside `batch_execute` too.
 - **Protection rules.** The same hook compares each call with that window's [protection rules](#protection-rules). It runs once more after the call and tells the subagent what the window blocked or undid.
 - **When in doubt, block.** Whatever goes wrong inside the hook, the call is blocked (bad arguments, unreadable input, an error while deciding, protection rules that cannot be checked).
@@ -510,6 +510,8 @@ The undo point is placed before the first action of a request that could change 
 - Taskbar notifications, the Korean text box, dialog detection and minimizing the Claude Hand window work only on Windows. Nothing has been checked with real windows on macOS or Linux.
 - Running `unity-install` from a development checkout adds Claude Hand Tools by this PC's folder path (`file:`), so that project will not open on another PC. From a checkout of a release tag (for example `v1.0.0`) it is added by its GitHub address. `unity-install --dry-run` tells you which it will be.
 - When a Blender subagent first checks its connection, and when `sync` and `doctor` read the file name, read-only Python (`print(bpy.data.filepath)`) runs inside Blender.
+- When one Unity window's MCP for Unity connection is off (Window > MCP for Unity does not say Connected), calls from that window's subagent fail. They do not go to another window. Claude Hand Tools turns it back on after about 20 seconds; if it does not, reconnect in that window (Window > MCP for Unity). An MCP for Unity server attached to the supervisor session or to another Claude Code session can cut Unity's connection once when it starts or is used (those servers are outside the device).
+- Keeping a subagent's server to its own Unity window works only when MCP for Unity runs in Stdio mode. In HTTP mode it rests on the subagent choosing its target with its first call, and that path has not been tried with two Unity windows. Use Stdio when you work with several Unity windows.
 
 **Unity ↔ Unity**
 
@@ -567,6 +569,16 @@ The undo point is placed before the first action of a request that could change 
 ## Changelog
 
 The number follows `VERSION` at the repository root. Tags exist for `v0.9.0` and `v1.0.0`. The detailed record of what changed in each version and why is in [docs/CHANGELOG.md](docs/CHANGELOG.md) (in Korean).
+
+### 1.0.1 (2026-11-25): a subagent reaching into another Unity window, and connections being cut
+
+With two or more Unity windows open, what one window's subagent did could land in another window. When the pinned window's MCP for Unity connection dropped for a moment, or it was slow to answer, the server picked another window that did answer, and stayed with it until that subagent finished. claude-hand had a part in the dropped connections: the Unity side closes its existing connections whenever a new one arrives, and claude-hand connected to that port every time it looked for windows.
+
+- Each subagent's server now sees only its own window, connects to no other window's port, and uses a new connection only after that window has said it is the pinned project (`tools/unity_pin`). When the window does not answer, the call fails, and work goes on once the window is back.
+- claude-hand no longer connects to Unity's port when it looks for windows, so it does not cut a working subagent's connection.
+- To get it: rewrite the subagent definitions with `update` (or `sync`), then restart Claude Hand. In `doctor`, the line "MCP for Unity 서버가 맡은 창만 봄" (the MCP for Unity server sees only its own window) should say OK.
+- Checked: an automated test runs the MCP for Unity server's real code against two fake windows and shows that the cases that went to the other window before no longer do. Checked with one real Unity window (hand_test); not yet with two open together ([test plan](docs/TEST-PLAN.md), step 33).
+- When a window's MCP for Unity connection is off, Claude Hand Tools turns it back on after about 20 seconds. Until then that window's calls fail; they do not go to another window.
 
 ### 1.0.0 (2026-11-24, tag `v1.0.0`): first full release
 

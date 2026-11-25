@@ -56,10 +56,33 @@ def unity_server_starts(cfg, run=subprocess.run, contained=launch.inside_app_con
     return False, seen, f"터미널에서 직접 실행해 오류를 보세요: {shown}"
 
 
+UNPINNED_ADVICE = ("Unity 창을 둘 이상 열어 두면, 맡은 창이 잠깐 응답하지 않을 때(스크립트를 오래 다시 읽음 · 바쁨 · 닫힘) 하위 세션의 작업이 "
+                   "다른 창으로 갈 수 있습니다. MCP for Unity 서버가 uvx로 등록돼 있는지 확인하세요: " + constants.UNITY_MCP_ADD +
+                   "  그 전까지는 Unity 창을 하나만 열고 쓰세요.")
+
+
+def unity_server_pinned(cfg, run=subprocess.run, environ=None) -> tuple[bool, str, str]:
+    """Whether the server a Unity subagent starts is kept to that subagent's editor (tools/unity_pin): (ok, what was
+    seen, what to do). Without that the server takes another open editor whenever its own does not answer for a
+    moment, and the work lands in the wrong project. Started the way a subagent starts it, with a mark that makes the
+    pin say whether it holds and end before the server itself runs: it talks to no Unity."""
+    env = {**(os.environ if environ is None else environ), **agents.pinned_env(cfg.env, "check@00000000"),
+           constants.UNITY_PIN_CHECK_ENV: "1", "UNITY_MCP_SKIP_STARTUP_CONNECT": "1"}
+    try:
+        done = run([cfg.command, *cfg.args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+                   stdin=subprocess.DEVNULL, env=env)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"확인하지 못함: {exc}", UNPINNED_ADVICE
+    said = [line.strip() for line in (done.stdout or "").splitlines() if line.startswith("claude-hand unity pin")]
+    if constants.UNITY_PIN_OK in said:
+        return True, "맡은 창만 봄", ""
+    return False, (said[0] if said else "서버가 고정 장치를 읽지 않음")[:200], UNPINNED_ADVICE
+
+
 def doctor_checks(projects: list[Path], blender_ports: list[int], version=install.tool_version, progress=None,
-                  server_starts=None) -> list[Check]:
+                  server_starts=None, server_pinned=None) -> list[Check]:
     """server_starts: unity_server_starts when the MCP for Unity server is to be started for real (the doctor
-    command); left out, that check is skipped."""
+    command); left out, that check is skipped. server_pinned: unity_server_pinned, asked once the server starts."""
     checks: list[Check] = []
     progress = progress or (lambda message: None)
 
@@ -122,6 +145,9 @@ def doctor_checks(projects: list[Path], blender_ports: list[int], version=instal
         progress("MCP for Unity 서버가 뜨는지 확인 중...")
         starts, seen, fix = server_starts(unity_cfg)
         add("Unity", "MCP for Unity 서버 실행 (하위 세션이 띄우는 것)", starts, seen, fix)
+        if starts and server_pinned is not None:
+            pinned, seen, fix = server_pinned(unity_cfg)
+            add("Unity", "MCP for Unity 서버가 맡은 창만 봄 (다른 Unity 창으로 새지 않음)", pinned, seen, fix)
     try:
         via_bridge = [i for i in discovery.discover_bridge() if i.alive]
     except Exception:
