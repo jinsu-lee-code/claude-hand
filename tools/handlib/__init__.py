@@ -6,6 +6,9 @@ Each module uses only the ones above it in this list, and other modules' names t
 
   constants   names and places every part agrees on
   link        the low-level ways to things already running (home folder, chat server file, MCP for Blender's socket)
+  prefs       the user's settings and the lab: config.json read anew whenever it changes, and the list of what can be set
+  lang        the language of what is said: T("한국어") is the text as written, or its English from the table
+  english     that table
   eventlog    one line per thing that happened to a request, and reading them back (trace)
   overview    what goes on in each open window, in words (the panels' other windows, status)
   looks       whether a tool, or code about to run in Blender, can only look (it needs no undo point then)

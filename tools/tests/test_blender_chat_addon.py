@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ["CLAUDE_HAND_LOG"] = "off"  # the tests leave the real event log alone
+os.environ["CLAUDE_HAND_LANG"] = "ko"  # the words here are the Korean ones, whatever this PC is set to
 import chat_channel as cc  # noqa: E402
 import handlib.agents  # noqa: E402
 import handlib.discovery  # noqa: E402
@@ -744,8 +745,11 @@ class Layout:
     def row(self, align=False):
         return Layout(self.shown)
 
-    def prop(self, data, name, text=""):
-        self.shown.append(f"<{text}>")
+    def split(self, factor=0.5):
+        return Layout(self.shown)
+
+    def prop(self, data, name, text="", expand=False):
+        self.shown.append(f"<{text or name}>")
 
 
 @unittest.skipIf(bpy is None, "Blender's bpy module is not installed")
@@ -2503,6 +2507,170 @@ class ProtectTests(unittest.TestCase):
             self.assertIn(text, layout.shown)
         self.assertNotIn("[이 창 보기만]", layout.shown)
         self.assertNotIn("[.blend 저장 금지]", layout.shown)
+
+
+@unittest.skipIf(bpy is None, "Blender's bpy module is not installed")
+class SettingsTests(unittest.TestCase):
+    """The settings window (the gear of the panel) and the panel's two languages: what it writes is in config.json at
+    once, and what config.json says, the panel says at once, whichever window wrote it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "home"
+        self.home.mkdir()
+        os.environ["CLAUDE_HAND_HOME"] = str(self.home)
+        os.environ.pop("CLAUDE_HAND_LANG", None)  # these go by config.json
+        self.repo = ADDON.parents[1].as_posix()  # where settings/catalog.json is: what setup writes into config.json
+        self.write({"repo": self.repo, "start_script": "x"})
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        spec = importlib.util.spec_from_file_location("claude_hand_chat", ADDON)
+        self.addon = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.addon)
+        self.addon.register()
+
+    def tearDown(self):
+        self.addon.unregister()
+        os.environ.pop("CLAUDE_HAND_HOME", None)
+        os.environ["CLAUDE_HAND_LANG"] = "ko"
+        self.tmp.cleanup()
+
+    def write(self, config):
+        (self.home / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+    def config(self):
+        return json.loads((self.home / "config.json").read_text(encoding="utf-8"))
+
+    def shown(self, tab="features"):
+        wm = bpy.context.window_manager
+        wm.claude_hand_settings_tab = tab
+        layout = Layout()
+        self.addon.draw_settings(layout, wm)
+        return layout.shown
+
+    def test_the_window_has_a_row_for_each_setting_and_says_its_state_in_words(self):
+        shown = self.shown()
+        self.assertEqual(shown[0], "<claude_hand_settings_tab>")  # the two tabs
+        for row in ("<요청마다 든 시간 · 토큰 줄>", "<바뀐 다른 창의 그림 붙이기>", "<답이 오면 작업 표시줄 깜빡임>",
+                    "<Claude 데스크톱 앱에서 보기 (Remote Control)>", "<Claude Hand 창 자동 최소화>", "<대화 내용 보관 일수>", "<옮긴 파일 보관 일수>"):
+            self.assertIn(row, shown)
+        # the list of languages: its name is a label of its own (Blender cuts the name of a list short), the list beside it
+        self.assertEqual(shown[shown.index("언어 · Language") + 1], "<claude_hand_set_language>")
+        self.assertEqual(shown[shown.index("<요청마다 든 시간 · 토큰 줄>") + 1], "켜짐")
+        self.assertEqual(shown[shown.index("<Claude Hand 창 자동 최소화>") + 1], "켜짐 *")  # holds from the next start
+        self.assertEqual(shown[shown.index("<대화 내용 보관 일수>") + 1], "지우지 않음 *")
+        self.assertEqual(shown[shown.index("<옮긴 파일 보관 일수>") + 1], "30일 *")
+        self.assertEqual(shown[-1], "* 다음에 Claude Hand를 켤 때부터 적용됩니다.")
+        lab = self.shown("lab")
+        self.assertEqual(lab[lab.index("<Claude 지침 영어판>") + 1], "꺼짐 *")
+        self.assertTrue(lab[lab.index("<Claude 지침 영어판>") + 2].startswith("1.1.0부터 · "), lab)
+        self.assertEqual(bpy.types.CLAUDEHAND_PT_settings.bl_region_type, "HEADER")  # drawn nowhere by itself: what the gear opens
+
+    def test_a_change_is_in_config_json_at_once_and_leaves_what_else_is_there(self):
+        wm = bpy.context.window_manager
+        wm.claude_hand_set_show_cost = False
+        wm.claude_hand_set_history_keep_days = 30
+        wm.claude_hand_lab_english_prompts = True
+        self.assertEqual(self.config(), {"repo": self.repo, "start_script": "x", "show_cost": False, "history_keep_days": 30,
+                                         "lab": {"english_prompts": True}})
+        self.assertEqual((wm.claude_hand_set_show_cost, wm.claude_hand_set_history_keep_days, wm.claude_hand_lab_english_prompts), (False, 30, True))
+        shown = self.shown()
+        self.assertEqual((shown[shown.index("<요청마다 든 시간 · 토큰 줄>") + 1], shown[shown.index("<대화 내용 보관 일수>") + 1]), ("꺼짐", "30일 *"))
+        time.sleep(0.02)
+        self.write({"repo": self.repo, "show_cost": True})  # another window, or the command, changed it
+        self.assertEqual((wm.claude_hand_set_show_cost, wm.claude_hand_set_history_keep_days, wm.claude_hand_lab_english_prompts), (True, 0, False))
+        self.write({"repo": self.repo, "show_cost": "what", "history_keep_days": -1})  # typed by hand, and not what it can be
+        self.assertEqual((wm.claude_hand_set_show_cost, wm.claude_hand_set_history_keep_days), (True, 0))
+
+    def test_the_panel_follows_the_language_at_once(self):
+        addon, wm = self.addon, bpy.context.window_manager
+        self.assertEqual((bpy.types.CLAUDEHAND_PT_protect.bl_label, addon.T("보내기")), ("보호", "보내기"))
+        korean_wide = bpy.types.CLAUDEHAND_PT_settings.bl_ui_units_x
+        self.assertGreaterEqual(korean_wide, addon.SETTINGS_UNITS)
+        wm.claude_hand_chat_context = False  # what the user ticked ...
+        wm.claude_hand_protect_session = True
+        wm.claude_hand_set_language = "en"
+        self.assertEqual(self.config()["language"], "en")
+        addon.tick()  # the panel's timer: the classes are registered anew under their English labels
+        self.assertEqual((bpy.types.CLAUDEHAND_PT_protect.bl_label, bpy.types.CLAUDEHAND_PT_follow.bl_label, bpy.types.CLAUDEHAND_PT_settings.bl_label,
+                          bpy.ops.claude_hand.chat_undo.get_rna_type().name),
+                         ("Protect", "Models sent to Unity", "Claude Hand settings", "Undo"))
+        self.assertEqual((wm.claude_hand_chat_context, wm.claude_hand_protect_session, wm.claude_hand_set_language), (False, True, "en"))  # ... stays
+        # the window is as wide as its longest name needs, and an English name is longer: none is cut off
+        wide = bpy.types.CLAUDEHAND_PT_settings.bl_ui_units_x
+        self.assertEqual(wide, addon.settings_units())
+        self.assertGreater(wide, korean_wide)
+        self.assertGreaterEqual((wide - addon.SETTINGS_WORDS - 1.6) * 20, len("Pictures of the other windows a request changed") * 6.2)
+        self.assertEqual(addon.T("되돌리기: {plan}", plan="큐브 (14:02)"), "Undo: 큐브 (14:02)")
+        self.assertEqual(addon.protect_row_label("window", "look", False), "This window: Look only (this run only)")
+        self.assertEqual(addon.progress_view({"elapsed": 12, "tool": "execute_code", "detail": "bpy.ops", "actions": 3}, 0, 0),
+                         "Working · 12s · execute_code bpy.ops · action 3")
+        shown = self.shown()
+        self.assertEqual(shown[shown.index("<Time and token line for each request>") + 1], "On")
+        self.assertTrue(" ".join(shown).endswith("* Applies from the next start of Claude Hand."), shown[-3:])  # wrapped to the window
+        layout = Layout()
+        addon.draw_protect(layout, None, wm)
+        self.assertIn("[Protect the selected objects]", layout.shown)
+        self.assertIn("<This run only (until Claude Hand is closed)>", layout.shown)
+        narrow = Layout()  # a sidebar narrower than those words: the bracket goes on a line of its own instead of being cut off
+        addon.draw_protect(narrow, (150.0, 11.0), wm)
+        at = narrow.shown.index("<This run only>")
+        self.assertEqual(narrow.shown[at + 1], "(until Claude Hand is closed)")
+        self.assertFalse([line for line in layout.shown + shown if any("\uac00" <= ch <= "\ud7a3" for ch in line) and "Language" not in line])
+        time.sleep(0.02)
+        self.write({"repo": self.repo, "language": "ko"})  # changed back in Unity's settings window, say
+        addon.tick()
+        self.assertEqual((bpy.types.CLAUDEHAND_PT_protect.bl_label, addon.protect_row_label("window", "look", False)), ("보호", "이 창: 보기만 (이번만)"))
+        self.assertEqual(bpy.types.CLAUDEHAND_PT_settings.bl_ui_units_x, korean_wide)
+        # the status line that says whose window this is stays up for hours: it says itself again in the new language
+        addon.apply_event("status", lambda: addon.T("담당: {agent}", agent="blender-props"))  # as the panel's worker puts it
+        self.assertEqual(addon._status[0], "담당: blender-props")
+        time.sleep(0.02)
+        self.write({"repo": self.repo, "language": "en"})
+        addon.restate_status()  # what the panel's timer does with the change of language
+        self.assertEqual(addon._status[0], "Handled by: blender-props")
+        self.assertEqual(addon.T("{days}일", days=1), "1 day")  # one of a thing has its own wording in English
+        self.assertEqual(addon.T("{days}일", days=30), "30 days")
+        addon._status[0] = "Could not send: x"  # another line took its place since: that one is left as it is
+        time.sleep(0.02)
+        self.write({"repo": self.repo, "language": "ko"})
+        addon.restate_status()
+        self.assertEqual(addon._status[0], "Could not send: x")
+
+    def test_a_text_typed_in_the_message_field_is_not_sent_by_the_change_of_language(self):
+        addon = self.addon
+        sent = []
+        addon.send_text = lambda text, include_context=True: sent.append(text) or True
+        self.write({"repo": self.repo, "language": "en"})
+        addon.tick()
+        self.assertEqual((sent, addon.CLAUDEHAND_OT_send.bl_label), ([], "Send"))
+
+    def test_without_the_list_the_language_can_still_be_chosen(self):
+        self.write({})  # a config.json that does not say where claude-hand is
+        self.addon.unregister()
+        self.addon.register()
+        shown = self.shown()
+        self.assertEqual(shown[1:3], ["언어 · Language", "<claude_hand_set_language>"])
+        self.assertTrue(any("설정 목록을 읽지 못했습니다" in line for line in shown), shown)
+        bpy.context.window_manager.claude_hand_set_language = "en"
+        self.assertEqual(self.config(), {"language": "en"})
+        self.assertIn("The list of settings could not be read.", " ".join(self.shown()))
+
+    def test_the_taskbar_blink_can_be_turned_off(self):
+        addon = self.addon
+        blinked = []
+        addon.flash_taskbar = lambda: blinked.append(1)
+        addon.apply_event("items", [{"kind": "reply", "text": "done", "ts": time.time(), "seq": 1}])
+        bpy.context.window_manager.claude_hand_set_flash_taskbar = False
+        addon.apply_event("items", [{"kind": "reply", "text": "done again", "ts": time.time(), "seq": 2}])
+        self.assertEqual((len(blinked), self.config()["flash_taskbar"]), (1, False))
+
+    def test_the_input_box_is_worded_in_the_language(self):
+        korean = base64.b64decode(self.addon.native_input_command("Claude Hand", 1)[-1]).decode("utf-16-le")
+        self.write({"repo": self.repo, "language": "en"})
+        english = base64.b64decode(self.addon.native_input_command("Claude Hand", 1)[-1]).decode("utf-16-le")
+        self.assertIn(base64.b64encode("보내기".encode("utf-8")).decode("ascii"), korean)
+        self.assertIn(base64.b64encode("Send".encode("utf-8")).decode("ascii"), english)
+        self.assertNotIn("보내기", korean)  # as base64, never as script text
 
 
 @unittest.skipIf(bpy is None, "Blender's bpy module is not installed")

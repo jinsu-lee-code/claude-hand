@@ -11,6 +11,8 @@ using UnityEditor;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
+using static ClaudeHand.Editor.ChText;
+
 namespace ClaudeHand.Editor
 {
     /// <summary>
@@ -38,9 +40,9 @@ namespace ClaudeHand.Editor
     {
         public static readonly string[] Modes = { "open", "look", "locked" };  // weakest first: of two files, the stricter holds
         public static readonly Dictionary<string, string> ModeWords = new Dictionary<string, string>
-            { { "open", "열림" }, { "look", "보기만" }, { "locked", "잠금" } };
+            { { "open", N("열림") }, { "look", N("보기만") }, { "locked", N("잠금") } };  // said through T: T(ModeWords[...])
         public static readonly Dictionary<string, string> ActionWords = new Dictionary<string, string>
-            { { "save_scene", "씬 저장" }, { "delete_asset", "에셋 삭제" }, { "play_mode", "플레이 모드" } };
+            { { "save_scene", N("씬 저장") }, { "delete_asset", N("에셋 삭제") }, { "play_mode", N("플레이 모드") } };
         private const string PendingKey = "ClaudeHand.Protect.Pending";
         private const string SinceKey = "ClaudeHand.Protect.Since";
         private const int CoveredTold = 3000;    // names told to the guard at most
@@ -153,11 +155,11 @@ namespace ClaudeHand.Editor
 
         public static string Label(Row row)
         {
-            var what = row.kind == "window" ? "이 창: " + (ModeWords.TryGetValue(row.value, out var mode) ? mode : row.value)
-                : row.kind == "action" ? "금지: " + (ActionWords.TryGetValue(row.value, out var action) ? action : row.value)
-                : row.kind == "path" ? "경로 " + row.value
-                : "오브젝트 " + row.value;
-            return what + (row.lasting ? "" : " (이번만)");
+            var what = row.kind == "window" ? T("이 창: {0}", ModeWords.TryGetValue(row.value, out var mode) ? T(mode) : row.value)
+                : row.kind == "action" ? T("금지: {0}", ActionWords.TryGetValue(row.value, out var action) ? T(action) : row.value)
+                : row.kind == "path" ? T("경로 {0}", row.value)
+                : T("오브젝트 {0}", row.value);
+            return what + (row.lasting ? "" : T(" (이번만)"));
         }
 
         // ------------------------------------------------------------------ the user changes them (the chat window only)
@@ -178,7 +180,7 @@ namespace ClaudeHand.Editor
             }
             catch (Exception ex)
             {
-                return "규칙을 적지 못했습니다: " + ex.Message;
+                return T("규칙을 적지 못했습니다: ") + ex.Message;
             }
             _rules = null;
             Changed?.Invoke();
@@ -194,11 +196,11 @@ namespace ClaudeHand.Editor
             value = (value ?? string.Empty).Trim();
             if (kind == "window")
             {
-                if (Array.IndexOf(Modes, value) <= 0) return $"'{value}'은(는) 창 규칙이 아닙니다.";
+                if (Array.IndexOf(Modes, value) <= 0) return T("'{0}'은(는) 창 규칙이 아닙니다.", value);
                 return Write(lasting, data => data["window"] = value);
             }
-            if (kind == "action" && !ActionWords.ContainsKey(value)) return $"'{value}'은(는) Unity에서 막을 수 있는 동작이 아닙니다.";
-            if ((kind != "path" && kind != "object" && kind != "action") || value.Length == 0) return "더할 규칙이 없습니다.";
+            if (kind == "action" && !ActionWords.ContainsKey(value)) return T("'{0}'은(는) Unity에서 막을 수 있는 동작이 아닙니다.", value);
+            if ((kind != "path" && kind != "object" && kind != "action") || value.Length == 0) return T("더할 규칙이 없습니다.");
             return Write(lasting, data =>
             {
                 var rows = data[kind + "s"] as JArray ?? new JArray();
@@ -350,8 +352,8 @@ namespace ClaudeHand.Editor
             var kept = new List<string>(paths.Length);
             foreach (var path in paths)
             {
-                if (rules.actions.Contains("save_scene") && path.EndsWith(".unity", StringComparison.OrdinalIgnoreCase)) Note(true, "씬 저장");
-                else if (PathRule(rules.paths, path) != null) Note(true, $"{path} (저장)");
+                if (rules.actions.Contains("save_scene") && path.EndsWith(".unity", StringComparison.OrdinalIgnoreCase)) Note(true, T("씬 저장"));
+                else if (PathRule(rules.paths, path) != null) Note(true, T("{0} (저장)", path));
                 else kept.Add(path);
             }
             return kept.Count == paths.Length ? paths : kept.ToArray();
@@ -364,11 +366,11 @@ namespace ClaudeHand.Editor
             var rules = Current;
             if (rules.actions.Contains("delete_asset"))
             {
-                Note(true, $"에셋 삭제 ({path})");
+                Note(true, T("에셋 삭제 ({0})", path));
                 return true;
             }
             if (PathRule(rules.paths, path) == null && RuleBelow(rules.paths, path) == null) return false;
-            Note(true, $"{path} (지우기)");
+            Note(true, T("{0} (지우기)", path));
             return true;
         }
 
@@ -379,7 +381,7 @@ namespace ClaudeHand.Editor
             var rules = Current;
             if (rules.paths.Count == 0) return false;
             if (PathRule(rules.paths, from) == null && RuleBelow(rules.paths, from) == null && PathRule(rules.paths, to) == null) return false;
-            Note(true, $"{from} (옮기기 · 이름 바꾸기)");
+            Note(true, T("{0} (옮기기 · 이름 바꾸기)", from));
             return true;
         }
 
@@ -389,7 +391,7 @@ namespace ClaudeHand.Editor
             if (!Active || !name.StartsWith("Assets/", StringComparison.Ordinal)) return;
             var path = name.EndsWith(".meta", StringComparison.OrdinalIgnoreCase) ? name.Substring(0, name.Length - 5) : name;
             if (File.Exists(Path.Combine(ChPaths.ProjectRoot, path)) || Directory.Exists(Path.Combine(ChPaths.ProjectRoot, path))) return;  // saved again, not made
-            if (PathRule(Current.paths, path) != null) Note(false, $"{path} (새로 만듦)");
+            if (PathRule(Current.paths, path) != null) Note(false, T("{0} (새로 만듦)", path));
         }
 
         /// <summary>
@@ -410,12 +412,12 @@ namespace ClaudeHand.Editor
                 if (!File.Exists(file)) continue;  // a folder
                 // Read again because something it depends on changed: the file itself is as it was.
                 if ((File.GetLastWriteTimeUtc(file) - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds < since - 2) continue;
-                if (Pending.changed.Contains($"{path} (새로 만듦)")) continue;
-                Note(false, $"{path} (파일이 바뀜)");
+                if (Pending.changed.Contains(T("{0} (새로 만듦)", path))) continue;
+                Note(false, T("{0} (파일이 바뀜)", path));
             }
             foreach (var path in deleted)
             {
-                if (PathRule(rules.paths, path) != null) Note(false, $"{path} (지워짐)");
+                if (PathRule(rules.paths, path) != null) Note(false, T("{0} (지워짐)", path));
             }
         }
 
@@ -434,7 +436,7 @@ namespace ClaudeHand.Editor
             {
                 if (state != PlayModeStateChange.ExitingEditMode || !Active || !Forbidden("play_mode")) return;
                 EditorApplication.isPlaying = false;
-                Note(true, "플레이 모드");
+                Note(true, T("플레이 모드"));
             };
             // A protected asset changed in memory (a material's colour through a SerializedObject): saving it would be
             // refused, but it would stay changed until the next save went through. Found here, taken back in After.
@@ -452,12 +454,12 @@ namespace ClaudeHand.Editor
                         case ObjectChangeKind.ChangeAssetObjectProperties:
                             stream.GetChangeAssetObjectPropertiesEvent(i, out var changed);
                             guid = changed.guid;
-                            how = "속성이 바뀜";
+                            how = T("속성이 바뀜");
                             break;
                         case ObjectChangeKind.DestroyAssetObject:
                             stream.GetDestroyAssetObjectEvent(i, out var destroyed);
                             guid = destroyed.guid;
-                            how = "안의 것이 지워짐";
+                            how = T("안의 것이 지워짐");
                             break;
                         default:
                             continue;
@@ -478,7 +480,10 @@ namespace ClaudeHand.Editor
         }
 
         private static List<Seen> _base;
+        // What of an object is no longer as it was, as it is said after its name ("Hero (자리)"). Two lists, not T():
+        // "켜짐" is here whether the object is active, and elsewhere the "On" of a switch.
         private static readonly string[] PrintWords = { "이름", "켜짐", "자리", "자식", "컴포넌트", "값" };
+        private static readonly string[] PrintWordsEnglish = { "name", "active", "position", "children", "components", "values" };
 
         private static string HashOf(string text)
         {
@@ -541,12 +546,13 @@ namespace ClaudeHand.Editor
             {
                 if (seen.go == null)
                 {
-                    changed.Add($"{seen.path} (지워짐)");
+                    changed.Add(T("{0} (지워짐)", seen.path));
                     continue;
                 }
                 var parent = seen.go.transform.parent != null ? ChRefs.HierarchyPath(seen.go.transform.parent) : string.Empty;
                 var now = Print(seen.go, parent, seen.print[5].Length > 0);
-                var words = Enumerable.Range(0, now.Length).Where(i => now[i] != seen.print[i]).Select(i => PrintWords[i]).ToList();
+                var said = ChText.Language == "en" ? PrintWordsEnglish : PrintWords;
+                var words = Enumerable.Range(0, now.Length).Where(i => now[i] != seen.print[i]).Select(i => said[i]).ToList();
                 if (words.Count > 0) changed.Add($"{seen.path} ({string.Join(", ", words)})");
             }
             return changed;
@@ -614,7 +620,7 @@ namespace ClaudeHand.Editor
             var mark = ChCheckpoint.UndoForProtection();
             if (mark == null)
             {
-                looked.detail = "이 요청의 되돌리기 지점이 없음";
+                looked.detail = T("이 요청의 되돌리기 지점이 없음");
                 return looked;
             }
             var left = before != null ? Compare(before) : new List<string>();
@@ -625,8 +631,8 @@ namespace ClaudeHand.Editor
             looked.undone = left.Count == 0 && problems.Count == 0;
             if (!looked.undone)
             {
-                looked.detail = left.Count > 0 ? "Undo를 거치지 않은 변경이 남음: " + string.Join(", ", left.Take(3))
-                                               : "되돌리지 못한 파일: " + string.Join(", ", problems.Take(3));
+                looked.detail = left.Count > 0 ? T("Undo를 거치지 않은 변경이 남음: ") + string.Join(", ", left.Take(3))
+                                               : T("되돌리지 못한 파일: ") + string.Join(", ", problems.Take(3));
             }
             return looked;
         }

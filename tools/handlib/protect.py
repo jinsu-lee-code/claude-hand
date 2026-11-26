@@ -19,19 +19,21 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from handlib.lang import N_, T, both
+
 MODES = ("open", "look", "locked")  # weakest first: merging takes the strictest
-MODE_WORDS = {"open": "열림", "look": "보기만", "locked": "잠금"}
+MODE_WORDS = {"open": N_("열림"), "look": N_("보기만"), "locked": N_("잠금")}
 ACTIONS = {"unity": ("save_scene", "delete_asset", "play_mode"), "blender": ("save_file",)}
-ACTION_WORDS = {"save_scene": "씬 저장", "delete_asset": "에셋 삭제", "play_mode": "플레이 모드", "save_file": ".blend 저장"}
+ACTION_WORDS = {"save_scene": N_("씬 저장"), "delete_asset": N_("에셋 삭제"), "play_mode": N_("플레이 모드"), "save_file": N_(".blend 저장")}
 RULES_FILES = ("claudehand/protect.json", ".claude-hand.protect.json")  # as they end, lowercase: nobody's call may name them
 # ... nor what the windows' own panels write them with (the add-on's functions and operators, the package's class).
 # Not a lock against code that hides what it does; the plain way in is shut.
 RULES_WRITERS = ("protect_add", "protect_remove", "protect_offer", "_protect_write", "chprotect", ".claude-hand/protect", ".claude-hand\\protect")
-REFUSED = "보호 규칙이 이 호출을 막았습니다: {rule} ({what}). 더 부르지 말고 이 내용을 그대로 감독에게 보고하세요. 규칙을 푸는 것은 사용자만 할 수 있습니다."
+REFUSED = N_("보호 규칙이 이 호출을 막았습니다: {rule} ({what}). 더 부르지 말고 이 내용을 그대로 감독에게 보고하세요. 규칙을 푸는 것은 사용자만 할 수 있습니다.")
 # A call that changes something and names what is protected: it may only have wanted to read it, or to use it.
-NAMED = ("보호 규칙이 이 호출을 막았습니다: {rule} ({what}). 이 호출은 무언가를 바꾸면서 보호된 것을 이름으로 가리킵니다. 보호된 것을 "
+NAMED = (N_("보호 규칙이 이 호출을 막았습니다: {rule} ({what}). 이 호출은 무언가를 바꾸면서 보호된 것을 이름으로 가리킵니다. 보호된 것을 "
          "바꾸려던 것이면 더 부르지 말고 이 내용을 그대로 감독에게 보고하세요. 읽거나 가져다 쓰기만 하려던 것이면 읽는 호출과 바꾸는 "
-         "호출을 나눠 다시 부르세요(바꾸는 호출에는 그 이름을 적지 않습니다). 규칙을 푸는 것은 사용자만 할 수 있습니다.")
+         "호출을 나눠 다시 부르세요(바꾸는 호출에는 그 이름을 적지 않습니다). 규칙을 푸는 것은 사용자만 할 수 있습니다."))
 
 
 @dataclass
@@ -131,10 +133,10 @@ def window_rules(app: str, where: str | Path | None, home: str | Path | None = N
 
 def in_words(rules: Rules) -> str:
     """One line for a status or a chat panel: "보기만 · 경로 2 · 오브젝트 1 · 금지 동작: 씬 저장"; "" for no rules."""
-    parts = [MODE_WORDS[rules.window]] if rules.window != "open" else []
-    parts += [f"경로 {len(rules.paths)}"] if rules.paths else []
-    parts += [f"오브젝트 {len(rules.objects)}"] if rules.objects else []
-    parts += ["금지 동작: " + ", ".join(ACTION_WORDS[a] for a in rules.actions)] if rules.actions else []
+    parts = [T(MODE_WORDS[rules.window])] if rules.window != "open" else []
+    parts += [T("경로 {count}", count=len(rules.paths))] if rules.paths else []
+    parts += [T("오브젝트 {count}", count=len(rules.objects))] if rules.objects else []
+    parts += [T("금지 동작: {actions}", actions=", ".join(T(ACTION_WORDS[a]) for a in rules.actions))] if rules.actions else []
     return " · ".join(parts)
 
 
@@ -267,38 +269,47 @@ def refusal(app: str, rules: Rules, tool: str, tool_input: dict | None, only_loo
     What the guard cannot tell from a call's words is the window's own to catch (Unity refuses, both undo)."""
     tool_input = tool_input if isinstance(tool_input, dict) else {}
     if rules.window == "locked":
-        return REFUSED.format(rule="이 창은 잠겨 있습니다(잠금)", what="이 창에서는 아무 일도 하지 않습니다")
+        return T(REFUSED, rule=T("이 창은 잠겨 있습니다(잠금)"), what=T("이 창에서는 아무 일도 하지 않습니다"))
     only_looks = only_looks or (app == "unity" and action_looks(tool, tool_input))
     texts = list(_texts(tool_input))
     if not only_looks and any(any(end in t.replace("\\", "/").lower() for end in RULES_FILES) or
                               any(word in t.lower() for word in RULES_WRITERS) for t in texts):
-        return REFUSED.format(rule="보호 규칙 파일", what="규칙은 사용자만 고칩니다")
+        return T(REFUSED, rule=T("보호 규칙 파일"), what=T("규칙은 사용자만 고칩니다"))
     if only_looks or rules.empty():
         return None
     if rules.window == "look":
-        return REFUSED.format(rule="이 창은 보기만 합니다(보기만)", what=f"{tool}: 바꾸는 호출")
+        return T(REFUSED, rule=T("이 창은 보기만 합니다(보기만)"), what=T("{tool}: 바꾸는 호출", tool=tool))
     action = _action(app, tool, tool_input)
     if action in rules.actions:
-        return REFUSED.format(rule=f"금지 동작 '{ACTION_WORDS[action]}'", what=tool)
+        return T(REFUSED, rule=T("금지 동작 '{action}'", action=T(ACTION_WORDS[action])), what=tool)
     code = str(tool_input.get("code") or "")
     if app == "unity" and (code or (tool in ASSET_TOOLS and (tool, _act(tool_input)) not in ASSET_USES)):
         named = list(files or []) + [m.group(0).rstrip(".") for t in texts for m in ASSET_IN_TEXT.finditer(t)]
         for path in named:
             rule = path_rule(rules, path)
             if rule:
-                return (NAMED if code else REFUSED).format(rule=f"보호 경로 '{rule}'", what=f"{tool}: {path}")
+                return T(NAMED if code else REFUSED, rule=T("보호 경로 '{rule}'", rule=rule), what=f"{tool}: {path}")
     names = [(str(tool_input[key]), REFUSED) for key in NAME_KEYS if isinstance(tool_input.get(key), str)] if not code else []
     names += [(m.group(1) or m.group(2), NAMED) for m in QUOTED.finditer(code)]  # an object the code names
     for name, words in names:
         rule = object_rule(rules, name) or (covered or {}).get(name)
         if rule:
-            return words.format(rule=f"보호 오브젝트 '{rule}'", what=f"{tool}: {name}")
+            return T(words, rule=T("보호 오브젝트 '{rule}'", rule=rule), what=f"{tool}: {name}")
     return None
 
 
+OPENING = N_("보호 규칙이 이 호출을 막았습니다: ")  # how REFUSED and NAMED begin ...
+PANEL_OPENING = N_("보호 규칙이 막았어요: ")       # ... and how the chat panel says the same
+
+
 def panel_line(refused: str) -> str:
-    """A refusal as the chat panel says it: what was stopped, without what the subagent is to do about it."""
-    return refused.split(". ")[0].replace("보호 규칙이 이 호출을 막았습니다: ", "보호 규칙이 막았어요: ", 1)
+    """A refusal as the chat panel says it: what was stopped, without what the subagent is to do about it. In the
+    language the refusal itself is in."""
+    first = refused.split(". ")[0]
+    for said, shown in zip(both(OPENING), both(PANEL_OPENING)):
+        if said in first:
+            return first.replace(said, shown, 1)
+    return first
 
 
 # --------------------------------------------------------------------------- a rule the supervisor proposes
@@ -324,19 +335,19 @@ def proposal_problem(app: str, kind: str, value: str) -> str | None:
 
 def proposal_words(kind: str, value: str, lasting: bool) -> str:
     """A proposed rule as the panel shows it above [추가] and [취소]."""
-    what = (f"이 창을 {'보기만 하기(읽기만 하고 바꾸지 않음)' if value == 'look' else '잠그기(이 창에는 일을 맡기지 않음)'}" if kind == "window" else
-            f"'{ACTION_WORDS.get(value, value)}' 금지" if kind == "action" else
-            f"경로 '{value}' 보호(고치기 · 지우기 · 옮기기 금지)" if kind == "path" else
-            f"컬렉션 '{value.split(':', 1)[1].strip()}'의 오브젝트 보호" if value.lower().startswith("collection:") else
-            f"오브젝트 '{value}' 보호(바꾸기 · 지우기 금지)")
-    return what + (" — 계속" if lasting else " — 이번만(Claude Hand를 끌 때까지)")
+    what = ((T("이 창을 보기만 하기(읽기만 하고 바꾸지 않음)") if value == "look" else T("이 창을 잠그기(이 창에는 일을 맡기지 않음)")) if kind == "window" else
+            T("'{action}' 금지", action=T(ACTION_WORDS[value]) if value in ACTION_WORDS else value) if kind == "action" else
+            T("경로 '{value}' 보호(고치기 · 지우기 · 옮기기 금지)", value=value) if kind == "path" else
+            T("컬렉션 '{name}'의 오브젝트 보호", name=value.split(':', 1)[1].strip()) if value.lower().startswith("collection:") else
+            T("오브젝트 '{value}' 보호(바꾸기 · 지우기 금지)", value=value))
+    return what + (T(" — 계속") if lasting else T(" — 이번만(Claude Hand를 끌 때까지)"))
 
 
 # --------------------------------------------------------------------------- what a window found after a call
 
-BLOCKED = "보호 규칙이 막았어요: {what}"
-UNDONE = "보호된 {what}이(가) 바뀌어 이 요청이 이 창에 한 일을 되돌렸어요"
-NOT_UNDONE = "보호된 {what}이(가) 바뀌었는데 되돌리지 못했어요({why})"
+BLOCKED = N_("보호 규칙이 막았어요: {what}")
+UNDONE = N_("보호된 {what}이(가) 바뀌어 이 요청이 이 창에 한 일을 되돌렸어요")
+NOT_UNDONE = N_("보호된 {what}이(가) 바뀌었는데 되돌리지 못했어요({why})")
 
 
 def found_after(result) -> tuple[str | None, str | None]:
@@ -352,15 +363,15 @@ def found_after(result) -> tuple[str | None, str | None]:
         return None, None
     lines = []
     if blocked:
-        lines.append(BLOCKED.format(what=", ".join(blocked)))
+        lines.append(T(BLOCKED, what=", ".join(blocked)))
     if changed:
         what = ", ".join(changed)
-        lines.append(UNDONE.format(what=what) if result.get("undone") else
-                     NOT_UNDONE.format(what=what, why=str(result.get("detail") or "되돌릴 지점이 없음")[:200]))
+        lines.append(T(UNDONE, what=what) if result.get("undone") else
+                     T(NOT_UNDONE, what=what, why=str(result.get("detail") or T("되돌릴 지점이 없음"))[:200]))
     line = ". ".join(lines)
     # Looking is left open on purpose: told only "call nothing more", a real subagent reported the values it
     # expected after the undo and said it had not been able to check them (2026-11-24).
-    told = (f"{line}. 바꾸는 호출은 더 하지 말고 이 내용을 그대로 감독에게 보고하세요(무엇이 막혔거나 되돌려졌는지, 그래서 이 "
-            "요청에서 남은 것이 무엇인지). 지금 상태를 읽어 확인하는 것은 괜찮습니다. 같은 일을 다른 방법으로 다시 하지 마세요. "
-            "규칙을 푸는 것은 사용자만 할 수 있습니다.")
+    told = T("{line}. 바꾸는 호출은 더 하지 말고 이 내용을 그대로 감독에게 보고하세요(무엇이 막혔거나 되돌려졌는지, 그래서 이 "
+             "요청에서 남은 것이 무엇인지). 지금 상태를 읽어 확인하는 것은 괜찮습니다. 같은 일을 다른 방법으로 다시 하지 마세요. "
+             "규칙을 푸는 것은 사용자만 할 수 있습니다.", line=line)
     return line, told

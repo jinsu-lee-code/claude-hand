@@ -5,7 +5,10 @@ this folder's .claude/settings.local.json.
 from __future__ import annotations
 
 import json
+import os
 import re
+import time
+import uuid
 from pathlib import Path
 
 
@@ -62,7 +65,25 @@ def plan_notes_allow(root: Path, notes_paths: list[str]) -> dict[Path, dict]:
     return {path: settings}
 
 
+def put_in_place(tmp: Path, path: Path, tries: int = 8, wait: float = 0.03) -> None:
+    """os.replace, tried again for a moment: on Windows it is refused while another program has the old file open,
+    and the settings windows read config.json just when it has changed."""
+    for attempt in range(tries):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == tries - 1:
+                tmp.unlink(missing_ok=True)  # the file stays as it was, whole
+                raise
+            time.sleep(wait)
+
+
 def write_json_files(plan: dict[Path, dict]) -> None:
+    """Each file is written beside itself and put in place whole: a settings window that reads config.json just then
+    (the chat panels do, whenever it changes) never finds half of it."""
     for path, data in plan.items():
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")  # of this write alone
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+        put_in_place(tmp, path)

@@ -1,10 +1,12 @@
 """Tests for tools/handlib/looks.py: Blender code that can only look. Run: python -m unittest discover -s tools/tests -v"""
 
+import os
 import sys
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+os.environ["CLAUDE_HAND_LANG"] = "ko"  # the words here are the Korean ones, whatever this PC is set to
 from handlib.looks import python_only_looks as looks  # noqa: E402
 
 # What the Blender subagent really ran to look (from a supervisor session's records), and the like.

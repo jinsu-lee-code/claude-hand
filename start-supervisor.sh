@@ -1,14 +1,21 @@
 #!/usr/bin/env sh
 # Claude Hand: start the supervisor session that the Unity / Blender chat panels talk to.
 cd "$(dirname "$0")" || exit 1
-pause() { printf '%s' "Enter를 누르면 닫힙니다..."; read -r _; }
+# The language of the messages below, which come before anything of claude_hand.py can run: "language" in config.json
+# (the settings window writes it). say <Korean> <English>.
+en=""
+grep -Eq '"language" *: *"en"' "${CLAUDE_HAND_HOME:-$HOME/.claude-hand}/config.json" 2>/dev/null && en=1
+say() { if [ -n "$en" ]; then printf '%s' "$2"; else printf '%s' "$1"; fi; }
+pause() { say "Enter를 누르면 닫힙니다..." "Press Enter to close..."; read -r _; }
 
 if ! command -v uv >/dev/null 2>&1; then
-  echo '[Claude Hand] uv가 설치돼 있지 않습니다. claude-hand 폴더에서 Claude Code를 열고 "claude-hand 세팅해줘"라고 해 주세요.'
+  say '[Claude Hand] uv가 설치돼 있지 않습니다. claude-hand 폴더에서 Claude Code를 열고 "claude-hand 세팅해줘"라고 해 주세요.' \
+      '[Claude Hand] uv is not installed. Open Claude Code in the claude-hand folder and say "Set up claude-hand".'; echo
   pause; exit 1
 fi
 if ! command -v claude >/dev/null 2>&1; then
-  echo '[Claude Hand] Claude Code(claude 명령)가 없습니다. 설치: curl -fsSL https://claude.ai/install.sh | bash'
+  say '[Claude Hand] Claude Code(claude 명령)가 없습니다. 설치: curl -fsSL https://claude.ai/install.sh | bash' \
+      '[Claude Hand] Claude Code (the claude command) is missing. To install it: curl -fsSL https://claude.ai/install.sh | bash'; echo
   pause; exit 1
 fi
 

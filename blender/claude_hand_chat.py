@@ -21,7 +21,7 @@ Install: `uv run tools/claude_hand.py blender-install-chat` (or Preferences > Ad
 bl_info = {
     "name": "Claude Hand Chat",
     "author": "claude-hand",
-    "version": (1, 0, 1),
+    "version": (1, 1, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar (N) > Claude Hand",
     "description": "Chat with this Blender window's claude-hand subagent",
@@ -54,6 +54,157 @@ from pathlib import Path
 import bpy
 import bpy.utils.previews
 
+# --------------------------------------------------------------------------- settings and language (any thread)
+#
+# What the settings window (the gear button of the panel) sets is in ~/.claude-hand/config.json, which the chat
+# channel, the commands, the hooks and Unity's chat window read too; what can be set is listed once, in the
+# claude-hand checkout (settings/catalog.json). The file is read anew whenever it changes, so a change made in any
+# of the windows holds here at once.
+#
+# The language of this panel is one of the settings. The Korean text stands in the code where it is said, and T()
+# gives its English from _EN (at the end of this file) when the setting says "en", as tools/handlib/lang.py does
+# for the Python tools. N_() marks a text that is said elsewhere, through T: a constant, a class's label.
+
+_config = {"stamp": None, "data": {}}
+_catalog = {"stamp": None, "data": {"settings": [], "lab": []}}
+SETTING_DEFAULTS = {"flash_taskbar": True}  # the settings this add-on itself goes by, should the catalog not be there
+
+
+def config_file() -> Path:
+    return Path(os.environ.get("CLAUDE_HAND_HOME") or str(Path.home() / ".claude-hand")) / "config.json"
+
+
+def read_config() -> dict:
+    """config.json as it is now: read again only when the file changed. Missing: {}. Caught half written (another
+    window is saving it): what was last read."""
+    path = config_file()
+    try:
+        stat = path.stat()
+        stamp = (str(path), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        _config.update(stamp=None, data={})
+        return _config["data"]
+    if stamp != _config["stamp"]:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig") or "{}")
+            if isinstance(data, dict):
+                _config.update(stamp=stamp, data=data)
+        except (OSError, ValueError):
+            pass
+    return _config["data"]
+
+
+def write_config(change):
+    """Change config.json: change(config) alters the dict it is given. Read anew just before and put in place whole,
+    so no other window reads half of it. Returns what stood in the way (a text for the user), or None."""
+    path = config_file()
+    try:
+        try:
+            config = json.loads(path.read_text(encoding="utf-8-sig") or "{}")
+        except FileNotFoundError:
+            config = {}
+        if not isinstance(config, dict):
+            raise ValueError("not a JSON object")
+        change(config)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"config.{os.getpid()}.{time.monotonic_ns()}.tmp")  # of this write alone
+        tmp.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+        for attempt in range(8):  # Windows refuses while another window has the old file open to read it
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 7:
+                    tmp.unlink(missing_ok=True)  # the file stays as it was, whole
+                    raise
+                time.sleep(0.03)
+    except (OSError, ValueError) as exc:
+        return T("설정을 적지 못했습니다: {exc}", exc=exc)
+    _config.update(stamp=None, data=config)  # read anew next time, and this meanwhile
+    return None
+
+
+def language() -> str:
+    """"ko" or "en". CLAUDE_HAND_LANG, when it is one of the two, wins over the setting (the tests)."""
+    forced = os.environ.get("CLAUDE_HAND_LANG", "").strip().lower()
+    if forced in ("ko", "en"):
+        return forced
+    value = read_config().get("language")
+    return value if value in ("ko", "en") else "ko"
+
+
+def N_(text):
+    """Marks a Korean text that is said elsewhere, through T. Returns it as it is."""
+    return text
+
+
+def T(text, /, **values):
+    """`text` in the language now in use, with its {names} filled in from `values`. A text that counts something
+    has a second English wording for when the count is one (_EN_ONE): "1 day", not "1 days"."""
+    if language() == "en":
+        one = _EN_ONE.get(text) if values else None
+        text = one[1] if one and type(values.get(one[0])) is int and values[one[0]] == 1 else _EN.get(text, text)
+    return text.format(**values) if values else text
+
+
+def pick(names):
+    """Of a catalog entry's {"ko": ..., "en": ...}, the one in the language now in use."""
+    names = names if isinstance(names, dict) else {}
+    return str(names.get(language()) or names.get("ko") or "")
+
+
+def read_catalog() -> dict:
+    """{"settings": [...], "lab": [...]}: settings/catalog.json of the claude-hand checkout config.json names
+    ("repo", written by setup). Empty lists when it cannot be found."""
+    repo = read_config().get("repo")
+    try:
+        path = Path(str(repo)) / "settings" / "catalog.json"
+        stat = path.stat()
+        stamp = (str(path), stat.st_mtime_ns, stat.st_size)
+        if stamp != _catalog["stamp"]:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            _catalog.update(stamp=stamp, data={
+                "settings": [e for e in data.get("settings") or [] if isinstance(e, dict) and e.get("key")],
+                "lab": [e for e in data.get("lab") or [] if isinstance(e, dict) and e.get("key") and e.get("stage", "lab") == "lab"]})
+    except (OSError, ValueError, TypeError):
+        _catalog.update(stamp=None, data={"settings": [], "lab": []})
+    return _catalog["data"]
+
+
+def setting_value(entry):
+    """What a setting of the catalog is now: config.json's value when it is one the setting can have, else its default."""
+    value, default, kind = read_config().get(entry["key"]), entry.get("default"), entry.get("kind")
+    if kind == "switch":
+        return value if isinstance(value, bool) else bool(default)
+    if kind == "choice":
+        return value if value in [c.get("value") for c in entry.get("choices") or []] else default
+    if kind == "days":
+        return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 3650 else int(default or 0)
+    return default
+
+
+def setting_on(key) -> bool:
+    """A switch as it stands now (one this add-on goes by: SETTING_DEFAULTS)."""
+    value = read_config().get(key)
+    return value if isinstance(value, bool) else SETTING_DEFAULTS.get(key, True)
+
+
+def lab_value(entry) -> bool:
+    chosen = read_config().get("lab")
+    value = chosen.get(entry["key"]) if isinstance(chosen, dict) else None
+    return value if isinstance(value, bool) else bool(entry.get("default"))
+
+
+def set_setting(key, value):
+    return write_config(lambda config: config.__setitem__(key, value))
+
+
+def set_lab(key, on):
+    def change(config):
+        chosen = config.get("lab") if isinstance(config.get("lab"), dict) else {}
+        config["lab"] = {**chosen, key: bool(on)}
+    return write_config(change)
+
 POLL_WAIT_SECONDS = 20
 NO_REPLY_HINT_SECONDS = 60
 START_WAIT_SECONDS = 120
@@ -79,7 +230,7 @@ FOLLOW_TOOL = "ch_model_follow"  # Claude Hand Tools' tool for models that follo
 REALIZE = "ClaudeHandRealize"    # the modifier and node group a Geometry Nodes object has while it is exported (_realized)
 TEXTURE_FORMATS = (".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff", ".exr", ".hdr", ".psd")  # image files Unity reads as they are
 BAKE_SIZE = 1024                 # pixels a side, of an image baked from a material's nodes
-BAKED = {"base_color_texture": "기본 색", "metallic_smoothness_texture": "금속 · 거칠기", "normal_texture": "노멀", "emission_texture": "발광"}
+BAKED = {"base_color_texture": N_("기본 색"), "metallic_smoothness_texture": N_("금속 · 거칠기"), "normal_texture": N_("노멀"), "emission_texture": N_("발광")}
 TREE_LAYOUT = {"name", "label", "location", "location_absolute", "width", "height", "dimensions", "select", "parent", "hide", "color",
                "use_custom_color", "rna_type", "type", "inputs", "outputs", "internal_links", "warning_propagation"}  # of a node: not what it does
 UNITY_LOOK_SECONDS = 5.0         # how often the panel looks whether another Unity editor has opened
@@ -87,7 +238,8 @@ HEAVY_SECONDS = 1.0              # a model whose export took longer than this is
 BUSY_TRIES, BUSY_WAIT = 8, 2.5   # how long a send waits for a Unity that is compiling or reloading its scripts
 
 _entries = []            # main thread only
-_status = ["연결 중..."]  # main thread only
+_status = [N_("연결 중...")]  # main thread only
+_status_maker = [None, None]  # main thread only: (what says the resting status line, what it last said): said anew in another language
 _last_user = [0.0]       # main thread only
 _server_missing = [False]  # main thread only
 _start_requested = [0.0]   # main thread only
@@ -149,15 +301,15 @@ def describe_missing_server():
     except (OSError, ValueError):
         status = {}
     if status.get("mode") == "passive":
-        return f"채널 서버가 대기 중입니다: {status.get('reason')}. 아래 버튼으로 켜거나, 메시지를 보내면 자동으로 켜집니다."
+        return T("채널 서버가 대기 중입니다: {reason}. 아래 버튼으로 켜거나, 메시지를 보내면 자동으로 켜집니다.", reason=status.get('reason'))
     if status.get("mode") == "stopped":
-        return "Claude Hand가 꺼져 있습니다. 메시지를 보내면 자동으로 켜집니다."
-    return ("Claude Hand가 꺼져 있습니다. 메시지를 보내면 자동으로 켜집니다. 켜도 연결되지 않으면 "
-            "claude-hand 폴더에서 uv run tools/claude_hand.py chat-status 를 실행하세요.")
+        return T("Claude Hand가 꺼져 있습니다. 메시지를 보내면 자동으로 켜집니다.")
+    return (T("Claude Hand가 꺼져 있습니다. 메시지를 보내면 자동으로 켜집니다. 켜도 연결되지 않으면 "
+            "claude-hand 폴더에서 uv run tools/claude_hand.py chat-status 를 실행하세요."))
 
 
-STARTING_MESSAGE = ("Claude Hand 창을 여는 중입니다. 그 창에 확인 질문이 보이면 화살표 키로 고르고 Enter를 눌러 주세요"
-                    "(개발용 채널 경고는 I am using this for local development). 연결되면 이 패널이 이어서 진행합니다.")
+STARTING_MESSAGE = (N_("Claude Hand 창을 여는 중입니다. 그 창에 확인 질문이 보이면 화살표 키로 고르고 Enter를 눌러 주세요"
+                    "(개발용 채널 경고는 I am using this for local development). 연결되면 이 패널이 이어서 진행합니다."))
 
 
 def starting():
@@ -206,8 +358,9 @@ def poll_loop():
                     _stop.wait(1)
                     continue
                 chat_id, agent = resolved.get("chat_id"), resolved.get("agent")
-                _inbox.put(("status", f"담당: {agent}" if agent else
-                            "이 Blender 창의 하위 세션이 없습니다. uv run tools/claude_hand.py sync 를 실행하세요."))
+                # said by the main thread, and again when the language is changed: this line stays up for hours
+                _inbox.put(("status", lambda agent=agent: T("담당: {agent}", agent=agent) if agent else
+                            T("이 Blender 창의 하위 세션이 없습니다. uv run tools/claude_hand.py sync 를 실행하세요.")))
             query = urllib.parse.urlencode({"chat_id": chat_id, "after": after, "prev": progress_rev, "orev": others_rev,
                                             "wait": POLL_WAIT_SECONDS})
             _inbox.put(("missing", False))
@@ -230,7 +383,7 @@ def poll_loop():
             after = updates.get("next", after)
         except (OSError, ValueError) as exc:
             _inbox.put(("missing", True))
-            _inbox.put(("status", f"감독 세션에 연결할 수 없습니다: {exc}"))
+            _inbox.put(("status", T("감독 세션에 연결할 수 없습니다: {exc}", exc=exc)))
             _stop.wait(3)
 
 
@@ -238,12 +391,12 @@ def post_in_background(path, body, on_done_event):
     def run():
         server = read_server()
         if not server:
-            _inbox.put((on_done_event, {"ok": False}) if on_done_event == "context_sent" else ("status", "Claude Hand가 꺼져 있습니다."))
+            _inbox.put((on_done_event, {"ok": False}) if on_done_event == "context_sent" else ("status", T("Claude Hand가 꺼져 있습니다.")))
             return
         try:
             _inbox.put((on_done_event, call(server, "POST", path, body)))
         except (OSError, ValueError) as exc:
-            _inbox.put(("status", f"보내지 못했습니다: {exc}"))
+            _inbox.put(("status", T("보내지 못했습니다: {exc}", exc=exc)))
             if on_done_event == "context_sent":
                 _inbox.put((on_done_event, {"ok": False}))
     threading.Thread(target=run, daemon=True).start()
@@ -265,11 +418,11 @@ def build_context():
     layer = bpy.context.view_layer
     selected = [o.name for o in layer.objects if o.select_get()][:10]
     active = layer.objects.active
-    lines = [f"파일: {bpy.data.filepath or '(저장 안 됨)'}", f"씬: {bpy.context.scene.name}"]
+    lines = [T("파일: {path}", path=bpy.data.filepath or T('(저장 안 됨)')), T("씬: {name}", name=bpy.context.scene.name)]
     if active is not None:
-        lines.append(f"활성 오브젝트: {active.name} ({active.type}, 모드 {active.mode})")
+        lines.append(T("활성 오브젝트: {name} ({type}, 모드 {mode})", name=active.name, type=active.type, mode=active.mode))
     if selected:
-        lines.append("선택한 오브젝트: " + ", ".join(selected))
+        lines.append(T("선택한 오브젝트: ") + ", ".join(selected))
     return "\n".join(lines)
 
 
@@ -302,7 +455,7 @@ def collect_context():
     layer = bpy.context.view_layer
     active = layer.objects.active
     return {
-        "file": bpy.data.filepath or "(저장 안 됨)",
+        "file": bpy.data.filepath or T("(저장 안 됨)"),
         "scene": bpy.context.scene.name,
         "active": active.name if active is not None else "",
         "mode": active.mode if active is not None else "",
@@ -346,7 +499,7 @@ def find_start_script():
 def start_supervisor():
     script = find_start_script()
     if not script:
-        _status[0] = "start-supervisor를 찾지 못했습니다. 바탕화면의 Claude Hand 아이콘을 누르세요."
+        _status[0] = T("start-supervisor를 찾지 못했습니다. 바탕화면의 Claude Hand 아이콘을 누르세요.")
         return False
     if sys.platform == "win32":
         cmd = ["cmd", "/c", "start", "Claude Hand", script]
@@ -358,7 +511,7 @@ def start_supervisor():
     try:
         subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
     except OSError as exc:
-        _status[0] = f"Claude Hand를 시작하지 못했습니다: {exc}"
+        _status[0] = T("Claude Hand를 시작하지 못했습니다: {exc}", exc=exc)
         return False
     _start_requested[0] = time.time()
     _status[0] = STARTING_MESSAGE
@@ -402,10 +555,10 @@ $bar.Dock = 'Bottom'
 $bar.AutoSize = $true
 $bar.FlowDirection = 'RightToLeft'
 $send = New-Object Windows.Forms.Button
-$send.Text = '보내기'
+$send.Text = $utf8.GetString([Convert]::FromBase64String('__SEND__'))
 $send.AutoSize = $true
 $hint = New-Object Windows.Forms.Label
-$hint.Text = 'Enter 보내기 · Shift+Enter 줄바꿈 · Esc 닫기'
+$hint.Text = $utf8.GetString([Convert]::FromBase64String('__HINT__'))
 $hint.AutoSize = $true
 $hint.Padding = New-Object Windows.Forms.Padding 0, 7, 0, 0
 $bar.Controls.Add($send)
@@ -439,8 +592,10 @@ $form.Add_Shown({ $form.Activate(); $box.Focus() | Out-Null })
 
 def native_input_command(title, parent_pid):
     """The PowerShell command line for the input box; values go in as base64 or digits, never as script text."""
-    script = (NATIVE_INPUT_PS.replace("__TITLE__", base64.b64encode(title.encode("utf-8")).decode("ascii"))
-              .replace("__PARENT__", str(int(parent_pid))))
+    words = {"__TITLE__": title, "__SEND__": T("보내기"), "__HINT__": T("Enter 보내기 · Shift+Enter 줄바꿈 · Esc 닫기")}
+    script = NATIVE_INPUT_PS.replace("__PARENT__", str(int(parent_pid)))
+    for mark, text in words.items():
+        script = script.replace(mark, base64.b64encode(text.encode("utf-8")).decode("ascii"))
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     return ["powershell.exe", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand", encoded]
 
@@ -468,7 +623,7 @@ def open_native_input():
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except OSError as exc:
-        _status[0] = f"입력창을 열지 못했습니다: {exc}"
+        _status[0] = T("입력창을 열지 못했습니다: {exc}", exc=exc)
         return False
     _native_input[0] = proc
     threading.Thread(target=read_native_input, args=(proc.stdout,), name="claude-hand-input", daemon=True).start()
@@ -578,7 +733,7 @@ def state_seq():
 
 
 def describe_mark(mark):
-    return f"{mark['label']} ({mark['time']})" if mark["label"] else f"{mark['time']} 요청"
+    return f"{mark['label']} ({mark['time']})" if mark["label"] else T("{time} 요청", time=mark['time'])
 
 
 def mark_undo_point(label="", request=""):
@@ -588,7 +743,7 @@ def mark_undo_point(label="", request=""):
     seq = _mark_seq[0] + 1
     for scene in bpy.data.scenes:
         setattr(scene, UNDO_PROP, f"{_undo_run}:{seq}")
-    if _undo_op(bpy.ops.ed.undo_push, message=f"Claude Hand: {label or '요청'}"[:60]) != {"FINISHED"}:
+    if _undo_op(bpy.ops.ed.undo_push, message=f"Claude Hand: {label or T('요청')}"[:60]) != {"FINISHED"}:
         return "undo point not set: no undo history here"
     _mark_seq[0] = seq
     _marks.append({"seq": seq, "label": " ".join(str(label).split())[:40].rstrip(), "time": time.strftime("%H:%M"),
@@ -622,22 +777,22 @@ def undo_last_request(note=False):
 def _undo_newest(note=False):
     """(whether it went back, what the panel shows)."""
     if not _marks:
-        return False, _notice("되돌릴 Claude 요청이 없습니다.")
+        return False, _notice(T("되돌릴 Claude 요청이 없습니다."))
     mark = _marks[-1]
     if state_seq() < mark["seq"]:  # Blender's own undo already went back past it
         _marks.pop()
-        return False, _notice(f"'{describe_mark(mark)}' 요청은 이미 되돌려져 있습니다.")
-    _undo_op(bpy.ops.ed.undo_push, message="Claude Hand: 되돌리기 전")  # so Ctrl+Shift+Z can bring the work back
+        return False, _notice(T("'{mark}' 요청은 이미 되돌려져 있습니다.", mark=describe_mark(mark)))
+    _undo_op(bpy.ops.ed.undo_push, message=T("Claude Hand: 되돌리기 전"))  # so Ctrl+Shift+Z can bring the work back
     limit = bpy.context.preferences.edit.undo_steps + 2
     steps = walk_back(mark["seq"], state_seq, lambda: _undo_op(bpy.ops.ed.undo), lambda: _undo_op(bpy.ops.ed.redo), limit)
     if steps is None:
-        return False, _notice(f"'{describe_mark(mark)}' 요청을 되돌리지 못했습니다. 그 뒤로 실행 취소 단계가 너무 많아 "
-                              "Blender의 실행 취소 기록에서 밀려났습니다.")
+        return False, _notice(T("'{mark}' 요청을 되돌리지 못했습니다. 그 뒤로 실행 취소 단계가 너무 많아 Blender의 실행 취소 기록에서 밀려났습니다.",
+                                mark=describe_mark(mark)))
     _marks.pop()
     if note:
-        _note_for_claude(f"[사용자가 채팅창에서 '{describe_mark(mark)}' 요청 이후의 Blender 변경을 실행 취소로 되돌렸음]")
+        _note_for_claude(T("[사용자가 채팅창에서 '{mark}' 요청 이후의 Blender 변경을 실행 취소로 되돌렸음]", mark=describe_mark(mark)))
     _follow_due("undo")  # a model that follows this file goes back in Unity too, though nothing was saved
-    return True, _notice(f"되돌렸어요: '{describe_mark(mark)}' 이후의 변경")
+    return True, _notice(T("되돌렸어요: '{mark}' 이후의 변경", mark=describe_mark(mark)))
 
 
 def undo_request(request):
@@ -675,7 +830,7 @@ def describe_plan(mark, offer):
     if offer is None:
         return describe_mark(mark)
     others = ", ".join(str(w) for w in offer.get("windows") or [])
-    return f"{offer.get('label') or '요청'} ({'이 창 + ' if mark is not None else ''}{others})"
+    return f"{offer.get('label') or T('요청')} ({T('이 창 + ') if mark is not None else ''}{others})"
 
 
 def _notice(text):
@@ -722,12 +877,12 @@ def _forget_undo_points(*_args):
 # The same file means the same in tools/handlib/protect.py (the guard) and in Unity (ChProtect.cs).
 
 PROTECT_MODES = ("open", "look", "locked")  # weakest first: of two files, the stricter holds
-PROTECT_MODE_WORDS = {"open": "열림", "look": "보기만", "locked": "잠금"}
-PROTECT_ACTIONS = {"save_file": ".blend 저장"}
+PROTECT_MODE_WORDS = {"open": N_("열림"), "look": N_("보기만"), "locked": N_("잠금")}
+PROTECT_ACTIONS = {"save_file": N_(".blend 저장")}
 PROTECT_COVERED = 3000  # names told to the guard at most
-PROTECT_FIELDS = {"exists": "없어짐", "name": "이름", "type": "종류", "parent": "부모", "collections": "컬렉션", "world": "자리",
-                  "local": "자리", "modifiers": "모디파이어", "constraints": "제약", "slots": "재질 칸", "materials": "재질",
-                  "hide": "보이기", "props": "사용자 속성", "data": "데이터", "mesh": "메시", "shape_keys": "셰이프 키"}
+PROTECT_FIELDS = {"exists": N_("없어짐"), "name": N_("이름"), "type": N_("종류"), "parent": N_("부모"), "collections": N_("컬렉션"), "world": N_("자리"),
+                  "local": N_("자리"), "modifiers": N_("모디파이어"), "constraints": N_("제약"), "slots": N_("재질 칸"), "materials": N_("재질"),
+                  "hide": N_("보이기"), "props": N_("사용자 속성"), "data": N_("데이터"), "mesh": N_("메시"), "shape_keys": N_("셰이프 키")}
 _protect = {"base": None, "read": {}}  # base: the protected objects as they were before the call that runs now
 
 
@@ -918,9 +1073,9 @@ def _protect_changed(before, now):
     for name, was in before.items():
         row = now.get(name, {"exists": False})
         if was.get("exists") and not row.get("exists"):  # by that name: it may live on under another
-            found.append(f"{name} (없어지거나 이름이 바뀜)")
+            found.append(T("{name} (없어지거나 이름이 바뀜)", name=name))
             continue
-        fields = sorted({PROTECT_FIELDS.get(key, key) for key in set(was) | set(row) if was.get(key) != row.get(key)})
+        fields = sorted({T(PROTECT_FIELDS[key]) if key in PROTECT_FIELDS else key for key in set(was) | set(row) if was.get(key) != row.get(key)})
         if fields:
             found.append(f"{name} ({', '.join(fields)})")
     return found
@@ -958,7 +1113,7 @@ def protection_after():
     if not changed:
         return {}
     if not _marks:
-        return {"changed": changed, "undone": False, "detail": "이 요청의 되돌리기 지점이 없음"}
+        return {"changed": changed, "undone": False, "detail": T("이 요청의 되돌리기 지점이 없음")}
     mark = _marks[-1]
     done, text = _undo_newest()
     if done and mark.get("request"):  # so no other panel still offers this window along with that request
@@ -968,14 +1123,14 @@ def protection_after():
     if done and not left:
         return {"changed": changed, "undone": True}
     return {"changed": changed, "undone": False,
-            "detail": text if not done else "실행 취소로 돌아가지 않은 것이 남음: " + ", ".join(left[:3])}
+            "detail": text if not done else T("실행 취소로 돌아가지 않은 것이 남음: ") + ", ".join(left[:3])}
 
 
 def _protect_write(lasting, change):
     """Change one rules file: change(data) sets the dict that is written. Returns what stands in the way, or None."""
     path = _protect_paths()[0 if lasting else 1]
     if not path:
-        return "저장한 적 없는 파일이라 계속 두는 규칙은 적을 곳이 없습니다. '이번만'을 켜고 다시 누르거나, 파일을 저장한 뒤 누르세요."
+        return T("저장한 적 없는 파일이라 계속 두는 규칙은 적을 곳이 없습니다. '이번만'을 켜고 다시 누르거나, 파일을 저장한 뒤 누르세요.")
     try:
         try:
             with open(path, encoding="utf-8-sig") as f:
@@ -983,7 +1138,7 @@ def _protect_write(lasting, change):
         except OSError:
             data = {}
         if not isinstance(data, dict):
-            raise ValueError("규칙 파일이 아닌 것이 그 자리에 있습니다")
+            raise ValueError(T("규칙 파일이 아닌 것이 그 자리에 있습니다"))
         data.setdefault("version", 1)
         change(data)
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -993,7 +1148,10 @@ def _protect_write(lasting, change):
             f.write("\n")
         os.replace(tmp, path)
     except (OSError, ValueError) as exc:
-        return f"규칙을 적지 못했습니다: {exc}"
+        return T("규칙을 적지 못했습니다: {exc}", exc=exc)
+    # Read anew next time, whatever the file's time says: two changes within one tick of the clock that leave the
+    # file as long as it was ("look" to "open") carry the same stamp.
+    _protect["read"].pop(path, None)
     _redraw()
     return None
 
@@ -1004,12 +1162,12 @@ def protect_add(kind, value, lasting=True):
     value = str(value or "").strip()
     if kind == "window":
         if value not in PROTECT_MODES[1:]:
-            return f"'{value}'은(는) 창 규칙이 아닙니다."
+            return T("'{value}'은(는) 창 규칙이 아닙니다.", value=value)
         return _protect_write(lasting, lambda data: data.update(window=value))
     if kind == "action" and value not in PROTECT_ACTIONS:
-        return f"'{value}'은(는) Blender에서 막을 수 있는 동작이 아닙니다."
+        return T("'{value}'은(는) Blender에서 막을 수 있는 동작이 아닙니다.", value=value)
     if kind not in ("object", "action") or not value:
-        return "더할 규칙이 없습니다."
+        return T("더할 규칙이 없습니다.")
 
     def add(data):
         rows = data.get(kind + "s") if isinstance(data.get(kind + "s"), list) else []
@@ -1029,10 +1187,11 @@ def protect_remove(kind, value, lasting=True):
 
 
 def protect_row_label(kind, value, lasting):
-    what = (f"이 창: {PROTECT_MODE_WORDS.get(value, value)}" if kind == "window" else
-            f"금지: {PROTECT_ACTIONS.get(value, value)}" if kind == "action" else
-            f"컬렉션 {value.split(':', 1)[1].strip()}" if value.lower().startswith("collection:") else f"오브젝트 {value}")
-    return what + ("" if lasting else " (이번만)")
+    word = lambda words: T(words[value]) if value in words else value
+    what = (T("이 창: {mode}", mode=word(PROTECT_MODE_WORDS)) if kind == "window" else
+            T("금지: {action}", action=word(PROTECT_ACTIONS)) if kind == "action" else
+            T("컬렉션 {name}", name=value.split(':', 1)[1].strip()) if value.lower().startswith("collection:") else T("오브젝트 {value}", value=value))
+    return what + ("" if lasting else T(" (이번만)"))
 
 
 # --------------------------------------------------------------------------- transfers (what the subagent calls)
@@ -1066,12 +1225,12 @@ def _with_children(roots):
     for name in roots:
         root = bpy.data.objects.get(name)
         if root is None:
-            raise ValueError(f"이 파일에 '{name}' 오브젝트가 없습니다. get_scene_info로 정확한 이름을 확인하세요.")
+            raise ValueError(T("이 파일에 '{name}' 오브젝트가 없습니다. get_scene_info로 정확한 이름을 확인하세요.", name=name))
         for obj in (root, *root.children_recursive):
             if obj not in found:
                 found.append(obj)
     if not found:
-        raise ValueError("보낼 오브젝트 이름을 하나 이상 주세요.")
+        raise ValueError(T("보낼 오브젝트 이름을 하나 이상 주세요."))
     return list(roots), found
 
 
@@ -1103,7 +1262,7 @@ def import_blend(manifest):
     with open(manifest, encoding="utf-8") as f:
         data = json.load(f)
     if data.get("format") != "claude-hand/blend@1":
-        raise ValueError(f"이 manifest는 '{data.get('format')}' 형식이라 Blender로 받을 수 없습니다. export_blend가 만든 것만 됩니다.")
+        raise ValueError(T("이 manifest는 '{format}' 형식이라 Blender로 받을 수 없습니다. export_blend가 만든 것만 됩니다.", format=data.get('format')))
     blend = os.path.join(os.path.dirname(manifest), data["blend_file"])
     with bpy.data.libraries.load(blend, link=False) as (src, dst):
         wanted = [n for n in src.objects if n in data["objects"]]
@@ -1302,7 +1461,7 @@ def _write_fbx(objects, path):
     layer = bpy.context.view_layer
     missing = [o.name for o in objects if o.name not in layer.objects]
     if missing:
-        raise ValueError("지금 뷰 레이어에 없는 오브젝트는 내보낼 수 없습니다: " + ", ".join(missing))
+        raise ValueError(T("지금 뷰 레이어에 없는 오브젝트는 내보낼 수 없습니다: ") + ", ".join(missing))
     options = dict(filepath=path, use_selection=True, apply_scale_options="FBX_SCALE_ALL", axis_forward="-Y", axis_up="Z",
                    use_space_transform=False, add_leaf_bones=False, path_mode="STRIP", embed_textures=False, **_takes(objects)[0])
     active = layer.objects.active
@@ -1482,7 +1641,7 @@ def _tree_stamp(tree, seen=None):
     return hashlib.sha256("\n".join(told).encode("utf-8")).hexdigest()[:16]
 
 
-LATER = "오브젝트 모드가 아니라서 이번에는 굽지 않았습니다(Unity에 먼저 구운 이미지가 있으면 그것이 그대로 쓰입니다). 오브젝트 모드에서 저장하거나 보내면 구워집니다."
+LATER = N_("오브젝트 모드가 아니라서 이번에는 굽지 않았습니다(Unity에 먼저 구운 이미지가 있으면 그것이 그대로 쓰입니다). 오브젝트 모드에서 저장하거나 보내면 구워집니다.")
 
 
 def _bakes_now():
@@ -1494,15 +1653,15 @@ def _bakes_now():
 def _why_not_baked(users):
     """Why an input that is fed through nodes cannot be baked for these objects at all ("" when it can)."""
     if not users:
-        return "이 재질을 쓰는 메시가 없어서"
+        return T("이 재질을 쓰는 메시가 없어서")
     hidden = [o.name for o in users if o.hide_render or o.hide_viewport]
     if hidden:  # Blender bakes only what a render would show
-        return f"{', '.join(hidden[:3])}이(가) 렌더나 뷰포트에서 꺼져 있어서(아웃라이너의 카메라 · 모니터 아이콘)"
+        return T("{names}이(가) 렌더나 뷰포트에서 꺼져 있어서(아웃라이너의 카메라 · 모니터 아이콘)", names=', '.join(hidden[:3]))
     bare = [o.name for o in users if not o.data.uv_layers]
     if bare:
-        return f"{', '.join(bare[:3])}에 UV 맵이 없어서"
+        return T("{names}에 UV 맵이 없어서", names=', '.join(bare[:3]))
     if not hasattr(bpy.context.scene, "cycles"):
-        return "Cycles가 꺼져 있어서(굽는 데 씁니다)"
+        return T("Cycles가 꺼져 있어서(굽는 데 씁니다)")
     return ""
 
 
@@ -1621,8 +1780,8 @@ def _uv(node, notes, what):
     that is laid another way (see _laid_on_uv) and was not baked goes laid on the UV map, and that is noted."""
     link = _link(node.inputs["Vector"])
     if not _laid_on_uv(node):
-        notes.append(f"{what}: 이미지가 UV가 아닌 좌표({link.from_socket.name})에 놓여 있어서, UV 그대로 놓은 것으로 갔습니다." if link.from_node.type == "TEX_COORD"
-                     else f"{what}: 이미지를 놓는 좌표가 '{link.from_node.bl_label}' 노드를 거쳐서, UV 그대로 놓은 것으로 갔습니다.")
+        notes.append(T("{what}: 이미지가 UV가 아닌 좌표({name})에 놓여 있어서, UV 그대로 놓은 것으로 갔습니다.", what=what, name=link.from_socket.name) if link.from_node.type == "TEX_COORD"
+                     else T("{what}: 이미지를 놓는 좌표가 '{node}' 노드를 거쳐서, UV 그대로 놓은 것으로 갔습니다.", what=what, node=link.from_node.bl_label))
         return None
     if link is None or link.from_node.type != "MAPPING":
         return None
@@ -1645,17 +1804,17 @@ def _material(material, folder, files, bake=None):
     surface = _link(output.inputs["Surface"]) if output is not None else None
     shader = surface.from_node if surface is not None and surface.from_node.type == "BSDF_PRINCIPLED" else None
     if shader is None:
-        notes.append("Principled BSDF 하나로 된 재질이 아니라서, 뷰포트에 보이는 색 · 금속 · 거칠기 값만 갔습니다.")
+        notes.append(T("Principled BSDF 하나로 된 재질이 아니라서, 뷰포트에 보이는 색 · 금속 · 거칠기 값만 갔습니다."))
         return described
 
     def through(what, read):
-        notes.append(f"{what}: '{read[1].bl_label}' 노드를 거쳐서 못 옮겼습니다.")
+        notes.append(T("{what}: '{node}' 노드를 거쳐서 못 옮겼습니다.", what=what, node=read[1].bl_label))
 
     def unbakeable(what, read):
         """Notes why this node-fed input is not baked, when it is not."""
-        why = "굽기가 꺼져 있어서" if bake is None else _why_not_baked(bake["users"])
+        why = T("굽기가 꺼져 있어서") if bake is None else _why_not_baked(bake["users"])
         if why:
-            notes.append(f"{what}: '{read[1].bl_label}' 노드를 거치는데 {why} 못 옮겼습니다.")
+            notes.append(T("{what}: '{node}' 노드를 거치는데 {why} 못 옮겼습니다.", what=what, node=read[1].bl_label, why=why))
         return bool(why)
 
     def cooked(what, role, source, read, colour):
@@ -1667,20 +1826,20 @@ def _material(material, folder, files, bake=None):
         entry = files[key] = {"file": _file_name(f"{material.name}_{role}", ".png", files), "baked": True,
                               "stamp": [_tree_stamp(tree), bake["size"]] + ([] if _bakes_now() else ["pending"])}
         if folder and not _bakes_now():
-            notes.append(f"{what}: {LATER}")
+            notes.append(f"{what}: {T(LATER)}")
         elif folder:
             try:
                 _save_pixels(_bake_pixels(material, bake["users"], source, bake["size"], colour), os.path.join(folder, entry["file"]))
             except RuntimeError as exc:
                 files[key] = None
-                notes.append(f"{what}: 굽지 못했습니다({(str(exc).strip().splitlines() or ['?'])[-1][:120]}).")
+                notes.append(T("{what}: 굽지 못했습니다({why}).", what=what, why=(str(exc).strip().splitlines() or ['?'])[-1][:120]))
                 return None
         return dict(entry)
 
     def picture(read, what):
         entry = _texture(read[1].image, folder, files)
         if entry is None:
-            notes.append(f"{what}: 이미지 '{read[1].image.name}'의 파일이 없어서 못 옮겼습니다.")
+            notes.append(T("{what}: 이미지 '{name}'의 파일이 없어서 못 옮겼습니다.", what=what, name=read[1].image.name))
             return None
         placed = _uv(read[1], notes, what)
         return {"file": entry["file"], "stamp": entry["stamp"], **({"uv": placed} if placed else {}),
@@ -1695,15 +1854,15 @@ def _material(material, folder, files, bake=None):
         described["base_color"] = base[1]
     else:
         if base[0] == "image" and not base[2] and not skewed(base):
-            described["base_color_texture"] = picture(base, "기본 색")
+            described["base_color_texture"] = picture(base, T("기본 색"))
         else:
             feed = _link(shader.inputs["Base Color"])
-            described["base_color_texture"] = cooked("기본 색", "BaseColor", feed.from_socket, ("node", feed.from_node), True)
+            described["base_color_texture"] = cooked(T("기본 색"), "BaseColor", feed.from_socket, ("node", feed.from_node), True)
         if described["base_color_texture"] is not None:  # else the viewport colour stands in
             described["base_color"] = [1.0, 1.0, 1.0, 1.0]
 
     pair = []
-    for inlet, key, what in (("Metallic", "metallic", "금속"), ("Roughness", "roughness", "거칠기")):
+    for inlet, key, what in (("Metallic", "metallic", T("금속")), ("Roughness", "roughness", T("거칠기"))):
         read = _reads(shader.inputs[inlet])
         if read[0] == "value":
             described[key] = read[1]
@@ -1712,28 +1871,28 @@ def _material(material, folder, files, bake=None):
         elif read[0] == "node":
             read = ("value", described[key]) if unbakeable(what, read) else ("baked", shader.inputs[inlet])
         elif not read[1].image.size[0]:
-            notes.append(f"{what}: 이미지 '{read[1].image.name}'의 파일이 없어서 못 옮겼습니다.")
+            notes.append(T("{what}: 이미지 '{name}'의 파일이 없어서 못 옮겼습니다.", what=what, name=read[1].image.name))
             read = ("value", described[key])
         pair.append(read)
     if any(read[0] != "value" for read in pair):
         try:
             entry = _metallic_smoothness(material, pair[0], pair[1], folder, files, bake)
             if folder and entry.get("later"):
-                notes.append(f"금속 · 거칠기: {LATER}")
+                notes.append(T("금속 · 거칠기: {later}", later=T(LATER)))
             described["metallic_smoothness_texture"] = {key: value for key, value in entry.items() if key in ("file", "stamp", "baked")}
             described["metallic"], described["roughness"] = (1.0 if read[0] != "value" else read[1] for read in pair)
         except RuntimeError as exc:
             files["metallic-smoothness:" + material.name] = None
-            notes.append(f"금속 · 거칠기: 굽지 못했습니다({(str(exc).strip().splitlines() or ['?'])[-1][:120]}).")
+            notes.append(T("금속 · 거칠기: 굽지 못했습니다({why}).", why=(str(exc).strip().splitlines() or ['?'])[-1][:120]))
 
     normal = _link(shader.inputs["Normal"])
     if normal is not None:
         read = _reads(normal.from_node.inputs["Color"]) if normal.from_node.type == "NORMAL_MAP" else None
         if read is not None and read[0] == "image" and not read[2] and not normal.from_node.inputs["Strength"].is_linked and not skewed(read):
-            described["normal_texture"] = picture(read, "노멀")
+            described["normal_texture"] = picture(read, T("노멀"))
             described["normal_strength"] = float(normal.from_node.inputs["Strength"].default_value)
         else:  # a bump, a mix of normal maps: the normal the surface ends up with
-            described["normal_texture"] = cooked("노멀", "Normal", None, ("node", normal.from_node), False)
+            described["normal_texture"] = cooked(T("노멀"), "Normal", None, ("node", normal.from_node), False)
             if described["normal_texture"] is not None:
                 described["normal_strength"] = 1.0
 
@@ -1741,14 +1900,14 @@ def _material(material, folder, files, bake=None):
     power = _reads(strength) if strength is not None else ("value", 1.0)
     glow = _reads(colour) if colour is not None else ("value", [0.0, 0.0, 0.0, 1.0])
     if power[0] != "value":
-        through("발광 세기", power if power[0] == "node" else ("node", _link(strength).from_node))
+        through(T("발광 세기"), power if power[0] == "node" else ("node", _link(strength).from_node))
     elif power[1] > 0 and (glow[0] != "value" or any(c > 0 for c in glow[1][:3])):
         lit = None
         if glow[0] == "image" and not glow[2] and not skewed(glow):
-            lit = picture(glow, "발광")
+            lit = picture(glow, T("발광"))
         elif glow[0] != "value":
             feed = _link(colour)
-            lit = cooked("발광", "Emission", feed.from_socket, ("node", feed.from_node), True)
+            lit = cooked(T("발광"), "Emission", feed.from_socket, ("node", feed.from_node), True)
         if glow[0] == "value" or lit is not None:
             described["emission_strength"] = power[1]
             described["emission_color"] = glow[1][:3] if glow[0] == "value" else [1.0, 1.0, 1.0]
@@ -1765,7 +1924,7 @@ def _material(material, folder, files, bake=None):
         described["alpha_from_base_color_texture"] = True
         described["blend"] = "clip" if cut else "blend"
     elif alpha[0] != "value":
-        through("투명도", alpha if alpha[0] == "node" else ("node", alpha[1]))
+        through(T("투명도"), alpha if alpha[0] == "node" else ("node", alpha[1]))
     if described.get("blend") == "clip":
         described["alpha_clip"] = float(getattr(material, "alpha_threshold", 0.5))
     return {key: value for key, value in described.items() if value is not None}
@@ -1804,7 +1963,7 @@ def _beside(objects, transfer_id, write, humanoid=False, bake=True):
     materials, notes, digest = _materials(objects, folder if write else None, bake)
     clips = _takes(objects)[1]
     # Baked this time: one that waits for Object Mode ("pending") is among the notes instead, and is not said to be baked.
-    baked = [f"{material['name']}: {what}" for material in materials for key, what in BAKED.items()
+    baked = [f"{material['name']}: {T(what)}" for material in materials for key, what in BAKED.items()
              if (material.get(key) or {}).get("baked") and (material[key].get("stamp") or [None])[-1] != "pending"]
     return {"axes": "blender", "materials": materials, "materials_hash": digest, "textures_dir": transfer_id + ".textures",
             "not_carried": notes, "baked": baked, **({"rig": "humanoid"} if humanoid else {}), **({"clips": clips} if clips is not None else {})}
@@ -1870,7 +2029,7 @@ def export_fbx(roots, name="model", humanoid=False, bake=True):
                                                    "objects": sorted(o.name for o in objects), "check": shape, **look})
     result = {"manifest": manifest, "objects": sorted(o.name for o in objects), "not_carried": look["not_carried"], "baked": look["baked"]}
     if not bpy.data.filepath:
-        result["note"] = "이 .blend는 저장된 적이 없어, 같은 것을 다시 보내면 Unity에 새 모델이 하나 더 생깁니다. 저장한 뒤 보내면 제자리에서 바뀝니다."
+        result["note"] = T("이 .blend는 저장된 적이 없어, 같은 것을 다시 보내면 Unity에 새 모델이 하나 더 생깁니다. 저장한 뒤 보내면 제자리에서 바뀝니다.")
     return result
 
 
@@ -1883,11 +2042,11 @@ def import_model(manifest):
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         if data.get("format") != "claude-hand/model@1":
-            raise ValueError(f"이 manifest는 '{data.get('format')}' 형식이라 모델로 받을 수 없습니다. "
-                             "다른 Blender가 export_blend로 보낸 것은 import_blend로 받으세요.")
+            raise ValueError(T("이 manifest는 '{format}' 형식이라 모델로 받을 수 없습니다. 다른 Blender가 export_blend로 보낸 것은 import_blend로 받으세요.",
+                               format=data.get('format')))
         path = os.path.join(os.path.dirname(path), data.get("model_file") or "")
     if not os.path.isfile(path):
-        raise ValueError(f"모델 파일이 없습니다: {path}")
+        raise ValueError(T("모델 파일이 없습니다: {path}", path=path))
     extension = os.path.splitext(path)[1].lower()
     before = set(bpy.data.objects)
     if extension == ".fbx":
@@ -1898,7 +2057,7 @@ def import_model(manifest):
     elif extension in (".glb", ".gltf"):
         bpy.ops.import_scene.gltf(filepath=path)
     else:
-        raise ValueError(f"'{extension}' 파일은 받을 수 없습니다. FBX, OBJ, GLB만 됩니다.")
+        raise ValueError(T("'{extension}' 파일은 받을 수 없습니다. FBX, OBJ, GLB만 됩니다.", extension=extension))
     return {"added": sorted(o.name for o in bpy.data.objects if o not in before), "file": path.replace("\\", "/")}
 
 
@@ -1991,10 +2150,10 @@ def unity_call(entry, tool, params, timeout=30.0, tries=1):
 
 def _why(exc):
     """A UnityError in the user's words."""
-    return {"EDITOR_BUSY": "Unity가 컴파일 중이에요", "UNREACHABLE": "Unity가 응답하지 않아요",
-            "TIMEOUT": "Unity가 제때 답하지 않았어요(대화상자가 떠 있을 수 있어요)",
-            "CONFLICT": "그 프로젝트에서 Claude가 일하는 중이에요. 끝난 뒤 다시 해 주세요",
-            "NOT_FOUND": "그 프로젝트의 Claude Hand Tools가 오래된 버전이에요"}.get(exc.code) or exc.message or exc.code
+    return {"EDITOR_BUSY": T("Unity가 컴파일 중이에요"), "UNREACHABLE": T("Unity가 응답하지 않아요"),
+            "TIMEOUT": T("Unity가 제때 답하지 않았어요(대화상자가 떠 있을 수 있어요)"),
+            "CONFLICT": T("그 프로젝트에서 Claude가 일하는 중이에요. 끝난 뒤 다시 해 주세요"),
+            "NOT_FOUND": T("그 프로젝트의 Claude Hand Tools가 오래된 버전이에요")}.get(exc.code) or exc.message or exc.code
 
 
 def _follow_due(reason):
@@ -2073,7 +2232,7 @@ def _follow_tick(now):
         _start_look(reason)
 
 
-WHY_LOOKED = {"save": "저장", "undo": "되돌리기", "open": "파일 열기", "unity": "Unity 열림", "look": "확인"}
+WHY_LOOKED = {"save": N_("저장"), "undo": N_("되돌리기"), "open": N_("파일 열기"), "unity": N_("Unity 열림"), "look": N_("확인")}
 
 
 def _start_look(reason):
@@ -2114,8 +2273,8 @@ def _row(entry, model):
         if obj is None:
             twins = [o.name for o in bpy.data.objects if sent_as(o) == key]
             row.update(objects=None, missing=key, problem=(
-                f"'{key}'(으)로 보낸 오브젝트가 둘이에요({', '.join(twins[:3])}). 이 모델로 갈 것을 고르고 [선택한 오브젝트로 잇기]를 누르세요."
-                if twins else f"이 파일에 '{key}' 오브젝트가 없어요. 이름을 바꿨으면 그 오브젝트를 고르고 [선택한 오브젝트로 잇기]를 누르세요."))
+                T("'{key}'(으)로 보낸 오브젝트가 둘이에요({names}). 이 모델로 갈 것을 고르고 [선택한 오브젝트로 잇기]를 누르세요.", key=key, names=', '.join(twins[:3]))
+                if twins else T("이 파일에 '{key}' 오브젝트가 없어요. 이름을 바꿨으면 그 오브젝트를 고르고 [선택한 오브젝트로 잇기]를 누르세요.", key=key)))
             break
         row["objects"].append(obj.name)
     row["label"] = _names(row["objects"] or row["roots"])
@@ -2124,7 +2283,7 @@ def _row(entry, model):
 
 def _names(names):
     """A model by the objects it is made of here, as the user knows it: "Chair", "Chair, Table", "Chair, Table 외 2개"."""
-    return ", ".join(names[:2]) + (f" 외 {len(names) - 2}개" if len(names) > 2 else "")
+    return ", ".join(names[:2]) + (T(" 외 {count}개", count=len(names) - 2) if len(names) > 2 else "")
 
 
 def _snapshot(objects):
@@ -2236,7 +2395,7 @@ def _compare(row, model, first_look):
         bpy.context.view_layer.update()
     finally:
         _touched["own"] = False
-    later = any(str(note).endswith(LATER) for note in sent["not_carried"])  # a bake that waits for Object Mode
+    later = any(str(note).endswith(T(LATER)) for note in sent["not_carried"])  # a bake that waits for Object Mode
     return {"row": row, "manifest": manifest, "files": files, "seq": seq, "snapshot": snapshot, "later": later}
 
 
@@ -2266,7 +2425,7 @@ def _follow_listed(payload):
             try:
                 job = _compare(row, model, key not in _follow["seen"])
             except Exception as exc:  # an export that fails must not take the others along
-                row["problem"] = f"내보내지 못했어요: {exc}"
+                row["problem"] = T("내보내지 못했어요: {exc}", exc=exc)
                 continue
             _follow["seen"].add(key)
             if job is not None:
@@ -2289,7 +2448,7 @@ def _send(jobs, reason):
             if entry is None:
                 raise UnityError("UNREACHABLE", "")
             results.append((job, unity_call(entry, FOLLOW_TOOL, {"action": "update", "manifest": job["manifest"], "from_panel": True,
-                                                                 "why": WHY_LOOKED.get(reason, "저장")}, timeout=120, tries=BUSY_TRIES), None))
+                                                                 "why": T(WHY_LOOKED.get(reason, WHY_LOOKED["save"]))}, timeout=120, tries=BUSY_TRIES), None))
         except UnityError as exc:
             results.append((job, {}, exc))
     _inbox.put(("follow_sent", {"results": results, "reason": reason}))
@@ -2298,7 +2457,7 @@ def _send(jobs, reason):
 def _follow_sent(payload):
     """Main thread: how the sends went. A model Unity took is in step from now on; one it could not take is sent
     again with the next look."""
-    why = WHY_LOOKED.get(payload["reason"], "저장")
+    why = T(WHY_LOOKED.get(payload["reason"], WHY_LOOKED["save"]))
     for job, data, error in payload["results"]:
         row, known = job["row"], _follow["models"].setdefault((job["row"]["hash"], job["row"]["asset"]), {"seq": -1, "snapshot": None, "took": 0.0})
         _discard(job["files"])
@@ -2306,26 +2465,28 @@ def _follow_sent(payload):
         if error is not None:
             known.update(seq=-1, snapshot=None)
             _tell(f"follow-failed:{row['hash']}:{row['asset']}",
-                  f"{why} → {row['project']}: {row['label']}을(를) 보내지 못했어요({_why(error)}). 다음 저장 때 다시 보냅니다.")
+                  T("{why} → {project}: {label}을(를) 보내지 못했어요({reason}). 다음 저장 때 다시 보냅니다.",
+                    why=why, project=row['project'], label=row['label'], reason=_why(error)))
         elif state == "updated":
             known.update(seq=job["seq"], snapshot=job["snapshot"])
             uses = int(data.get("instance_count") or 0)
             _tell(f"follow:{row['hash']}:{row['asset']}",
-                  f"{why} → {row['project']}: {row['label']} 반영" + (f" (씬 오브젝트 {uses}개)" if uses else ""))
+                  T("{why} → {project}: {label} 반영", why=why, project=row['project'], label=row['label']) + (T(" (씬 오브젝트 {uses}개)", uses=uses) if uses else ""))
             check = data.get("shape_check") or {}
             if check.get("same") is False:  # Unity measured the model it imported, and it is not what was sent
                 odd = [str(part.get("name")) for part in check.get("differing") or []] + [str(name) for name in check.get("missing") or []]
                 _tell(f"follow-shape:{row['hash']}:{row['asset']}",
-                      f"{row['project']}: {row['label']}이(가) Unity에 보낸 것과 다르게 들어갔어요({_names(odd)}). Claude에게 알려 주세요.")
+                      T("{project}: {label}이(가) Unity에 보낸 것과 다르게 들어갔어요({parts}). Claude에게 알려 주세요.",
+                        project=row['project'], label=row['label'], parts=_names(odd)))
             if _kept_there(data):  # else a material changed here and saved looks as if it had not arrived
                 _tell(f"follow-kept:{row['hash']}:{row['asset']}", _kept_line(row["project"], _kept_there(data)))
             if job.get("later"):  # else nodes changed here and saved look as if they had not arrived
                 _tell(f"follow-later:{row['hash']}:{row['asset']}",
-                      f"{row['project']}: {row['label']}의 노드로 만든 재질은 오브젝트 모드에서 저장하면 구워서 갑니다(지금은 Unity에 있던 이미지 그대로).")
+                      T("{project}: {label}의 노드로 만든 재질은 오브젝트 모드에서 저장하면 구워서 갑니다(지금은 Unity에 있던 이미지 그대로).", project=row['project'], label=row['label']))
         elif state == "unchanged":
             known.update(seq=job["seq"], snapshot=job["snapshot"])
         elif state == "missing":
-            _tell(f"follow-gone:{row['hash']}:{row['asset']}", f"{row['project']}에 {row['label']} 모델이 더 없어서 보내지 않았어요.")
+            _tell(f"follow-gone:{row['hash']}:{row['asset']}", T("{project}에 {label} 모델이 더 없어서 보내지 않았어요.", project=row['project'], label=row['label']))
     _worker_over()
 
 
@@ -2336,8 +2497,7 @@ def _kept_there(data):
 
 
 def _kept_line(project, names):
-    return (f"{project}에서 고친 재질은 Unity 것 그대로 뒀어요({_names(names)}). Blender 재질대로 다시 만들려면 Unity에서 그 .mat 파일을 지우고 "
-            "다시 보내세요.")
+    return (T("{project}에서 고친 재질은 Unity 것 그대로 뒀어요({names}). Blender 재질대로 다시 만들려면 Unity에서 그 .mat 파일을 지우고 다시 보내세요.", project=project, names=_names(names)))
 
 
 def _tell(key, text):
@@ -2350,7 +2510,7 @@ def _tell(key, text):
             break
         if entry["key"] == key:
             entry["count"] = entry.get("count", 1) + 1
-            entry["text"] = f"{text} · {entry['count']}번째 ({stamp})"
+            entry["text"] = T("{text} · {count}번째 ({stamp})", text=text, count=entry['count'], stamp=stamp)
             _redraw()
             return
     _entries.append({"kind": "notice", "key": key, "text": f"{text} ({stamp})"})
@@ -2365,7 +2525,7 @@ def _follow_safely(handler, *args, **kwargs):
         handler(*args, **kwargs)
     except Exception as exc:
         _worker_over()
-        _follow["status"] = f"Unity로 보낸 모델을 살펴보다 오류가 났어요: {exc}"
+        _follow["status"] = T("Unity로 보낸 모델을 살펴보다 오류가 났어요: {exc}", exc=exc)
         _redraw()
 
 
@@ -2422,14 +2582,14 @@ def send_to_unity(roots, project):
     own for it (its chat window's 되돌리기 takes it out again) and lets it follow this file. Returns "" when the send
     is under way, else why it cannot be."""
     if not bpy.data.filepath:
-        return "먼저 이 .blend를 저장하세요. 저장된 파일이어야 Unity가 같은 모델인지 알고, 저장할 때 다시 보낼 수 있어요."
+        return T("먼저 이 .blend를 저장하세요. 저장된 파일이어야 Unity가 같은 모델인지 알고, 저장할 때 다시 보낼 수 있어요.")
     entry = next((e for e in unity_projects() if e.get("hash") == project), None)
     if entry is None:
-        return "그 Unity 프로젝트가 열려 있지 않아요."
+        return T("그 Unity 프로젝트가 열려 있지 않아요.")
     try:
         result = export_fbx(roots, roots[0])
     except Exception as exc:
-        return f"내보내지 못했어요: {exc}"
+        return T("내보내지 못했어요: {exc}", exc=exc)
     row = {"project": str(entry.get("name")), "hash": str(entry.get("hash")), "asset": "", "name": roots[0], "label": _names(roots)}
     _from_panel(row, {"action": "receive", "manifest": result["manifest"]}, "follow_received")
     return ""
@@ -2462,7 +2622,7 @@ def follow_label(row):
     file, which."""
     text = f"{row['label']} → {row['project']}"
     if not row["here"]:
-        text += f" · {os.path.basename(row['source']) or '다른 파일'}에서 온 것으로 적혀 있음"
+        text += T(" · {source}에서 온 것으로 적혀 있음", source=os.path.basename(row['source']) or T('다른 파일'))
     return text
 
 
@@ -2475,28 +2635,32 @@ def _follow_done(payload, received=False):
         return
     if received:
         asset = str(data.get("asset_path") or "")
-        _notice(f"{row['project']}에 {row['label']}을(를) 보냈어요" + ("(있던 모델을 바꿈)" if data.get("updated") else "(씬에 놓음)") +
-                ". 저장할 때마다 다시 갑니다. Unity 채팅창의 되돌리기로 뺄 수 있어요.")
+        _notice(T("{project}에 {label}을(를) 보냈어요", project=row['project'], label=row['label']) + (T("(있던 모델을 바꿈)") if data.get("updated") else T("(씬에 놓음)")) +
+                T(". 저장할 때마다 다시 갑니다. Unity 채팅창의 되돌리기로 뺄 수 있어요."))
         # No Claude reads this answer: what a subagent would report of it is said here.
         baked, lost, check = data.get("baked") or [], data.get("not_carried") or [], data.get("shape_check") or {}
         if baked:
-            _notice("노드로 만든 재질 입력은 텍스처로 구워 보냈어요(그때 모습으로 굳은 이미지): " + ", ".join(str(b) for b in baked[:6]) +
-                    (f" 외 {len(baked) - 6}개" if len(baked) > 6 else ""))
+            _notice(T("노드로 만든 재질 입력은 텍스처로 구워 보냈어요(그때 모습으로 굳은 이미지): ") + ", ".join(str(b) for b in baked[:6]) +
+                    (T(" 외 {count}개", count=len(baked) - 6) if len(baked) > 6 else ""))
         for line in lost[:6]:
-            _notice("못 옮긴 것 · " + str(line))
+            _notice(T("못 옮긴 것 · ") + str(line))
         if _kept_there(data):
             _notice(_kept_line(row["project"], _kept_there(data)))
         if check.get("same") is False:
             odd = [str(part.get("name")) for part in check.get("differing") or []] + [str(name) for name in check.get("missing") or []]
-            _notice(f"Unity에 보낸 것과 다르게 들어갔어요({_names(odd)}). Claude에게 알려 주세요.")
-        _note_for_claude(f"[사용자가 Blender 패널에서 '{row['label']}'을(를) Unity {row['project']}에 직접 보냈음: {asset} "
-                         "(Claude를 거치지 않음, 저장할 때마다 다시 감)]")
+            _notice(T("Unity에 보낸 것과 다르게 들어갔어요({parts}). Claude에게 알려 주세요.", parts=_names(odd)))
+        _note_for_claude(T("[사용자가 Blender 패널에서 '{label}'을(를) Unity {project}에 직접 보냈음: {asset} (Claude를 거치지 않음, 저장할 때마다 다시 감)]",
+                           label=row['label'], project=row['project'], asset=asset))
     _follow_due("look")
 
 
 def apply_event(event, payload):
     if event == "status":
-        _status[0] = payload if payload is not None else (STARTING_MESSAGE if starting() else describe_missing_server())
+        if callable(payload):
+            _status_maker[:] = [payload, payload()]
+            _status[0] = _status_maker[1]
+        else:
+            _status[0] = payload if payload is not None else (STARTING_MESSAGE if starting() else describe_missing_server())
     elif event == "missing":
         _server_missing[0] = bool(payload)
         if not payload:
@@ -2522,7 +2686,7 @@ def apply_event(event, payload):
         _offer[0] = payload if isinstance(payload, dict) and payload.get("request") else None
     elif event == "undo_sent":
         if not payload.get("ok"):
-            _notice("다른 창은 되돌리지 못했습니다: " + str(payload.get("error", "Claude Hand가 받지 않았습니다")))
+            _notice(T("다른 창은 되돌리지 못했습니다: ") + str(payload.get("error", T("Claude Hand가 받지 않았습니다"))))
     elif event in ("undone_sent", "protect_sent"):
         pass  # telling the channel is a nicety
     elif event == "follow_listed":
@@ -2535,15 +2699,15 @@ def apply_event(event, payload):
         _follow_safely(_follow_done, payload, received=True)
     elif event == "native_text":
         if not send_text(payload, bpy.context.window_manager.claude_hand_chat_context):  # the box is empty again by now
-            _notice("보내지 못했습니다. 앞 메시지가 Claude Hand가 켜지기를 기다리는 중이니 잠시 뒤 다시 보내 주세요.")
+            _notice(T("보내지 못했습니다. 앞 메시지가 Claude Hand가 켜지기를 기다리는 중이니 잠시 뒤 다시 보내 주세요."))
     elif event == "stop_sent":
         if not payload.get("ok"):
-            _status[0] = "중지를 보내지 못했습니다: " + str(payload.get("error", "알 수 없는 오류"))
+            _status[0] = T("중지를 보내지 못했습니다: ") + str(payload.get("error", T("알 수 없는 오류")))
     elif event == "sent":
         if not payload.get("ok"):
-            _status[0] = "보내지 못했습니다: " + str(payload.get("error", "알 수 없는 오류"))
+            _status[0] = T("보내지 못했습니다: ") + str(payload.get("error", T("알 수 없는 오류")))
         elif payload.get("delivered") is False:
-            _status[0] = "Claude 세션이 아직 연결 중입니다. 잠시 뒤 답이 옵니다."
+            _status[0] = T("Claude 세션이 아직 연결 중입니다. 잠시 뒤 답이 옵니다.")
     elif event == "items":
         now = time.time()
         for item in payload:
@@ -2561,8 +2725,15 @@ def apply_event(event, payload):
                 _last_user[0] = 0.0
             _entries.append(dict(item))
         del _entries[:-KEPT_ENTRIES]
-        if any(wants_attention(item, now) for item in payload):
+        if any(wants_attention(item, now) for item in payload) and setting_on("flash_taskbar"):
             flash_taskbar()
+
+
+def restate_status():
+    """The language was changed: the status line that says whose window this is stays up for hours, so it says itself
+    again in the language now in use, if it is still the line shown (another line that took its place is left)."""
+    if _status_maker[0] is not None and _status[0] == _status_maker[1]:
+        _status_maker[1] = _status[0] = _status_maker[0]()
 
 
 def tick():
@@ -2571,6 +2742,10 @@ def tick():
     with _identity_lock:
         _identity["window"], _identity["pin"] = window, pin
     changed = False
+    if _labels_language[0] is not None and language() != _labels_language[0]:
+        relabel()  # the language was changed in a settings window: the panels' and buttons' names follow
+        restate_status()
+        changed = True
     while True:
         try:
             event, payload = _inbox.get_nowait()
@@ -2581,7 +2756,7 @@ def tick():
     try:
         _follow_tick(time.time())
     except Exception as exc:  # as _follow_safely: this timer is the chat panel's too
-        _follow["status"] = f"Unity로 보낸 모델을 살펴보다 오류가 났어요: {exc}"
+        _follow["status"] = T("Unity로 보낸 모델을 살펴보다 오류가 났어요: {exc}", exc=exc)
     report_context()
     if _progress[0] is not None and time.time() - _progress[0][1] > PROGRESS_STALE:
         _progress[0] = None
@@ -2602,7 +2777,7 @@ def _redraw():
 def _on_input_update(self, context):
     """Enter in the message field sends it."""
     text = self.claude_hand_chat_input
-    if text.strip():
+    if text.strip() and not _relabeling[0]:
         send_text(text, self.claude_hand_chat_context)
         bpy.app.timers.register(_clear_input, first_interval=0.01)
 
@@ -2616,7 +2791,7 @@ def _clear_input():
 
 class CLAUDEHAND_OT_send(bpy.types.Operator):
     bl_idname = "claude_hand.chat_send"
-    bl_label = "보내기"
+    bl_label = N_("보내기")
     bl_description = "Send the message to this window's claude-hand subagent"
 
     def execute(self, context):
@@ -2628,7 +2803,7 @@ class CLAUDEHAND_OT_send(bpy.types.Operator):
 
 class CLAUDEHAND_OT_start(bpy.types.Operator):
     bl_idname = "claude_hand.start_supervisor"
-    bl_label = "Claude Hand 시작"
+    bl_label = N_("Claude Hand 시작")
     bl_description = "Open the Claude Hand supervisor window (start-supervisor)"
 
     def execute(self, context):
@@ -2638,11 +2813,11 @@ class CLAUDEHAND_OT_start(bpy.types.Operator):
 
 class CLAUDEHAND_OT_permission(bpy.types.Operator):
     bl_idname = "claude_hand.chat_permission"
-    bl_label = "권한 응답"
+    bl_label = N_("권한 응답")
     bl_description = "Allow or deny the tool Claude asked to run"
 
     request_id: bpy.props.StringProperty()
-    behavior: bpy.props.EnumProperty(items=[("allow", "허용", ""), ("deny", "거부", "")])
+    behavior: bpy.props.EnumProperty(items=[("allow", "Allow", ""), ("deny", "Deny", "")])  # the buttons are drawn with their own words
 
     def execute(self, context):
         post_in_background("/v1/permission", {"request_id": self.request_id, "behavior": self.behavior}, "permission_sent")
@@ -2651,7 +2826,7 @@ class CLAUDEHAND_OT_permission(bpy.types.Operator):
 
 class CLAUDEHAND_OT_copy(bpy.types.Operator):
     bl_idname = "claude_hand.chat_copy"
-    bl_label = "전체 복사"
+    bl_label = N_("전체 복사")
     bl_description = "Copy the whole message to the clipboard (the panel shows only its start)"
 
     seq: bpy.props.IntProperty()
@@ -2661,20 +2836,20 @@ class CLAUDEHAND_OT_copy(bpy.types.Operator):
         if entry is None:
             return {"CANCELLED"}
         context.window_manager.clipboard = "\n\n".join(filter(None, [entry.get("request"), entry_text(entry)]))
-        self.report({"INFO"}, "메시지 전체를 클립보드에 복사했습니다")
+        self.report({"INFO"}, T("메시지 전체를 클립보드에 복사했습니다"))
         return {"FINISHED"}
 
 
 class CLAUDEHAND_OT_open_image(bpy.types.Operator):
     bl_idname = "claude_hand.chat_open_image"
-    bl_label = "크게 보기"
+    bl_label = N_("크게 보기")
     bl_description = "Open the result preview full size in the system's image viewer"
 
     path: bpy.props.StringProperty()
 
     def execute(self, context):
         if not os.path.exists(self.path):
-            self.report({"WARNING"}, "그림 파일이 지워졌습니다")
+            self.report({"WARNING"}, T("그림 파일이 지워졌습니다"))
             return {"CANCELLED"}
         if sys.platform == "win32":
             os.startfile(self.path)
@@ -2685,7 +2860,7 @@ class CLAUDEHAND_OT_open_image(bpy.types.Operator):
 
 class CLAUDEHAND_OT_native_input(bpy.types.Operator):
     bl_idname = "claude_hand.chat_native_input"
-    bl_label = "한글 입력창"
+    bl_label = N_("한글 입력창")
     bl_description = ("Type in a Windows text box: Blender's own field loses spaces and symbols with the Korean IME and "
                       "shows a syllable late. Enter sends to this chat, Shift+Enter starts a new line")
 
@@ -2699,7 +2874,7 @@ class CLAUDEHAND_OT_native_input(bpy.types.Operator):
 
 class CLAUDEHAND_OT_undo(bpy.types.Operator):
     bl_idname = "claude_hand.chat_undo"
-    bl_label = "되돌리기"
+    bl_label = N_("되돌리기")
     bl_description = ("Undo everything changed in this Blender since Claude's last request started (Blender's own undo "
                       "history). A request asked here that changed other windows too is undone there as well")
 
@@ -2708,15 +2883,15 @@ class CLAUDEHAND_OT_undo(bpy.types.Operator):
         if mark is None and offer is None:
             return {"CANCELLED"}
         if offer is None:
-            message = f"'{describe_mark(mark)}' 이후 바뀐 것을 모두 되돌립니다. 그 뒤에 직접 고친 것도 함께 되돌아갑니다."
+            message = T("'{mark}' 이후 바뀐 것을 모두 되돌립니다. 그 뒤에 직접 고친 것도 함께 되돌아갑니다.", mark=describe_mark(mark))
         else:
             others = ", ".join(str(w) for w in offer.get("windows") or [])
-            message = f"'{offer.get('label') or '요청'}' 요청이 바꾼 것을 되돌립니다. " + (
-                "이 Blender에서는 그 뒤에 직접 고친 것도 함께 되돌아갑니다. " if mark is not None else "") + (
-                f"다른 창({others})은 그 창에 더 새 요청이 있거나 작업 중이면 건너뛰고, 그렇게 알려 줍니다.")
+            message = T("'{label}' 요청이 바꾼 것을 되돌립니다. ", label=offer.get('label') or T('요청')) + (
+                T("이 Blender에서는 그 뒤에 직접 고친 것도 함께 되돌아갑니다. ") if mark is not None else "") + (
+                T("다른 창({others})은 그 창에 더 새 요청이 있거나 작업 중이면 건너뛰고, 그렇게 알려 줍니다.", others=others))
         try:
-            return context.window_manager.invoke_confirm(self, event, title="Claude Hand 되돌리기", message=message,
-                                                         confirm_text="되돌리기")
+            return context.window_manager.invoke_confirm(self, event, title=T("Claude Hand 되돌리기"), message=message,
+                                                         confirm_text=T("되돌리기"))
         except TypeError:  # Blender before 4.1: no title or message
             return context.window_manager.invoke_confirm(self, event)
 
@@ -2728,7 +2903,7 @@ class CLAUDEHAND_OT_undo(bpy.types.Operator):
 
 class CLAUDEHAND_OT_stop(bpy.types.Operator):
     bl_idname = "claude_hand.chat_stop"
-    bl_label = "중지"
+    bl_label = N_("중지")
     bl_description = ("Stop the work this window's request started: the next Unity/Blender action of the subagents is "
                       "refused and Claude Hand is told. Nothing is undone")
 
@@ -2743,7 +2918,7 @@ def protect_offer_answer(offer_id, behavior):
     is written here, by the user's press, and the channel is told how it went. Returns what stands in the way."""
     entry = next((e for e in _entries if e.get("kind") == "protect_offer" and str(e.get("offer_id")) == str(offer_id)), None)
     if entry is None or entry.get("behavior"):
-        return "이미 답한 제안입니다."
+        return T("이미 답한 제안입니다.")
     if behavior == "added":
         rule = entry.get("rule") if isinstance(entry.get("rule"), dict) else {}
         problem = protect_add(str(rule.get("kind") or ""), rule.get("value"), rule.get("lasting") is not False)
@@ -2759,7 +2934,7 @@ def protect_offer_answer(offer_id, behavior):
 
 class CLAUDEHAND_OT_protect_offer(bpy.types.Operator):
     bl_idname = "claude_hand.protect_offer"
-    bl_label = "보호 규칙 제안에 답하기"
+    bl_label = N_("보호 규칙 제안에 답하기")
     bl_description = "Add the protection rule Claude proposed to this window's rules, or leave it"
 
     offer_id: bpy.props.StringProperty()
@@ -2775,7 +2950,7 @@ class CLAUDEHAND_OT_protect_offer(bpy.types.Operator):
 
 class CLAUDEHAND_OT_protect_add(bpy.types.Operator):
     bl_idname = "claude_hand.protect_add"
-    bl_label = "보호 규칙 더하기"
+    bl_label = N_("보호 규칙 더하기")
     bl_description = ("Add a protection rule for this window: Claude's calls that would change what it covers are refused, "
                       "and a change that gets through is taken back")
 
@@ -2786,7 +2961,7 @@ class CLAUDEHAND_OT_protect_add(bpy.types.Operator):
         lasting = not context.window_manager.claude_hand_protect_session
         values = selected_roots() if self.kind == "selected" else [self.value]
         if not values:
-            self.report({"WARNING"}, "보호할 오브젝트를 먼저 고르세요.")
+            self.report({"WARNING"}, T("보호할 오브젝트를 먼저 고르세요."))
             return {"CANCELLED"}
         for value in values:
             problem = protect_add("object" if self.kind == "selected" else self.kind, value, lasting)
@@ -2798,7 +2973,7 @@ class CLAUDEHAND_OT_protect_add(bpy.types.Operator):
 
 class CLAUDEHAND_OT_protect_remove(bpy.types.Operator):
     bl_idname = "claude_hand.protect_remove"
-    bl_label = "풀기"
+    bl_label = N_("풀기")
     bl_description = "Take this protection rule away again: from then on Claude may change what it covered"
 
     kind: bpy.props.StringProperty()
@@ -2806,9 +2981,10 @@ class CLAUDEHAND_OT_protect_remove(bpy.types.Operator):
     lasting: bpy.props.BoolProperty(default=True)
 
     def invoke(self, context, event):
-        message = f"'{protect_row_label(self.kind, self.value, self.lasting)}' 규칙을 풉니다. Claude가 다시 바꿀 수 있게 됩니다."
+        message = T("'{rule}' 규칙을 풉니다. Claude가 다시 바꿀 수 있게 됩니다.",
+                    rule=protect_row_label(self.kind, self.value, self.lasting))
         try:
-            return context.window_manager.invoke_confirm(self, event, title="보호 규칙 풀기", message=message, confirm_text="풀기")
+            return context.window_manager.invoke_confirm(self, event, title=T("보호 규칙 풀기"), message=message, confirm_text=T("풀기"))
         except TypeError:  # Blender before 4.1: no title or message
             return context.window_manager.invoke_confirm(self, event)
 
@@ -2820,9 +2996,9 @@ class CLAUDEHAND_OT_protect_remove(bpy.types.Operator):
         return {"FINISHED"}
 
 
-PROTECT_MODE_LINES = {"open": "Claude가 이 창을 바꿀 수 있습니다. 아래 규칙이 가리키는 것만 빼고요.",
-                      "look": "보기만: Claude는 이 창을 읽기만 합니다.",
-                      "locked": "잠금: Claude는 이 창에서 아무 일도 하지 않습니다."}
+PROTECT_MODE_LINES = {"open": N_("Claude가 이 창을 바꿀 수 있습니다. 아래 규칙이 가리키는 것만 빼고요."),
+                      "look": N_("보기만: Claude는 이 창을 읽기만 합니다."),
+                      "locked": N_("잠금: Claude는 이 창에서 아무 일도 하지 않습니다.")}
 
 
 def draw_protect(layout, width, wm):
@@ -2830,26 +3006,33 @@ def draw_protect(layout, width, wm):
     with the padlock's shape (open or shut), never by a colour."""
     rules = protection_rules()
     mode = rules["window"]
-    for i, line in enumerate(wrap(PROTECT_MODE_LINES[mode], width)):
+    for i, line in enumerate(wrap(T(PROTECT_MODE_LINES[mode]), width)):
         layout.label(text=line, icon=("UNLOCKED" if mode == "open" else "LOCKED") if i == 0 else "BLANK1")
     col = layout.column(align=True)
     for kind, value, lasting in rules["rows"]:
         row = col.row(align=True)
         row.label(text=protect_row_label(kind, value, lasting), icon="LOCKED")
-        op = row.operator(CLAUDEHAND_OT_protect_remove.bl_idname, text="풀기")
+        op = row.operator(CLAUDEHAND_OT_protect_remove.bl_idname, text=T("풀기"))
         op.kind, op.value, op.lasting = kind, value, lasting
     for problem in rules["problems"]:
-        for i, line in enumerate(wrap("읽지 못한 규칙 파일(고칠 때까지 Claude의 바꾸는 호출을 막습니다): " + problem, width)[:4]):
+        for i, line in enumerate(wrap(T("읽지 못한 규칙 파일(고칠 때까지 Claude의 바꾸는 호출을 막습니다): ") + problem, width)[:4]):
             layout.label(text=line, icon="ERROR" if i == 0 else "BLANK1")
-    layout.prop(wm, "claude_hand_protect_session", text="이번만 (Claude Hand를 끌 때까지)")
+    name = T("이번만 (Claude Hand를 끌 때까지)")
+    head, bracket, rest = name.partition(" (")
+    if width is None or not bracket or text_measure(width[1])(name) <= width[0] - 24:  # 24: the checkbox
+        layout.prop(wm, "claude_hand_protect_session", text=name)
+    else:  # the sidebar is narrower than these words (the English is longer): the bracket goes on a line below
+        col = layout.column(align=True)
+        col.prop(wm, "claude_hand_protect_session", text=head)
+        col.label(text="(" + rest, icon="BLANK1")
     col = layout.column(align=True)
-    col.operator(CLAUDEHAND_OT_protect_add.bl_idname, text="선택한 오브젝트 보호", icon="LOCKED").kind = "selected"
-    for value, label, icon in (("look", "이 창 보기만", "HIDE_OFF"), ("locked", "이 창 잠금", "LOCKED")):
+    col.operator(CLAUDEHAND_OT_protect_add.bl_idname, text=T("선택한 오브젝트 보호"), icon="LOCKED").kind = "selected"
+    for value, label, icon in (("look", T("이 창 보기만"), "HIDE_OFF"), ("locked", T("이 창 잠금"), "LOCKED")):
         if mode != value:
             op = col.operator(CLAUDEHAND_OT_protect_add.bl_idname, text=label, icon=icon)
             op.kind, op.value = "window", value
     if "save_file" not in rules["actions"]:
-        op = col.operator(CLAUDEHAND_OT_protect_add.bl_idname, text=".blend 저장 금지", icon="FILE_BLEND")
+        op = col.operator(CLAUDEHAND_OT_protect_add.bl_idname, text=T(".blend 저장 금지"), icon="FILE_BLEND")
         op.kind, op.value = "action", "save_file"
 
 
@@ -2859,7 +3042,7 @@ def _follow_row(index):
 
 class CLAUDEHAND_OT_follow_toggle(bpy.types.Operator):
     bl_idname = "claude_hand.follow_toggle"
-    bl_label = "저장할 때 다시 보내기"
+    bl_label = N_("저장할 때 다시 보내기")
     bl_description = ("Send this model to Unity again whenever this file is saved (Unity replaces it in place, without "
                       "Claude), or stop doing so")
 
@@ -2875,7 +3058,7 @@ class CLAUDEHAND_OT_follow_toggle(bpy.types.Operator):
 
 class CLAUDEHAND_OT_follow_relink(bpy.types.Operator):
     bl_idname = "claude_hand.follow_relink"
-    bl_label = "이 파일로 잇기"
+    bl_label = N_("이 파일로 잇기")
     bl_description = ("Unity has this model from another .blend (this file was moved or renamed outside Blender): "
                       "make it this file's from now on")
 
@@ -2891,7 +3074,7 @@ class CLAUDEHAND_OT_follow_relink(bpy.types.Operator):
 
 class CLAUDEHAND_OT_follow_adopt(bpy.types.Operator):
     bl_idname = "claude_hand.follow_adopt"
-    bl_label = "선택한 오브젝트로 잇기"
+    bl_label = N_("선택한 오브젝트로 잇기")
     bl_description = "The active object is the one this Unity model is made of (it was renamed, or a copy carries its mark)"
 
     index: bpy.props.IntProperty()
@@ -2901,7 +3084,7 @@ class CLAUDEHAND_OT_follow_adopt(bpy.types.Operator):
         if row is None or not row["missing"]:
             return {"CANCELLED"}
         if obj is None:
-            self.report({"WARNING"}, "이 모델로 갈 오브젝트를 먼저 고르세요")
+            self.report({"WARNING"}, T("이 모델로 갈 오브젝트를 먼저 고르세요"))
             return {"CANCELLED"}
         follow_adopt(row["missing"], obj)
         return {"FINISHED"}
@@ -2909,7 +3092,7 @@ class CLAUDEHAND_OT_follow_adopt(bpy.types.Operator):
 
 class CLAUDEHAND_OT_follow_send(bpy.types.Operator):
     bl_idname = "claude_hand.follow_send"
-    bl_label = "선택한 오브젝트 보내기"
+    bl_label = N_("선택한 오브젝트 보내기")
     bl_description = ("Send the selected objects to this Unity project now, without Claude: the model is brought in, "
                       "placed in the scene, and follows this file from then on. Unity's chat window can undo it")
 
@@ -2917,7 +3100,7 @@ class CLAUDEHAND_OT_follow_send(bpy.types.Operator):
 
     def execute(self, context):
         roots = selected_roots()
-        problem = send_to_unity(roots, self.project) if roots else "보낼 오브젝트를 먼저 고르세요."
+        problem = send_to_unity(roots, self.project) if roots else T("보낼 오브젝트를 먼저 고르세요.")
         if problem:
             self.report({"WARNING"}, problem)
             return {"CANCELLED"}
@@ -2926,7 +3109,7 @@ class CLAUDEHAND_OT_follow_send(bpy.types.Operator):
 
 class CLAUDEHAND_OT_follow_look(bpy.types.Operator):
     bl_idname = "claude_hand.follow_look"
-    bl_label = "새로 고침"
+    bl_label = N_("새로 고침")
     bl_description = "Ask the open Unity projects again which models came from this file, and send the ones that follow it"
 
     def execute(self, context):
@@ -2939,16 +3122,16 @@ def draw_follow(layout, width):
     whenever the file is saved. What stands in a model's way is said in words under it, with the button that sets it
     right."""
     if not _follow["editors"]:
-        for line in wrap("열려 있는 Unity가 없습니다(Claude Hand Tools 0.16 이상이 든 프로젝트).", width):
+        for line in wrap(T("열려 있는 Unity가 없습니다(Claude Hand Tools 0.16 이상이 든 프로젝트)."), width):
             layout.label(text=line)
         return
     rows = _follow["rows"]
     col = layout.column(align=True)
     if not bpy.data.filepath:
-        for line in wrap("저장한 적 없는 파일입니다. 저장하면 여기서 Unity로 보낼 수 있어요.", width):
+        for line in wrap(T("저장한 적 없는 파일입니다. 저장하면 여기서 Unity로 보낼 수 있어요."), width):
             col.label(text=line)
     elif not rows:
-        col.label(text="이 파일에서 Unity로 간 모델이 없습니다.")
+        col.label(text=T("이 파일에서 Unity로 간 모델이 없습니다."))
     for index, row in enumerate(rows):
         if row["here"]:
             col.operator(CLAUDEHAND_OT_follow_toggle.bl_idname, text=follow_label(row), emboss=False,
@@ -2956,28 +3139,28 @@ def draw_follow(layout, width):
         else:
             for i, line in enumerate(wrap(follow_label(row), width)[:3]):
                 col.label(text=line, icon="DOT" if i == 0 else "BLANK1")
-            col.operator(CLAUDEHAND_OT_follow_relink.bl_idname, text="이 파일로 잇기", icon="LINKED").index = index
+            col.operator(CLAUDEHAND_OT_follow_relink.bl_idname, text=T("이 파일로 잇기"), icon="LINKED").index = index
         if row["problem"]:
             for line in wrap(row["problem"], width)[:5]:
                 col.label(text=line)
             if row["missing"]:
-                col.operator(CLAUDEHAND_OT_follow_adopt.bl_idname, text="선택한 오브젝트로 잇기", icon="RESTRICT_SELECT_OFF").index = index
+                col.operator(CLAUDEHAND_OT_follow_adopt.bl_idname, text=T("선택한 오브젝트로 잇기"), icon="RESTRICT_SELECT_OFF").index = index
     if any(row["here"] for row in rows):
-        for line in wrap("체크한 모델은 이 파일을 저장할 때마다 Unity에서 바뀝니다.", width):
+        for line in wrap(T("체크한 모델은 이 파일을 저장할 때마다 Unity에서 바뀝니다."), width):
             layout.label(text=line)
     for line in wrap(_follow["status"], width)[:3] if _follow["status"] else ():
         layout.label(text=line)
     col = layout.column(align=True)
     for name, project in _follow["editors"]:
-        col.operator(CLAUDEHAND_OT_follow_send.bl_idname, text=f"선택한 오브젝트 보내기 → {name}", icon="EXPORT").project = project
-    col.operator(CLAUDEHAND_OT_follow_look.bl_idname, text="새로 고침", icon="FILE_REFRESH")
+        col.operator(CLAUDEHAND_OT_follow_send.bl_idname, text=T("선택한 오브젝트 보내기 → {name}", name=name), icon="EXPORT").project = project
+    col.operator(CLAUDEHAND_OT_follow_look.bl_idname, text=T("새로 고침"), icon="FILE_REFRESH")
 
 
 class CLAUDEHAND_PT_follow(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "Claude Hand"
-    bl_label = "Unity로 보낸 모델"
+    bl_label = N_("Unity로 보낸 모델")
     bl_parent_id = "CLAUDEHAND_PT_chat"
     bl_options = {"DEFAULT_CLOSED"}
 
@@ -2989,7 +3172,7 @@ class CLAUDEHAND_PT_protect(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "Claude Hand"
-    bl_label = "보호"
+    bl_label = N_("보호")
     bl_parent_id = "CLAUDEHAND_PT_chat"
     bl_options = {"DEFAULT_CLOSED"}
 
@@ -3007,27 +3190,31 @@ class CLAUDEHAND_PT_chat(bpy.types.Panel):
     bl_category = "Claude Hand"
     bl_label = "Claude Hand Chat"
 
+    def draw_header_preset(self, context):
+        # The gear at the right of the panel's header: the settings window (CLAUDEHAND_PT_settings) opens under it.
+        self.layout.popover(panel="CLAUDEHAND_PT_settings", text="", icon="PREFERENCES")
+
     def draw(self, context):
         layout = self.layout
         width = panel_metrics(context)
-        for line in wrap(_status[0], width):
+        for line in wrap(T(_status[0]), width):  # the line may have been set before the language was changed
             layout.label(text=line)
         if _server_missing[0]:
             opening = starting()
             row = layout.row()
             row.scale_y = 1.6
             row.enabled = not opening
-            row.operator(CLAUDEHAND_OT_start.bl_idname, text="여는 중... 새 창을 확인하세요" if opening else "Claude Hand 시작", icon="PLAY")
-            hint = ("Claude Hand 창에서 확인을 눌러 주세요. 세션이 일을 시작하면 그 창은 저절로 최소화됩니다. 닫지는 마세요."
-                    if opening else "Claude Hand(감독 세션)가 꺼져 있습니다. 버튼을 누르거나 메시지를 보내면 켜집니다.")
+            row.operator(CLAUDEHAND_OT_start.bl_idname, text=T("여는 중... 새 창을 확인하세요") if opening else T("Claude Hand 시작"), icon="PLAY")
+            hint = (T("Claude Hand 창에서 확인을 눌러 주세요. 세션이 일을 시작하면 그 창은 저절로 최소화됩니다. 닫지는 마세요.")
+                    if opening else T("Claude Hand(감독 세션)가 꺼져 있습니다. 버튼을 누르거나 메시지를 보내면 켜집니다."))
             for line in wrap(hint, width):
                 layout.label(text=line)
         box = layout.box()
         if not _entries and _pending[0] is None:
-            box.label(text="아직 대화가 없습니다.")
+            box.label(text=T("아직 대화가 없습니다."))
         shown, folded = visible_entries(width)
         if folded:
-            box.label(text=f"이전 대화 {folded}개는 접어 두었습니다", icon="TRIA_UP")
+            box.label(text=T("이전 대화 {folded}개는 접어 두었습니다", folded=folded), icon="TRIA_UP")
         for entry, rows, hidden in shown:
             col = box.column(align=True)
             for text, icon in rows:
@@ -3036,48 +3223,258 @@ class CLAUDEHAND_PT_chat(bpy.types.Panel):
                 draw_image(col, entry, width)
             if hidden:
                 row = col.row(align=True)
-                row.label(text=f"…{hidden}줄 더 있음")
-                row.operator(CLAUDEHAND_OT_copy.bl_idname, text="전체 복사", icon="COPYDOWN").seq = int(entry.get("seq") or 0)
+                row.label(text=T("…{hidden}줄 더 있음", hidden=hidden))
+                row.operator(CLAUDEHAND_OT_copy.bl_idname, text=T("전체 복사"), icon="COPYDOWN").seq = int(entry.get("seq") or 0)
             if entry.get("kind") == "permission":
                 if entry.get("behavior"):
-                    col.label(text="→ 허용됨" if entry["behavior"] == "allow" else "→ 거부됨")
+                    col.label(text=T("→ 허용됨") if entry["behavior"] == "allow" else T("→ 거부됨"))
                 else:
                     row = col.row(align=True)
-                    for behavior, label in (("allow", "허용"), ("deny", "거부")):
+                    for behavior, label in (("allow", T("허용")), ("deny", T("거부"))):
                         op = row.operator(CLAUDEHAND_OT_permission.bl_idname, text=label)
                         op.request_id = entry.get("request_id", "")
                         op.behavior = behavior
             if entry.get("kind") == "protect_offer":
                 if entry.get("behavior"):
-                    col.label(text="→ 규칙에 더함" if entry["behavior"] == "added" else "→ 더하지 않음")
+                    col.label(text=T("→ 규칙에 더함") if entry["behavior"] == "added" else T("→ 더하지 않음"))
                 else:
                     row = col.row(align=True)
-                    for behavior, label in (("added", "추가"), ("declined", "취소")):
+                    for behavior, label in (("added", T("추가")), ("declined", T("취소"))):
                         op = row.operator(CLAUDEHAND_OT_protect_offer.bl_idname, text=label)
                         op.offer_id = str(entry.get("offer_id", ""))
                         op.behavior = behavior
         if _pending[0] is not None:
             col = box.column(align=True)
-            col.label(text="나 (Claude Hand가 켜지면 보냅니다)", icon="TIME")
+            col.label(text=T("나 (Claude Hand가 켜지면 보냅니다)"), icon="TIME")
             for line in wrap(_pending[0][0], width)[:ENTRY_LINES]:
                 col.label(text=line)
         if _last_user[0] and time.time() - _last_user[0] > NO_REPLY_HINT_SECONDS:
-            for line in wrap("1분 넘게 답이 없습니다. 감독 세션을 start-supervisor.cmd로 열었는지, Claude Code 창에 확인을 기다리는 질문이 없는지 봐 주세요.", width):
+            for line in wrap(T("1분 넘게 답이 없습니다. 감독 세션을 start-supervisor.cmd로 열었는지, Claude Code 창에 확인을 기다리는 질문이 없는지 봐 주세요."), width):
                 layout.label(text=line)
         draw_others(layout, width)
         draw_progress(layout, width)
         mark, offer = undo_plan()
         if (mark is not None or offer is not None) and _progress[0] is None:
-            layout.operator(CLAUDEHAND_OT_undo.bl_idname, text=f"되돌리기: {describe_plan(mark, offer)}", icon="LOOP_BACK")
+            layout.operator(CLAUDEHAND_OT_undo.bl_idname, text=T("되돌리기: {plan}", plan=describe_plan(mark, offer)), icon="LOOP_BACK")
         wm = context.window_manager
         row = layout.row(align=True)
         row.prop(wm, "claude_hand_chat_input", text="")
         if sys.platform == "win32":
-            row.operator(CLAUDEHAND_OT_native_input.bl_idname, text="한글", icon="WINDOW")
+            row.operator(CLAUDEHAND_OT_native_input.bl_idname, text=T("한글"), icon="WINDOW")
         row = layout.row()
-        row.prop(wm, "claude_hand_chat_context", text="선택 항목 함께")
-        row.operator(CLAUDEHAND_OT_send.bl_idname, text="보내기", icon="PLAY")
+        row.prop(wm, "claude_hand_chat_context", text=T("선택 항목 함께"))
+        row.operator(CLAUDEHAND_OT_send.bl_idname, text=T("보내기"), icon="PLAY")
 
+
+# --------------------------------------------------------------------------- the settings window (main thread)
+#
+# The gear button of the chat panel opens it: two tabs, "기능 켜고 끄기" with a row per setting of the catalog and
+# "실험실" with the features still in the lab. Each row is a property that reads and writes config.json itself, so
+# the window shows what any window set, and a change made here is in the file at once (the chat channel, the
+# commands, the hooks and Unity's chat window read it again). What a setting is, is said in words beside it.
+
+SETTINGS_TABS = (("features", N_("기능 켜고 끄기")), ("lab", N_("실험실")))
+SETTINGS_UNITS = 19  # how wide the window is at least, in Blender's interface units (20 pixels each at scale 1)
+SETTINGS_WORDS = 6   # of them, the column that says in words what a setting is now
+
+
+def settings_units():
+    """How wide the settings window has to be for the longest name in the language now in use: an English name is
+    longer than its Korean. A Hangul syllable takes about 11 pixels of the interface font, a Latin letter about 6."""
+    catalog = read_catalog()
+    names = [pick(entry.get("name")) for entry in catalog["settings"] + catalog["lab"]]
+    longest = max((sum(0.55 if ord(ch) > 0x2E7F else 0.31 for ch in name) for name in names), default=0.0)
+    return max(SETTINGS_UNITS, int(longest + 1.6 + SETTINGS_WORDS) + 1)  # 1.6: the checkbox and the margins
+_setting_props = []  # the WindowManager properties made for the catalog's entries, to take away again
+
+
+def setting_prop(key, lab=False):
+    """The name of the WindowManager property of a setting (or of a lab feature)."""
+    return ("claude_hand_lab_" if lab else "claude_hand_set_") + re.sub(r"[^a-z0-9_]", "_", str(key).lower())
+
+
+def _put_setting(key, value, lab=False):
+    problem = set_lab(key, value) if lab else set_setting(key, value)
+    if problem:
+        _status[0] = problem
+    _redraw()
+
+
+def _setting_property(entry, lab=False):
+    """The property the settings window draws for one entry: a check box, a number of days or a choice. None for a
+    kind this add-on does not know (a newer catalog)."""
+    name, hint, kind = pick(entry.get("name")), pick(entry.get("hint")), "switch" if lab else entry.get("kind")
+    key = entry["key"]
+    # Blender counts the arguments of these functions (one for get, two for set): nothing may be bound as a default.
+    if kind == "switch":
+        def read(self):
+            return lab_value(entry) if lab else bool(setting_value(entry))
+
+        def write(self, value):
+            _put_setting(key, bool(value), lab)
+        return bpy.props.BoolProperty(name=name, description=hint, get=read, set=write)
+    if kind == "days":
+        def read_days(self):
+            return int(setting_value(entry))
+
+        def write_days(self, value):
+            _put_setting(key, int(value))
+        return bpy.props.IntProperty(name=name, description=hint, min=0, max=3650, get=read_days, set=write_days)
+    if kind == "choice":
+        choices = [c for c in entry.get("choices") or [] if isinstance(c, dict) and "value" in c]
+        values = [c["value"] for c in choices]
+
+        def read_choice(self):
+            return values.index(setting_value(entry)) if setting_value(entry) in values else 0
+
+        def write_choice(self, index):
+            _put_setting(key, values[index])
+        return bpy.props.EnumProperty(name=name, description=hint, items=[(str(c["value"]), str(c.get("label", c["value"])), "") for c in choices],
+                                      get=read_choice, set=write_choice)
+    return None
+
+
+LANGUAGE_ENTRY = {"key": "language", "kind": "choice", "default": "ko", "applies": "now", "name": {"ko": "언어 · Language", "en": "언어 · Language"},
+                  "choices": [{"value": "ko", "label": "한국어"}, {"value": "en", "label": "English"}]}  # there whatever the catalog holds
+
+
+def _define_props():
+    """The WindowManager properties the panels draw, named in the language now in use: the chat's own, and one for
+    each entry of the catalog."""
+    wm = bpy.types.WindowManager
+    wm.claude_hand_chat_input = bpy.props.StringProperty(
+        name=T("메시지"), description=T("Enter로 보냅니다"), update=_on_input_update)
+    wm.claude_hand_chat_context = bpy.props.BoolProperty(
+        name=T("선택 항목 함께 보내기"), default=True)
+    wm.claude_hand_protect_session = bpy.props.BoolProperty(
+        name=T("이번만"), description=T("새로 더하는 보호 규칙을 Claude Hand를 끌 때까지만 둡니다(끄면 파일 옆에 적어 계속 둡니다)"), default=False)
+    wm.claude_hand_settings_tab = bpy.props.EnumProperty(name=T("설정"), items=[(key, T(label), "") for key, label in SETTINGS_TABS])
+    for attr in _setting_props:
+        if hasattr(wm, attr):
+            delattr(wm, attr)
+    _setting_props.clear()
+    catalog = read_catalog()
+    listed = catalog["settings"] if any(e["key"] == "language" for e in catalog["settings"]) else [LANGUAGE_ENTRY, *catalog["settings"]]
+    for entry, lab in [(e, False) for e in listed] + [(e, True) for e in catalog["lab"]]:
+        prop = _setting_property(entry, lab)
+        if prop is not None:
+            setattr(wm, setting_prop(entry["key"], lab), prop)
+            _setting_props.append(setting_prop(entry["key"], lab))
+
+
+def setting_words(entry, value):
+    """A setting's value in words, beside its check box or its number: "켜짐", "30일", "지우지 않음"."""
+    if entry.get("kind") == "switch":
+        return T("켜짐") if value else T("꺼짐")
+    if entry.get("kind") == "days":
+        return T("{days}일", days=value) if value else T("지우지 않음")
+    return ""
+
+
+def settings_metrics(context):
+    """(text width in pixels, label font size in pixels) of the settings window, or None outside a UI context."""
+    try:
+        prefs = context.preferences
+        scale = prefs.system.ui_scale or 1.0
+        points = getattr(getattr(prefs.ui_styles[0], "widget", None), "points", 0) or 11
+    except (AttributeError, IndexError):
+        return None
+    return (float((CLAUDEHAND_PT_settings.bl_ui_units_x * 20 - 24) * scale), float(points * scale))
+
+
+def draw_settings(layout, wm, width=None):
+    """The settings window. A row per entry: the property, and what it is now in words (a state is never told by a
+    colour alone); a star marks what holds from the next start of Claude Hand, said in a line at the bottom."""
+    catalog = read_catalog()
+    layout.row().prop(wm, "claude_hand_settings_tab", expand=True)
+    lab = getattr(wm, "claude_hand_settings_tab", "features") == "lab"
+    starred = False
+
+    def row_of(entry, words):
+        nonlocal starred
+        later = entry.get("applies") != "now"
+        starred = starred or later
+        units = CLAUDEHAND_PT_settings.bl_ui_units_x
+        split = layout.split(factor=(units - SETTINGS_WORDS) / units)
+        if not hasattr(wm, setting_prop(entry["key"], lab)):
+            # the catalog has it and this Blender was started before it did: there once Blender is opened again
+            split.label(text=pick(entry.get("name")))
+        elif entry.get("kind") == "choice":  # a list: Blender gives its name too little room, so the name is a label of its own
+            named = split.split(factor=0.45)
+            named.label(text=pick(entry.get("name")))
+            named.prop(wm, setting_prop(entry["key"], lab), text="")
+        else:
+            split.prop(wm, setting_prop(entry["key"], lab), text=pick(entry.get("name")))
+        split.label(text=words + (" *" if later else ""))
+
+    if lab:
+        for line in wrap(T("아직 다듬는 중인 기능입니다. 켜야 쓰입니다."), width):
+            layout.label(text=line)
+        if not catalog["lab"]:
+            layout.label(text=T("지금 실험실에 있는 기능이 없습니다."))
+        for entry in catalog["lab"]:
+            row_of(entry, T("켜짐") if lab_value(entry) else T("꺼짐"))
+            col = layout.column(align=True)
+            for line in wrap(T("{since}부터", since=entry.get("since", "?")) + " · " + pick(entry.get("hint")), width)[:6]:
+                col.label(text=line)
+    else:
+        listed = catalog["settings"] if any(e["key"] == "language" for e in catalog["settings"]) else [LANGUAGE_ENTRY, *catalog["settings"]]
+        for entry in listed:
+            row_of(entry, setting_words(entry, setting_value(entry)))
+        if not catalog["settings"]:
+            for line in wrap(T("설정 목록을 읽지 못했습니다. claude-hand 폴더에서 uv run tools/claude_hand.py chat-setup 을 한 번 실행하세요."), width):
+                layout.label(text=line)
+    if starred:
+        for line in wrap(T("* 다음에 Claude Hand를 켤 때부터 적용됩니다."), width):
+            layout.label(text=line)
+
+
+class CLAUDEHAND_PT_settings(bpy.types.Panel):
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "HEADER"  # shown nowhere by itself: it is what the gear of the chat panel opens
+    bl_label = N_("Claude Hand 설정")
+    bl_ui_units_x = SETTINGS_UNITS
+
+    def draw(self, context):
+        draw_settings(self.layout, context.window_manager, settings_metrics(context))
+
+
+_LABELS = {}                # class -> its label as it is written here (Korean)
+_labels_language = [None]   # the language the classes are registered under
+
+
+def _register_classes():
+    """Blender reads a class's label when the class is registered: each is registered under its label in the
+    language now in use."""
+    CLAUDEHAND_PT_settings.bl_ui_units_x = settings_units()  # read with the class, like its label
+    for cls in CLASSES:
+        cls.bl_label = T(_LABELS.setdefault(cls, cls.bl_label))
+        bpy.utils.register_class(cls)
+    _labels_language[0] = language()
+
+
+def relabel():
+    """The language was changed (in a settings window, here or in Unity, or with the command): the panels' and
+    buttons' names follow at once. The classes are registered anew (about a millisecond), and the properties with
+    their names; what the user typed and ticked stays."""
+    wm = bpy.context.window_manager
+    names = ("claude_hand_chat_input", "claude_hand_chat_context", "claude_hand_protect_session", "claude_hand_settings_tab")
+    kept = {name: getattr(wm, name) for name in names if hasattr(wm, name)}
+    for cls in reversed(CLASSES):
+        bpy.utils.unregister_class(cls)
+    _register_classes()
+    _define_props()
+    _relabeling[0] = True  # putting the typed text back is not the user pressing Enter (_on_input_update)
+    try:
+        for name, value in kept.items():
+            if getattr(wm, name, value) != value:
+                setattr(wm, name, value)
+    finally:
+        _relabeling[0] = False
+    _redraw()
+
+
+_relabeling = [False]
 
 OTHER_LINES = 2  # rows one other window may take in the panel
 
@@ -3100,7 +3497,7 @@ def draw_others(layout, width):
     if not _others:
         return
     col = layout.column(align=True)
-    col.label(text=f"다른 창 ({len(_others)})", icon="WINDOW")
+    col.label(text=T("다른 창 ({count})", count=len(_others)), icon="WINDOW")
     for text, icon in others_rows(_others, width):
         col.label(text=text, icon=icon)
 
@@ -3108,10 +3505,10 @@ def draw_others(layout, width):
 def progress_view(progress, received_at, now):
     """What the subagent is doing, in one line: "작업 중 · 12초 · execute_code bpy.ops… · 3번째 동작"."""
     seconds = int(progress.get("elapsed", 0) + now - received_at)
-    parts = [f"{'중지하는 중' if progress.get('stopping') else '작업 중'} · {seconds}초",
+    parts = [T("{state} · {seconds}초", state=T("중지하는 중") if progress.get("stopping") else T("작업 중"), seconds=seconds),
              f"{progress.get('tool', '')} {progress.get('detail', '')}".strip()]
     if progress.get("actions"):
-        parts.append(f"{progress['actions']}번째 동작")
+        parts.append(T("{actions}번째 동작", actions=progress['actions']))
     return " · ".join(part for part in parts if part)
 
 
@@ -3127,7 +3524,7 @@ def draw_progress(layout, width):
     for i, line in enumerate(wrap(progress_view(progress, received_at, now), width)[:3]):
         col.label(text=line, icon="TIME" if i == 0 else "NONE")
     if not progress.get("stopping"):
-        col.operator(CLAUDEHAND_OT_stop.bl_idname, text="중지", icon="CANCEL")
+        col.operator(CLAUDEHAND_OT_stop.bl_idname, text=T("중지"), icon="CANCEL")
 
 
 def image_preview(path):
@@ -3143,11 +3540,11 @@ def draw_image(layout, entry, width):
     channel when the reply came. Thumbnails are square, so a wide picture shows letterboxed; 크게 보기 opens the file."""
     preview = image_preview(entry.get("path", ""))
     if preview is None:
-        layout.label(text="(그림 파일이 지워졌습니다)")
+        layout.label(text=T("(그림 파일이 지워졌습니다)"))
         return
     width_px, font_px = width or (WRAP_WIDTH * CHAR_PX, 11.0)
     layout.template_icon(icon_value=preview.icon_id, scale=max(4.0, min(16.0, width_px / (20.0 * font_px / 11.0))))
-    layout.operator(CLAUDEHAND_OT_open_image.bl_idname, text="크게 보기", icon="ZOOM_IN").path = entry["path"]
+    layout.operator(CLAUDEHAND_OT_open_image.bl_idname, text=T("크게 보기"), icon="ZOOM_IN").path = entry["path"]
 
 
 def panel_metrics(context):
@@ -3230,18 +3627,18 @@ def entry_rows(entry, width):
         first = "ERROR" if entry.get("alert") else "TIME" if entry.get("cost") else "FILE_REFRESH" if entry.get("key") else "LOOP_BACK"
         return [(line, first if i == 0 else "NONE") for i, line in enumerate(lines)], 0
     if kind == "image":  # the picture itself is drawn after these rows (draw_image)
-        return [(entry.get("caption") or "결과 미리보기", "IMAGE_DATA")], 0
+        return [(entry.get("caption") or T("결과 미리보기"), "IMAGE_DATA")], 0
     if kind == "protect_offer":  # a rule Claude proposes: it holds only once the user presses [추가] under it
         lines = wrap(entry_text(entry), width)[:ENTRY_LINES]
-        return [("Claude가 제안한 보호 규칙", "LOCKED")] + [(line, "NONE") for line in lines], 0
+        return [(T("Claude가 제안한 보호 규칙"), "LOCKED")] + [(line, "NONE") for line in lines], 0
     rows = []
     if kind == "reply" and entry.get("origin") == "desktop":
-        rows.append(("데스크톱 앱에서", "WINDOW"))
+        rows.append((T("데스크톱 앱에서"), "WINDOW"))
         rows += [(line, "NONE") for line in wrap(entry.get("request", ""), width)[:3] if line]
     if kind == "permission":
-        rows.append((f"'{entry.get('tool_name')}' 실행 허락 요청", "ERROR"))
+        rows.append((T("'{tool}' 실행 허락 요청", tool=entry.get('tool_name')), "ERROR"))
     else:
-        rows.append(("나" if kind == "user" else "Claude", "USER" if kind == "user" else "INFO"))
+        rows.append((T("나") if kind == "user" else "Claude", "USER" if kind == "user" else "INFO"))
     body = wrap(entry_text(entry), width)
     rows += [(line, "NONE") for line in body[:ENTRY_LINES]]
     return rows, max(0, len(body) - ENTRY_LINES)
@@ -3273,20 +3670,14 @@ CLASSES = (CLAUDEHAND_OT_send, CLAUDEHAND_OT_start, CLAUDEHAND_OT_permission, CL
            CLAUDEHAND_OT_native_input, CLAUDEHAND_OT_open_image, CLAUDEHAND_OT_stop, CLAUDEHAND_OT_follow_toggle,
            CLAUDEHAND_OT_follow_relink, CLAUDEHAND_OT_follow_adopt, CLAUDEHAND_OT_follow_send, CLAUDEHAND_OT_follow_look,
            CLAUDEHAND_OT_protect_offer, CLAUDEHAND_OT_protect_add, CLAUDEHAND_OT_protect_remove,
-           CLAUDEHAND_PT_chat, CLAUDEHAND_PT_follow, CLAUDEHAND_PT_protect)
+           CLAUDEHAND_PT_chat, CLAUDEHAND_PT_follow, CLAUDEHAND_PT_protect, CLAUDEHAND_PT_settings)
 HANDLERS = (("load_post", _forget_undo_points), ("load_post", _on_loaded), ("save_post", _on_saved),
             ("depsgraph_update_post", _on_touched))
 
 
 def register():
-    for cls in CLASSES:
-        bpy.utils.register_class(cls)
-    bpy.types.WindowManager.claude_hand_chat_input = bpy.props.StringProperty(
-        name="메시지", description="Enter로 보냅니다", update=_on_input_update)
-    bpy.types.WindowManager.claude_hand_chat_context = bpy.props.BoolProperty(
-        name="선택 항목 함께 보내기", default=True)
-    bpy.types.WindowManager.claude_hand_protect_session = bpy.props.BoolProperty(
-        name="이번만", description="새로 더하는 보호 규칙을 Claude Hand를 끌 때까지만 둡니다(끄면 파일 옆에 적어 계속 둡니다)", default=False)
+    _register_classes()
+    _define_props()
     # Defined here (not a custom property) so the Properties editor does not list it.
     setattr(bpy.types.Scene, UNDO_PROP, bpy.props.StringProperty(options={"HIDDEN"}))
     for name, handler in HANDLERS:
@@ -3315,9 +3706,296 @@ def unregister():
         if handler in getattr(bpy.app.handlers, name):
             getattr(bpy.app.handlers, name).remove(handler)
     delattr(bpy.types.Scene, UNDO_PROP)
-    del bpy.types.WindowManager.claude_hand_chat_input
-    del bpy.types.WindowManager.claude_hand_chat_context
-    del bpy.types.WindowManager.claude_hand_protect_session
+    for name in ("claude_hand_chat_input", "claude_hand_chat_context", "claude_hand_protect_session", "claude_hand_settings_tab", *_setting_props):
+        if hasattr(bpy.types.WindowManager, name):
+            delattr(bpy.types.WindowManager, name)
+    _setting_props.clear()
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)
 
+
+# --------------------------------------------------------------------------- what this add-on says, in English
+#
+# Every Korean text that goes through T() above, exactly as it stands in the code, and its English: the same
+# {names} in both. tools/tests/test_lang.py holds every text of this file to an entry here, and a text that the
+# Python tools (tools/handlib/english.py) or the Unity package (ChText.cs) say too to the same English.
+
+# What a text that counts something says in English when the count is one: (the name that holds the count, the text).
+_EN_ONE = {
+    "{days}일": ("days", "{days} day"),
+}
+
+_EN = {
+    "설정을 적지 못했습니다: {exc}": "The settings could not be written: {exc}",
+    "기본 색": "base color",
+    "금속 · 거칠기": "metallic · roughness",
+    "노멀": "normal",
+    "발광": "emission",
+    "연결 중...": "Connecting...",
+    "채널 서버가 대기 중입니다: {reason}. 아래 버튼으로 켜거나, 메시지를 보내면 자동으로 켜집니다.":
+        "The channel server is waiting: {reason}. Turn it on with the button below, or send a message and it turns on by itself.",
+    "Claude Hand가 꺼져 있습니다. 메시지를 보내면 자동으로 켜집니다.": "Claude Hand is off. Send a message and it turns on by itself.",
+    "Claude Hand가 꺼져 있습니다. 메시지를 보내면 자동으로 켜집니다. 켜도 연결되지 않으면 claude-hand 폴더에서 uv run tools/claude_hand.py chat-status 를 실행하세요.":
+        "Claude Hand is off. Send a message and it turns on by itself. If it still does not connect once on, run uv run "
+        "tools/claude_hand.py chat-status in the claude-hand folder.",
+    "Claude Hand 창을 여는 중입니다. 그 창에 확인 질문이 보이면 화살표 키로 고르고 Enter를 눌러 주세요(개발용 채널 경고는 I am using this for local development). 연결되면 이 패널이 "
+    "이어서 진행합니다.":
+        "Opening the Claude Hand window. If it shows a question, choose with the arrow keys and press Enter (for the development channel "
+        "warning: I am using this for local development). Once connected, this panel carries on.",
+    "담당: {agent}": "Handled by: {agent}",
+    "이 Blender 창의 하위 세션이 없습니다. uv run tools/claude_hand.py sync 를 실행하세요.":
+        "This Blender window has no subagent. Run uv run tools/claude_hand.py sync.",
+    "감독 세션에 연결할 수 없습니다: {exc}": "Cannot connect to the supervisor session: {exc}",
+    "Claude Hand가 꺼져 있습니다.": "Claude Hand is off.",
+    "보내지 못했습니다: {exc}": "Could not send: {exc}",
+    "파일: {path}": "file: {path}",
+    "(저장 안 됨)": "(not saved)",
+    "씬: {name}": "scene: {name}",
+    "활성 오브젝트: {name} ({type}, 모드 {mode})": "active object: {name} ({type}, mode {mode})",
+    "선택한 오브젝트: ": "selected objects: ",
+    "start-supervisor를 찾지 못했습니다. 바탕화면의 Claude Hand 아이콘을 누르세요.": "start-supervisor was not found. Click the Claude Hand icon on the Desktop.",
+    "Claude Hand를 시작하지 못했습니다: {exc}": "Claude Hand could not be started: {exc}",
+    "보내기": "Send",
+    "Enter 보내기 · Shift+Enter 줄바꿈 · Esc 닫기": "Enter sends · Shift+Enter new line · Esc closes",
+    "입력창을 열지 못했습니다: {exc}": "The input box could not be opened: {exc}",
+    "{time} 요청": "request at {time}",
+    "요청": "request",
+    "되돌릴 Claude 요청이 없습니다.": "There is no request of Claude's to undo.",
+    "'{mark}' 요청은 이미 되돌려져 있습니다.": "The request '{mark}' is undone already.",
+    "Claude Hand: 되돌리기 전": "Claude Hand: before the undo",
+    "'{mark}' 요청을 되돌리지 못했습니다. 그 뒤로 실행 취소 단계가 너무 많아 Blender의 실행 취소 기록에서 밀려났습니다.":
+        "The request '{mark}' could not be undone. Too many undo steps came after it, and it has dropped out of Blender's undo history.",
+    "[사용자가 채팅창에서 '{mark}' 요청 이후의 Blender 변경을 실행 취소로 되돌렸음]":
+        "[The user undid, with undo in the chat panel, the changes made in Blender since the request '{mark}']",
+    "되돌렸어요: '{mark}' 이후의 변경": "Undone: the changes since '{mark}'",
+    "이 창 + ": "this window + ",
+    "열림": "Open",
+    "보기만": "Look only",
+    "잠금": "Locked",
+    ".blend 저장": "Save .blend",
+    "없어짐": "gone",
+    "이름": "name",
+    "종류": "type",
+    "부모": "parent",
+    "컬렉션": "collections",
+    "자리": "position",
+    "모디파이어": "modifiers",
+    "제약": "constraints",
+    "재질 칸": "material slots",
+    "재질": "materials",
+    "보이기": "visibility",
+    "사용자 속성": "custom properties",
+    "데이터": "data",
+    "메시": "mesh",
+    "셰이프 키": "shape keys",
+    "{name} (없어지거나 이름이 바뀜)": "{name} (gone or renamed)",
+    "이 요청의 되돌리기 지점이 없음": "this request has no undo point",
+    "실행 취소로 돌아가지 않은 것이 남음: ": "undo did not take back all of it: ",
+    "저장한 적 없는 파일이라 계속 두는 규칙은 적을 곳이 없습니다. '이번만'을 켜고 다시 누르거나, 파일을 저장한 뒤 누르세요.":
+        "This file has never been saved, so there is nowhere to write a lasting rule. Turn on 'This run only' and press again, or save the "
+        "file first.",
+    "규칙 파일이 아닌 것이 그 자리에 있습니다": "what is in that place is not a rules file",
+    "규칙을 적지 못했습니다: {exc}": "The rule could not be written: {exc}",
+    "'{value}'은(는) 창 규칙이 아닙니다.": "'{value}' is not a rule for a window.",
+    "'{value}'은(는) Blender에서 막을 수 있는 동작이 아닙니다.": "'{value}' is not an action that can be stopped in Blender.",
+    "더할 규칙이 없습니다.": "There is no rule to add.",
+    "이 창: {mode}": "This window: {mode}",
+    "금지: {action}": "Forbidden: {action}",
+    "컬렉션 {name}": "collection {name}",
+    "오브젝트 {value}": "object {value}",
+    " (이번만)": " (this run only)",
+    "이 파일에 '{name}' 오브젝트가 없습니다. get_scene_info로 정확한 이름을 확인하세요.":
+        "This file has no object '{name}'. Check the exact name with get_scene_info.",
+    "보낼 오브젝트 이름을 하나 이상 주세요.": "Give at least one name of an object to send.",
+    "이 manifest는 '{format}' 형식이라 Blender로 받을 수 없습니다. export_blend가 만든 것만 됩니다.":
+        "This manifest is of the '{format}' kind and cannot be received by Blender this way. Only one made by export_blend can.",
+    "지금 뷰 레이어에 없는 오브젝트는 내보낼 수 없습니다: ": "Objects that are not in the view layer now cannot be exported: ",
+    "오브젝트 모드가 아니라서 이번에는 굽지 않았습니다(Unity에 먼저 구운 이미지가 있으면 그것이 그대로 쓰입니다). 오브젝트 모드에서 저장하거나 보내면 구워집니다.":
+        "It was not baked this time because Blender is not in Object Mode (if Unity has an image baked earlier, that one stays in use). It "
+        "is baked when you save or send in Object Mode.",
+    "이 재질을 쓰는 메시가 없어서": "because no mesh uses this material",
+    "{names}이(가) 렌더나 뷰포트에서 꺼져 있어서(아웃라이너의 카메라 · 모니터 아이콘)":
+        "because {names} is turned off in render or in the viewport (the camera and monitor icons of the outliner)",
+    "{names}에 UV 맵이 없어서": "because {names} has no UV map",
+    "Cycles가 꺼져 있어서(굽는 데 씁니다)": "because Cycles is turned off (it is what bakes)",
+    "{what}: 이미지가 UV가 아닌 좌표({name})에 놓여 있어서, UV 그대로 놓은 것으로 갔습니다.":
+        "{what}: the image is laid on coordinates other than UV ({name}), so it went as if laid on the UVs.",
+    "{what}: 이미지를 놓는 좌표가 '{node}' 노드를 거쳐서, UV 그대로 놓은 것으로 갔습니다.":
+        "{what}: the coordinates the image is laid on go through a '{node}' node, so it went as if laid on the UVs.",
+    "Principled BSDF 하나로 된 재질이 아니라서, 뷰포트에 보이는 색 · 금속 · 거칠기 값만 갔습니다.":
+        "The material is not one made of a single Principled BSDF, so only the color, metallic and roughness values the viewport shows "
+        "went.",
+    "{what}: '{node}' 노드를 거쳐서 못 옮겼습니다.": "{what}: goes through a '{node}' node and could not be carried.",
+    "굽기가 꺼져 있어서": "because baking is turned off",
+    "{what}: '{node}' 노드를 거치는데 {why} 못 옮겼습니다.": "{what}: goes through a '{node}' node and could not be carried {why}.",
+    "{what}: 굽지 못했습니다({why}).": "{what}: could not be baked ({why}).",
+    "{what}: 이미지 '{name}'의 파일이 없어서 못 옮겼습니다.": "{what}: the file of the image '{name}' is missing, so it could not be carried.",
+    "금속": "metallic",
+    "거칠기": "roughness",
+    "금속 · 거칠기: {later}": "metallic · roughness: {later}",
+    "금속 · 거칠기: 굽지 못했습니다({why}).": "metallic · roughness: could not be baked ({why}).",
+    "발광 세기": "emission strength",
+    "투명도": "alpha",
+    "이 .blend는 저장된 적이 없어, 같은 것을 다시 보내면 Unity에 새 모델이 하나 더 생깁니다. 저장한 뒤 보내면 제자리에서 바뀝니다.":
+        "This .blend has never been saved, so sending the same thing again makes one more model in Unity. Saved first, it is replaced in "
+        "place.",
+    "이 manifest는 '{format}' 형식이라 모델로 받을 수 없습니다. 다른 Blender가 export_blend로 보낸 것은 import_blend로 받으세요.":
+        "This manifest is of the '{format}' kind and cannot be received as a model. What another Blender sent with export_blend is "
+        "received with import_blend.",
+    "모델 파일이 없습니다: {path}": "The model file is missing: {path}",
+    "'{extension}' 파일은 받을 수 없습니다. FBX, OBJ, GLB만 됩니다.": "A '{extension}' file cannot be received. Only FBX, OBJ and GLB can.",
+    "Unity가 컴파일 중이에요": "Unity is compiling",
+    "Unity가 응답하지 않아요": "Unity does not answer",
+    "Unity가 제때 답하지 않았어요(대화상자가 떠 있을 수 있어요)": "Unity did not answer in time (a dialog may be up)",
+    "그 프로젝트에서 Claude가 일하는 중이에요. 끝난 뒤 다시 해 주세요": "Claude is at work in that project. Try again once it has finished",
+    "그 프로젝트의 Claude Hand Tools가 오래된 버전이에요": "That project's Claude Hand Tools is an old version",
+    "저장": "Save",
+    "되돌리기": "Undo",
+    "파일 열기": "File opened",
+    "Unity 열림": "Unity opened",
+    "확인": "Check",
+    "'{key}'(으)로 보낸 오브젝트가 둘이에요({names}). 이 모델로 갈 것을 고르고 [선택한 오브젝트로 잇기]를 누르세요.":
+        "Two objects were sent as '{key}' ({names}). Select the one this model is to be made of and press [Link to the selected object].",
+    "이 파일에 '{key}' 오브젝트가 없어요. 이름을 바꿨으면 그 오브젝트를 고르고 [선택한 오브젝트로 잇기]를 누르세요.":
+        "This file has no object '{key}'. If you renamed it, select that object and press [Link to the selected object].",
+    " 외 {count}개": " and {count} more",
+    "내보내지 못했어요: {exc}": "Could not export: {exc}",
+    "{why} → {project}: {label}을(를) 보내지 못했어요({reason}). 다음 저장 때 다시 보냅니다.":
+        "{why} → {project}: {label} could not be sent ({reason}). It is sent again at the next save.",
+    "{why} → {project}: {label} 반영": "{why} → {project}: {label} updated",
+    " (씬 오브젝트 {uses}개)": " ({uses} scene objects)",
+    "{project}: {label}이(가) Unity에 보낸 것과 다르게 들어갔어요({parts}). Claude에게 알려 주세요.":
+        "{project}: {label} arrived differently from what was sent to Unity ({parts}). Tell Claude.",
+    "{project}: {label}의 노드로 만든 재질은 오브젝트 모드에서 저장하면 구워서 갑니다(지금은 Unity에 있던 이미지 그대로).":
+        "{project}: the node-made materials of {label} are baked and sent when you save in Object Mode (for now the images Unity had stay).",
+    "{project}에 {label} 모델이 더 없어서 보내지 않았어요.": "{project} no longer has the model {label}, so it was not sent.",
+    "{project}에서 고친 재질은 Unity 것 그대로 뒀어요({names}). Blender 재질대로 다시 만들려면 Unity에서 그 .mat 파일을 지우고 다시 보내세요.":
+        "{project}: the materials changed there were left as Unity has them ({names}). To have them made again from Blender's, delete "
+        "those .mat files in Unity and send again.",
+    "{text} · {count}번째 ({stamp})": "{text} · #{count} ({stamp})",
+    "Unity로 보낸 모델을 살펴보다 오류가 났어요: {exc}": "An error came up while looking at the models sent to Unity: {exc}",
+    "먼저 이 .blend를 저장하세요. 저장된 파일이어야 Unity가 같은 모델인지 알고, 저장할 때 다시 보낼 수 있어요.":
+        "Save this .blend first. Only with a saved file can Unity tell it is the same model, and can it be sent again on a save.",
+    "그 Unity 프로젝트가 열려 있지 않아요.": "That Unity project is not open.",
+    " · {source}에서 온 것으로 적혀 있음": " · recorded as coming from {source}",
+    "다른 파일": "another file",
+    "{project}에 {label}을(를) 보냈어요": "Sent {label} to {project}",
+    "(있던 모델을 바꿈)": " (replaced the model there)",
+    "(씬에 놓음)": " (placed in the scene)",
+    ". 저장할 때마다 다시 갑니다. Unity 채팅창의 되돌리기로 뺄 수 있어요.": ". It goes again at every save. Undo in Unity's chat panel takes it out.",
+    "노드로 만든 재질 입력은 텍스처로 구워 보냈어요(그때 모습으로 굳은 이미지): ":
+        "Material inputs made with nodes were baked to textures and sent (images fixed as they looked then): ",
+    "못 옮긴 것 · ": "Not carried · ",
+    "Unity에 보낸 것과 다르게 들어갔어요({parts}). Claude에게 알려 주세요.": "It arrived differently from what was sent to Unity ({parts}). Tell Claude.",
+    "[사용자가 Blender 패널에서 '{label}'을(를) Unity {project}에 직접 보냈음: {asset} (Claude를 거치지 않음, 저장할 때마다 다시 감)]":
+        "[The user sent '{label}' to Unity {project} straight from Blender's panel: {asset} (not through Claude; it goes again at every "
+        "save)]",
+    "다른 창은 되돌리지 못했습니다: ": "The other windows could not be undone: ",
+    "Claude Hand가 받지 않았습니다": "Claude Hand did not take it",
+    "보내지 못했습니다. 앞 메시지가 Claude Hand가 켜지기를 기다리는 중이니 잠시 뒤 다시 보내 주세요.":
+        "Could not send. An earlier message is waiting for Claude Hand to come on; send again in a moment.",
+    "중지를 보내지 못했습니다: ": "Stop could not be sent: ",
+    "알 수 없는 오류": "unknown error",
+    "보내지 못했습니다: ": "Could not send: ",
+    "Claude 세션이 아직 연결 중입니다. 잠시 뒤 답이 옵니다.": "The Claude session is still connecting. The answer comes in a moment.",
+    "Claude Hand 시작": "Start Claude Hand",
+    "권한 응답": "Answer a permission request",
+    "전체 복사": "Copy all",
+    "메시지 전체를 클립보드에 복사했습니다": "Copied the whole message to the clipboard",
+    "크게 보기": "View larger",
+    "그림 파일이 지워졌습니다": "The picture file was deleted",
+    "한글 입력창": "Windows text box",
+    "'{mark}' 이후 바뀐 것을 모두 되돌립니다. 그 뒤에 직접 고친 것도 함께 되돌아갑니다.":
+        "Everything changed since '{mark}' is undone. What you changed by hand after it goes back too.",
+    "'{label}' 요청이 바꾼 것을 되돌립니다. ": "What the request '{label}' changed is undone. ",
+    "이 Blender에서는 그 뒤에 직접 고친 것도 함께 되돌아갑니다. ": "In this Blender, what you changed by hand after it goes back too. ",
+    "다른 창({others})은 그 창에 더 새 요청이 있거나 작업 중이면 건너뛰고, 그렇게 알려 줍니다.":
+        "The other windows ({others}) are skipped when they have a newer request or are at work, and you are told so.",
+    "Claude Hand 되돌리기": "Claude Hand: Undo",
+    "중지": "Stop",
+    "이미 답한 제안입니다.": "That proposal is answered already.",
+    "보호 규칙 제안에 답하기": "Answer a proposed protection rule",
+    "보호 규칙 더하기": "Add a protection rule",
+    "보호할 오브젝트를 먼저 고르세요.": "Select the objects to protect first.",
+    "풀기": "Release",
+    "'{rule}' 규칙을 풉니다. Claude가 다시 바꿀 수 있게 됩니다.": "The rule '{rule}' is released. Claude can change it again.",
+    "보호 규칙 풀기": "Release a protection rule",
+    "Claude가 이 창을 바꿀 수 있습니다. 아래 규칙이 가리키는 것만 빼고요.": "Claude can change this window, except what the rules below cover.",
+    "보기만: Claude는 이 창을 읽기만 합니다.": "Look only: Claude only reads this window.",
+    "잠금: Claude는 이 창에서 아무 일도 하지 않습니다.": "Locked: Claude does nothing in this window.",
+    "읽지 못한 규칙 파일(고칠 때까지 Claude의 바꾸는 호출을 막습니다): ":
+        "A rules file that could not be read (until it is fixed, Claude's calls that change anything are refused): ",
+    "이번만 (Claude Hand를 끌 때까지)": "This run only (until Claude Hand is closed)",
+    "선택한 오브젝트 보호": "Protect the selected objects",
+    "이 창 보기만": "Look only",
+    "이 창 잠금": "Lock this window",
+    ".blend 저장 금지": "Forbid saving the .blend",
+    "저장할 때 다시 보내기": "Send again on save",
+    "이 파일로 잇기": "Link to this file",
+    "선택한 오브젝트로 잇기": "Link to the selected object",
+    "이 모델로 갈 오브젝트를 먼저 고르세요": "Select the object this model is to be made of first",
+    "선택한 오브젝트 보내기": "Send the selected objects",
+    "보낼 오브젝트를 먼저 고르세요.": "Select the objects to send first.",
+    "새로 고침": "Refresh",
+    "열려 있는 Unity가 없습니다(Claude Hand Tools 0.16 이상이 든 프로젝트).": "No Unity is open (a project with Claude Hand Tools 0.16 or later).",
+    "저장한 적 없는 파일입니다. 저장하면 여기서 Unity로 보낼 수 있어요.": "This file has never been saved. Once saved, you can send to Unity from here.",
+    "이 파일에서 Unity로 간 모델이 없습니다.": "No model has gone to Unity from this file.",
+    "체크한 모델은 이 파일을 저장할 때마다 Unity에서 바뀝니다.": "Checked models are replaced in Unity every time this file is saved.",
+    "선택한 오브젝트 보내기 → {name}": "Send the selected objects → {name}",
+    "Unity로 보낸 모델": "Models sent to Unity",
+    "보호": "Protect",
+    "여는 중... 새 창을 확인하세요": "Opening... check the new window",
+    "Claude Hand 창에서 확인을 눌러 주세요. 세션이 일을 시작하면 그 창은 저절로 최소화됩니다. 닫지는 마세요.":
+        "Confirm in the Claude Hand window. Once the session starts working, that window minimizes by itself. Do not close it.",
+    "Claude Hand(감독 세션)가 꺼져 있습니다. 버튼을 누르거나 메시지를 보내면 켜집니다.":
+        "Claude Hand (the supervisor session) is off. Press the button or send a message to turn it on.",
+    "아직 대화가 없습니다.": "No conversation yet.",
+    "이전 대화 {folded}개는 접어 두었습니다": "{folded} earlier messages are folded away",
+    "…{hidden}줄 더 있음": "…{hidden} more lines",
+    "→ 허용됨": "→ Allowed",
+    "→ 거부됨": "→ Denied",
+    "허용": "Allow",
+    "거부": "Deny",
+    "→ 규칙에 더함": "→ Added to the rules",
+    "→ 더하지 않음": "→ Not added",
+    "추가": "Add",
+    "취소": "Cancel",
+    "나 (Claude Hand가 켜지면 보냅니다)": "Me (sent once Claude Hand is on)",
+    "1분 넘게 답이 없습니다. 감독 세션을 start-supervisor.cmd로 열었는지, Claude Code 창에 확인을 기다리는 질문이 없는지 봐 주세요.":
+        "No answer for over a minute. See whether the supervisor session was opened with start-supervisor.cmd, and whether the Claude Code "
+        "window has a question waiting for your confirmation.",
+    "되돌리기: {plan}": "Undo: {plan}",
+    "한글": "Text box",
+    "선택 항목 함께": "With selection",
+    "기능 켜고 끄기": "Features",
+    "실험실": "Lab",
+    "메시지": "Message",
+    "Enter로 보냅니다": "Enter sends it",
+    "선택 항목 함께 보내기": "Send the selection along",
+    "이번만": "This run only",
+    "새로 더하는 보호 규칙을 Claude Hand를 끌 때까지만 둡니다(끄면 파일 옆에 적어 계속 둡니다)":
+        "A protection rule added now is kept only until Claude Hand is closed (turned off, it is written beside the file and kept)",
+    "설정": "Settings",
+    "켜짐": "On",
+    "꺼짐": "Off",
+    "{days}일": "{days} days",
+    "지우지 않음": "never removed",
+    "아직 다듬는 중인 기능입니다. 켜야 쓰입니다.": "Features still being refined. In use only once turned on.",
+    "지금 실험실에 있는 기능이 없습니다.": "The lab holds no feature right now.",
+    "{since}부터": "since {since}",
+    "설정 목록을 읽지 못했습니다. claude-hand 폴더에서 uv run tools/claude_hand.py chat-setup 을 한 번 실행하세요.":
+        "The list of settings could not be read. Run uv run tools/claude_hand.py chat-setup once in the claude-hand folder.",
+    "* 다음에 Claude Hand를 켤 때부터 적용됩니다.": "* Applies from the next start of Claude Hand.",
+    "Claude Hand 설정": "Claude Hand settings",
+    "다른 창 ({count})": "Other windows ({count})",
+    "{state} · {seconds}초": "{state} · {seconds}s",
+    "중지하는 중": "Stopping",
+    "작업 중": "Working",
+    "{actions}번째 동작": "action {actions}",
+    "(그림 파일이 지워졌습니다)": "(the picture file was deleted)",
+    "결과 미리보기": "Result preview",
+    "Claude가 제안한 보호 규칙": "A protection rule Claude proposes",
+    "데스크톱 앱에서": "From the desktop app",
+    "'{tool}' 실행 허락 요청": "Permission to run '{tool}'",
+    "나": "Me",
+}

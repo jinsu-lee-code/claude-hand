@@ -5,7 +5,9 @@ here they become text. A state is told by its words, never by a colour.
 
 from __future__ import annotations
 
-STATES = {"working": "작업 중", "stopping": "중지하는 중", "waiting": "답 기다림", "dialog": "대화상자로 멈춤", "idle": "한가함"}
+from handlib.lang import N_, T
+
+STATES = {"working": N_("작업 중"), "stopping": N_("중지하는 중"), "waiting": N_("답 기다림"), "dialog": N_("대화상자로 멈춤"), "idle": N_("한가함")}
 
 
 def label(state: dict) -> str:
@@ -13,18 +15,18 @@ def label(state: dict) -> str:
 
 
 def duration(seconds: int) -> str:
-    return f"{seconds}초" if seconds < 60 else f"{seconds // 60}분 {seconds % 60}초"
+    return T("{seconds}초", seconds=seconds) if seconds < 60 else T("{minutes}분 {seconds}초", minutes=seconds // 60, seconds=seconds % 60)
 
 
 def line(state: dict, names: dict[str, str], detail: bool = False) -> str:
     """One window in one line: "MyGame (Unity) · 작업 중 · props의 요청 · “의자를 Unity로 보내줘”".
     detail adds for how long and what it is doing right now (status). The panels leave those out: there they
     would stand still until the window's state changes."""
-    parts = [label(state), STATES[state["state"]]]
+    parts = [label(state), T(STATES[state["state"]])]
     if detail and "seconds" in state:
         parts.append(duration(state["seconds"]))
     if state.get("asker"):
-        parts.append(f"{names.get(state['asker'], state['asker'])}의 요청")
+        parts.append(T("{asker}의 요청", asker=names.get(state['asker'], state['asker'])))
     if state["state"] == "dialog":
         parts.append(state.get("dialog", ""))
     else:
@@ -43,5 +45,5 @@ def lines(states: list[dict], skip: str = "", detail: bool = False) -> list[str]
     out = [line(state, names, detail) for state in shown if state["state"] != "idle"]
     idle = [label(state) for state in shown if state["state"] == "idle"]
     if idle:
-        out.append(f"{STATES['idle']}: " + ", ".join(idle))
+        out.append(f"{T(STATES['idle'])}: " + ", ".join(idle))
     return out

@@ -23,6 +23,7 @@ from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
+os.environ["CLAUDE_HAND_LANG"] = "ko"  # the words here are the Korean ones, whatever this PC is set to
 import handlib.agents  # noqa: E402
 import handlib.checks  # noqa: E402
 import handlib.constants  # noqa: E402

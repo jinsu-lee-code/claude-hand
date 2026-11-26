@@ -51,10 +51,11 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from handlib import eventlog, overview, protect, usage  # noqa: E402
-from handlib.agents import AgentInfo, installed_agents, prompt_template, refresh_agents, slug  # noqa: E402
+from handlib import eventlog, overview, prefs, protect, usage  # noqa: E402
+from handlib.agents import AgentInfo, glossary, installed_agents, prompt_template, refresh_agents, rewrite_installed, slug  # noqa: E402
 from handlib.capture import capture_window  # noqa: E402
 from handlib.constants import VERSION  # noqa: E402
+from handlib.lang import N_, T  # noqa: E402
 from handlib.launch import read_user_config, session_transcript  # noqa: E402
 from handlib.link import blender_request, claude_hand_home, supervisor_running  # noqa: E402
 from handlib.looks import LOOKING_TOOLS, tool_only_looks as only_looks  # noqa: E402,F401  (tools that leave a window as it was)
@@ -74,7 +75,7 @@ AUTO_SYNC_INTERVAL = 20.0  # seconds between automatic subagent refreshes for th
 
 # What the supervisor is told about the panels. The same text goes into the supervisor skill when it is installed,
 # so the two cannot drift apart (prompts/chat-rules.md).
-INSTRUCTIONS = prompt_template("chat-rules")
+INSTRUCTIONS = prompt_template("chat-rules") + glossary()
 HISTORY_KINDS = ("user", "reply", "image")  # what a panel shows again after a restart; permission prompts do not outlive it
 PREVIEW_SIZE = 640  # longest side of a result preview, in pixels
 IMAGES_KEPT = 60    # preview files kept on disk; older ones are deleted
@@ -127,11 +128,11 @@ UNDO_SECONDS = 90.0    # how long one window may take to undo a request (a Unity
 
 UNDO_TOOL = {
     "name": "undo_request",
-    "description": "Undo a chat panel's request in every window it changed: what the panel's 되돌리기 button does. Use it when "
+    "description": N_("Undo a chat panel's request in every window it changed: what the panel's 되돌리기 button does. Use it when "
                    "the user asks in a chat panel to cancel or undo what was just done; do not hand the undo to subagents "
                    "(a subagent undoes its window's newest request, which need not be the one meant). Each window undoes "
                    "that request only when nothing newer changed it since. Returns what happened window by window; tell "
-                   "the user exactly that.",
+                   "the user exactly that."),
     "inputSchema": {
         "type": "object",
         "properties": {
@@ -145,12 +146,12 @@ UNDO_TOOL = {
 
 PROTECT_TOOL = {
     "name": "propose_protection",
-    "description": "Propose a protection rule for one window: something Claude must not change there from now on. Use it when "
+    "description": N_("Propose a protection rule for one window: something Claude must not change there from now on. Use it when "
                    "the user says so in words ('Hero는 건드리지 마', 'Assets/Art는 손대지 마', '이 창은 보기만 해', '씬은 저장하지 마'). "
                    "The rule holds only once the user presses [추가] under the proposal in that window's chat panel: say so in "
                    "your reply. You cannot add, change or remove a rule yourself, and nothing loosens one but the user in the "
                    "panel (보호 → 풀기): when asked to lift a rule, tell the user where that button is. A rule is checked by "
-                   "the hooks and by the window itself, whatever a subagent does; a note in NOTES.md is only read.",
+                   "the hooks and by the window itself, whatever a subagent does; a note in NOTES.md is only read."),
     "inputSchema": {
         "type": "object",
         "properties": {
@@ -164,8 +165,8 @@ PROTECT_TOOL = {
                                      "all in it). object: 'Player' (that object wherever it is, and all below it), "
                                      "'Environment/**', 'UI/Canvas' (that one object); in Blender also 'collection:Rig'. action: "
                                      "'save_scene', 'delete_asset', 'play_mode' (Unity), 'save_file' (Blender)"},
-            "lasting": {"type": "boolean", "description": "true: kept with the project or the .blend. false: only until Claude Hand "
-                                                           "is turned off (the user said 'for now', '이번만', '오늘은')"},
+            "lasting": {"type": "boolean", "description": N_("true: kept with the project or the .blend. false: only until Claude Hand "
+                                                           "is turned off (the user said 'for now', '이번만', '오늘은')")},
             "why": {"type": "string", "description": "One line for the user: what they said that this rule answers"},
         },
         "required": ["chat_id", "kind", "value", "lasting"],
@@ -173,12 +174,12 @@ PROTECT_TOOL = {
 }
 
 UNDO_WORDS = {  # what became of a request in one window, for the people reading it in a chat panel
-    "undone": "되돌렸어요",
-    "nothing": "되돌릴 것이 없었어요",
-    "blocked": "그 뒤에 다른 요청이 이 창을 바꿔서 건너뛰었어요. 그 창에서 먼저 되돌려 주세요",
-    "busy": "지금 작업 중이라 건너뛰었어요. 끝난 뒤 다시 눌러 주세요",
-    "unreachable": "창이 응답하지 않아 건너뛰었어요",
-    "failed": "되돌리지 못했어요",
+    "undone": N_("되돌렸어요"),
+    "nothing": N_("되돌릴 것이 없었어요"),
+    "blocked": N_("그 뒤에 다른 요청이 이 창을 바꿔서 건너뛰었어요. 그 창에서 먼저 되돌려 주세요"),
+    "busy": N_("지금 작업 중이라 건너뛰었어요. 끝난 뒤 다시 눌러 주세요"),
+    "unreachable": N_("창이 응답하지 않아 건너뛰었어요"),
+    "failed": N_("되돌리지 못했어요"),
 }
 
 
@@ -199,7 +200,7 @@ def undo_in_window(app: str, pin: str, key: str) -> dict:
         data = result.get("data") if isinstance(result.get("data"), dict) else {}
         if result.get("success") is not True or data.get("state") not in UNDO_WORDS:
             return {"state": "failed", "detail": str(data.get("message") or result.get("message") or result.get("code") or
-                                                      "Claude Hand Tools가 예전 버전입니다")[:300]}
+                                                      T("Claude Hand Tools가 예전 버전입니다"))[:300]}
         return {"state": data["state"], "top": str(data.get("top") or ""), "summary": str(data.get("summary") or "")}
     code = f"import claude_hand_chat, json\nprint('CH_UNDO ' + json.dumps(claude_hand_chat.undo_request({key!r})))"
     try:
@@ -215,7 +216,7 @@ def undo_in_window(app: str, pin: str, key: str) -> dict:
         data = None
     if not isinstance(data, dict) or data.get("state") not in UNDO_WORDS:
         why = reply.get("message") if isinstance(reply, dict) else None  # no undo_request in the add-on: an AttributeError
-        return {"state": "failed", "detail": str(why or "Claude Hand Chat 애드온이 예전 버전입니다")[:300]}
+        return {"state": "failed", "detail": str(why or T("Claude Hand Chat 애드온이 예전 버전입니다"))[:300]}
     return {"state": data["state"], "top": str(data.get("top") or ""), "summary": "", "detail": str(data.get("detail") or "")}
 
 # A reply has to say whether the work still goes on. The tool definition asks for it, but Claude Code does not hold
@@ -223,10 +224,18 @@ def undo_in_window(app: str, pin: str, key: str) -> dict:
 # changed nothing; being refused once did, as with the request tag on hand-outs). So the first few replies without
 # it are sent back, with this.
 WORKING_ASKS = 5
-WORKING_ASK = ("Not sent: say whether the work for this request still goes on. Send the same text again with working: true "
+WORKING_ASK = (N_("Not sent: say whether the work for this request still goes on. Send the same text again with working: true "
                "(a status while the work goes on, such as 'on it') or working: false (the result, or an answer that needed "
                "no work). The panel's work line, its 중지 button and the alert that an answer came depend on it. Say it on "
-               "every reply from now on.")
+               "every reply from now on."))
+
+
+def said(tool):
+    """A tool as Claude is told of it: its descriptions with the panels' button names as the language in use has them
+    (the descriptions are English; the names in them are the Korean ones until T finds the text in its table)."""
+    if isinstance(tool, dict):
+        return {key: T(value) if key == "description" and isinstance(value, str) else said(value) for key, value in tool.items()}
+    return [said(value) for value in tool] if isinstance(tool, list) else tool
 
 
 CONTEXT_TOOL = {
@@ -244,7 +253,7 @@ def clip(text: str, limit: int) -> str:
     """`text` cut to `limit` characters, saying so, so neither the panel nor Claude mistakes it for the whole."""
     if len(text) <= limit:
         return text
-    note = f"\n…(너무 길어 앞의 {limit}자만 보냅니다)"
+    note = T("\n…(너무 길어 앞의 {limit}자만 보냅니다)", limit=limit)
     return text[:limit - len(note)] + note
 
 
@@ -337,6 +346,12 @@ class ChatHub:
         self.ledger = None           # usage.Ledger over that transcript, from when this server started
         self.costs: dict[str, dict] = {}  # request id -> {"chat", "asked", "answered", "actions"}: answered, tokens still to come
         self.show_cost = True        # the line in the panel (config.json "show_cost": false leaves it to trace and usage)
+        self.show_previews = True    # pictures of the other windows a request changed, under its result
+        # The user's settings as they are now: callable(key) -> value (handlib/prefs.py reads config.json anew whenever it
+        # changes, so a settings window's change holds without a restart). None: this hub's own attributes above.
+        self.setting = None
+        self.language_seen: str | None = None  # the interface's language when the watcher last looked (check_language)
+        self.on_language = None      # callable(): the language changed (the subagents' files and the skill are written anew)
         # Messages for the supervisor that wait for its turn to end (deliver, check_held), oldest first.
         # Protection rules (handlib/protect.py). The channel writes none: it shows a rule the supervisor proposes in
         # the window's panel, where the user's press writes it, and says in the panels what the guard hook refused.
@@ -425,10 +440,10 @@ class ChatHub:
                     return {"ours": True, "chat_id": window, "unknown": True}
                 stop = self.stops.get(asker)
                 if stop and stop["seq"] == item["seq"] and now - stop["ts"] <= STOP_SECONDS and self._asking(asker, now) is item:
-                    self._log("refused", request=request, chat_id=window, tool="(맡기기)", reason="사용자가 채팅창에서 중지를 누름")
+                    self._log("refused", request=request, chat_id=window, tool=T("(맡기기)"), reason=T("사용자가 채팅창에서 중지를 누름"))
                     return {"ours": True, "chat_id": window, "stop": True}
             if self.protection(window).window == "locked":
-                self._log("refused", request=request, chat_id=window, tool="(맡기기)", reason="사용자가 잠근 창 (보호 규칙: 잠금)")
+                self._log("refused", request=request, chat_id=window, tool=T("(맡기기)"), reason=T("사용자가 잠근 창 (보호 규칙: 잠금)"))
                 return {"ours": True, "chat_id": window, "locked": True}
             # A window has one place for "whose request is this work": handing it work for another request while it is
             # at work would put the rest of that work, its undo point and its 중지 down for the new request. Refused
@@ -436,11 +451,11 @@ class ChatHub:
             given = self._assignment(window, now)
             if given is not None and given["item"] is not item and now - given["ts"] <= LOCK_SECONDS:
                 other = " ".join(str((given["item"] or {}).get("text", "")).split())[:40].rstrip()
-                self._log("refused", request=request, chat_id=window, tool="(맡기기)", reason="그 창이 다른 요청으로 일하는 중" +
+                self._log("refused", request=request, chat_id=window, tool=T("(맡기기)"), reason=T("그 창이 다른 요청으로 일하는 중") +
                           (f" ({other})" if other else ""))
                 return {"ours": True, "chat_id": window, "busy": True, "other": other}
             self.assigned[window] = {"asker": asker, "item": item, "ts": now}
-            self._log("assigned", request=request, chat_id=window, text="" if asker else "채팅창 요청이 아님")
+            self._log("assigned", request=request, chat_id=window, text="" if asker else T("채팅창 요청이 아님"))
             self.cond.notify_all()  # the other panels show the asking window: its request is under way (see _state)
         return {"ours": True, "chat_id": window, "asker": asker}
 
@@ -470,10 +485,24 @@ class ChatHub:
         if chat_id in self.early:
             self.early[chat_id].update(worked=True, ts=now)
 
-    def use_history(self, directory: Path) -> None:
+    def _on(self, key: str) -> bool:
+        """A switch of the settings as it stands now."""
+        if self.setting is not None:
+            try:
+                return self.setting(key) is not False
+            except Exception as exc:  # a setting that cannot be read is as it was made
+                log("could not read the settings:", exc)
+        return getattr(self, key, True) is not False
+
+    def use_history(self, directory: Path, keep_days: int = 0, now: float | None = None) -> int:
         """Keep each chat's recent messages in `directory` and show the saved ones again, so a panel still has its
-        conversation after Claude Hand restarts. Numbered afresh: panels start over when the server changes."""
+        conversation after Claude Hand restarts. Numbered afresh: panels start over when the server changes.
+        keep_days (the setting "history_keep_days"): messages older than that many days are not shown again and go
+        from the files, and so do the pictures of that age; 0 keeps them whatever their age (LOG_LIMIT of each chat).
+        Returns how many messages went."""
         self.history_dir = directory
+        cutoff = (now or time.time()) - keep_days * 86400 if keep_days > 0 else None
+        gone, thinned = 0, []
         with self.cond:
             for path in sorted(directory.glob("*.json")) if directory.is_dir() else []:
                 try:
@@ -484,10 +513,24 @@ class ChatHub:
                 if isinstance(saved.get("agent_id"), str) and saved["agent_id"]:
                     self.agent_ids[chat_id] = saved["agent_id"]
                 kept = [dict(item) for item in items if isinstance(item, dict) and item.get("kind") in HISTORY_KINDS]
-                for item in kept[-LOG_LIMIT:]:
+                fresh = [item for item in kept if cutoff is None or not isinstance(item.get("ts"), (int, float)) or item["ts"] >= cutoff]
+                if len(fresh) < len(kept):
+                    gone += len(kept) - len(fresh)
+                    thinned.append(chat_id)
+                for item in fresh[-LOG_LIMIT:]:
                     self.seq += 1
                     item["seq"] = self.seq
                     self.logs.setdefault(chat_id, []).append(item)
+            for chat_id in thinned:  # the file keeps what is still shown (and whose subagent the window's was)
+                self.logs.setdefault(chat_id, [])
+                self._save_history(chat_id)
+        if cutoff is not None and self.images_dir is not None:
+            try:
+                for old in [p for p in self.images_dir.glob("*.png") if p.stat().st_mtime < cutoff]:
+                    old.unlink()
+            except OSError:
+                pass
+        return gone
 
     def _save_history(self, chat_id: str) -> None:
         items = [item for item in self.logs.get(chat_id, []) if item.get("kind") in HISTORY_KINDS]
@@ -600,7 +643,7 @@ class ChatHub:
 
     def post_user_message(self, app: str, window: str, text: str, pin: str = "", context: str = "") -> dict:
         chat_id, agent = self.resolve(app, window, pin)
-        content = text if not context else f"{text}\n\n[{app} 창 정보: {window}]\n{context}"
+        content = text if not context else f"{text}\n\n" + T("[{app} 창 정보: {window}]", app=app, window=window) + f"\n{context}"
         meta = {"chat_id": chat_id, "app": app, "window": window, "agent": agent or "none"}
         with self.cond:
             undone = self.undo_notes.pop(chat_id, "")
@@ -672,7 +715,7 @@ class ChatHub:
             if self.held or not resting:  # behind the ones already waiting: in the order they were sent
                 self.held.append({"since": now, "notification": notification})
                 self._log("held", request=meta.get("request", ""), chat_id=meta.get("chat_id", ""),
-                          text="감독이 차례 중이라, 차례가 끝나면 넘김")
+                          text=T("감독이 차례 중이라, 차례가 끝나면 넘김"))
                 return False
             self.handed_at = now
         self.emit(notification)
@@ -696,7 +739,7 @@ class ChatHub:
             self.handed_at = now
             meta = entry["notification"]["params"]["meta"]
             self._log("released", request=meta.get("request", ""), chat_id=meta.get("chat_id", ""),
-                      text=f"{now - entry['since']:.1f}초 기다림" + ("" if waited < HOLD_SECONDS else " (차례가 끝나지 않아 그냥 넘김)"))
+                      text=T("{seconds:.1f}초 기다림", seconds=now - entry['since']) + ("" if waited < HOLD_SECONDS else T(" (차례가 끝나지 않아 그냥 넘김)")))
         self.emit(entry["notification"])
         return 1
 
@@ -788,7 +831,7 @@ class ChatHub:
         supervisor knows which windows it changed for this request and says so (declared). When it does not, only a
         window whose work was taken down for this chat's request while it happened counts (see report_action), since
         this chat's request or its previous reply. Called with the lock held."""
-        if self.capture is None or self.images_dir is None:
+        if self.capture is None or self.images_dir is None or not self._on("show_previews"):
             return []
         asked = max((i["seq"] for i in self.logs.get(chat_id, []) if i.get("kind") == "user"), default=0)
         since = max(asked, self.previewed.get(chat_id, 0))
@@ -817,7 +860,7 @@ class ChatHub:
             with self.cond:
                 window = (self.contexts.get(other) or self.windows.get(other) or {}).get("window") or agent.pin.rpartition("@")[0]
                 self._append(chat_id, {"kind": "image", "path": Path(captured).as_posix(), "app": agent.app, "window": window,
-                                       "caption": f"{window} ({'Unity' if agent.app == 'unity' else 'Blender'}) 지금 모습"})
+                                       "caption": T("{window} ({app}) 지금 모습", window=window, app='Unity' if agent.app == 'unity' else 'Blender')})
         self._prune_images()
 
     def check_dialogs(self) -> None:
@@ -844,7 +887,8 @@ class ChatHub:
                     continue
                 window = (self.contexts.get(chat) or self.windows.get(chat) or {}).get("window") or agent.pin.rpartition("@")[0]
                 app = "Unity" if agent.app == "unity" else "Blender"
-                text = f"{window}({app})가 대화상자 때문에 멈춰 있어요. {app}에서 직접 골라 주세요: {describe_dialogs(dialogs)}"
+                text = T("{window}({app})가 대화상자 때문에 멈춰 있어요. {app}에서 직접 골라 주세요: {dialogs}",
+                         window=window, app=app, dialogs=describe_dialogs(dialogs))
                 self._log("dialog", request=self._request_for(chat), chat_id=chat, pin=agent.pin, text=eventlog.short(describe_dialogs(dialogs)))
                 for target in [c for c in self.logs if c != chat and self._open_request(c)]:
                     self._append(target, {"kind": "notice", "text": text, "alert": True})
@@ -875,14 +919,14 @@ class ChatHub:
                 window = self.windows.get(chat_id) or {}
                 asked = " ".join(str(request.get("text", "")).split())[:80]
                 reminders.append({"jsonrpc": "2.0", "method": "notifications/claude/channel", "params": {
-                    "content": f'[claude-hand] 이 채팅창의 요청이 아직 답을 받지 못했습니다: "{asked}". 일이 끝났으면 reply로 결과를, '
-                               "아직 하는 중이면 reply에 working: true로 지금 상황을 한 줄 보내세요.",
+                    "content": T("[claude-hand] 이 채팅창의 요청이 아직 답을 받지 못했습니다: \"{asked}\". 일이 끝났으면 reply로 결과를, "
+                                 "아직 하는 중이면 reply에 working: true로 지금 상황을 한 줄 보내세요.", asked=asked),
                     "meta": {"chat_id": chat_id, "app": str(window.get("app", "")), "window": str(window.get("window", "")),
                              "agent": window.get("agent") or "none", "request": str(request.get("request", "")),
                              "reminder": "unanswered"}}})
-                self._append(chat_id, {"kind": "notice", "text": "답이 늦어져 Claude Hand에 다시 알렸어요."})
+                self._append(chat_id, {"kind": "notice", "text": T("답이 늦어져 Claude Hand에 다시 알렸어요.")})
                 self._log("reminder", request=request.get("request", ""), chat_id=chat_id,
-                          text="하위 세션이 멈춘 뒤 답이 없음" if worked else "하위 세션이 일한 흔적이 없음")
+                          text=T("하위 세션이 멈춘 뒤 답이 없음") if worked else T("하위 세션이 일한 흔적이 없음"))
         for notification in reminders:
             self.deliver(notification)
         return [n["params"]["meta"]["chat_id"] for n in reminders]
@@ -937,11 +981,11 @@ class ChatHub:
                 if self.costs.get(request) is not entry:
                     continue  # answered anew meanwhile: that answer's turn is the one to wait for
                 del self.costs[request]
-                if self.show_cost:
+                if self._on("show_cost"):
                     # The panel has moved on to its next message meanwhile: the line says which request it is about.
                     item = entry["item"]
                     newest = next((i for i in reversed(self.logs.get(entry["chat"], [])) if i.get("kind") == "user"), item)
-                    which = "이 요청" if newest is item else f"앞 요청 “{eventlog.short(item.get('text', ''), 20)}”"
+                    which = T("이 요청") if newest is item else T("앞 요청 “{asked}”", asked=eventlog.short(item.get('text', ''), 20))
                     # "cost": the panels draw it as a quiet line (a clock in Blender), not as the box their other notices get
                     self._append(entry["chat"], {"kind": "notice", "cost": True, "text": f"{which}: " + usage.line(seconds, entry["actions"], cost)})
                 self._log("cost", request=request, chat_id=entry["chat"], seconds=round(seconds, 1), actions=entry["actions"],
@@ -949,9 +993,42 @@ class ChatHub:
             told.append(request)
         return told
 
+    def check_language(self) -> bool:
+        """The user chose another language in a settings window while Claude Hand is on. The panels, the commands and
+        the hooks read the setting where they say something, so they follow at once; what was written out earlier in
+        the other language does not: the subagents' definition files and the supervisor skill are written anew
+        (on_language), and the supervisor, whose instructions were given when it started, is told in a message what
+        the buttons are called from now on. One pass (watch repeats). Returns whether the language had changed."""
+        now = prefs.language(home=self.home) if self.setting is not None else None
+        if now is None or now == self.language_seen:
+            return False
+        first, self.language_seen = self.language_seen is None, now
+        if first:
+            return False  # as this server found it when it started: what was written out is in it
+        if self.on_language is not None:
+            try:
+                self.on_language()
+            except (Exception, SystemExit) as exc:  # the files stay as they were until the next start
+                log("could not write the subagents' files in the new language:", exc)
+        notification = {"jsonrpc": "2.0", "method": "notifications/claude/channel", "params": {
+            "content": T("[claude-hand] 사용자가 화면 언어를 {language}로 바꿨습니다. 이제부터 채팅창의 버튼 이름과 도구가 돌려주는 글(막힌 호출의 "
+                         "이유 포함)이 그 언어로 나옵니다. 사용자에게 버튼이나 칸을 가리킬 때 그 언어의 이름으로 말하세요. 답은 지금처럼 사용자가 쓴 "
+                         "언어로 합니다. 이 알림에는 답하지 않습니다.", language=prefs.LANGUAGE_NAMES[now]) + glossary(),
+            "meta": {"chat_id": "", "app": "", "window": "", "agent": "none", "notice": "language"}}}
+        self._log("language", text=now)
+        with self.cond:
+            self.overview_count += 1  # the panels fetch the other windows' lines again: they are said in the language now
+            self.cond.notify_all()
+            ready = self.initialized
+            if not ready:
+                self.backlog.append(notification)
+        if ready:
+            self.deliver(notification)
+        return True
+
     def watch(self, interval: float = 2.0) -> None:
         while True:
-            for check in (self.check_held, self.check_dialogs, self.check_unanswered, self.check_costs):
+            for check in (self.check_held, self.check_dialogs, self.check_unanswered, self.check_costs, self.check_language):
                 try:
                     check()
                 except Exception as exc:  # never let the watcher die
@@ -1125,13 +1202,13 @@ class ChatHub:
             stopper = self._stop_for(agent.name, now)
             if stopper:
                 self._log("refused", request=self._request_for(agent.name), chat_id=agent.name, pin=pin, tool=tool[:80], agent_id=agent_id,
-                          reason="사용자가 채팅창에서 중지를 누름" + ("" if stopper == agent.name else f" ({stopper})"))
+                          reason=T("사용자가 채팅창에서 중지를 누름") + ("" if stopper == agent.name else f" ({stopper})"))
                 return {"chat_id": agent.name, "stop": True, "by": stopper}
             worker = self.workers.get(agent.name)
             if agent_id and worker and worker["agent_id"] not in ("", agent_id) and not worker["stopped"] \
                     and now - worker["last"] <= LOCK_SECONDS:
                 self._log("refused", request=self._request_for(agent.name), chat_id=agent.name, pin=pin, tool=tool[:80], agent_id=agent_id,
-                          reason="다른 하위 세션(" + worker["agent_id"] + ")이 이 창에서 작업 중")
+                          reason=T("다른 하위 세션({agent})이 이 창에서 작업 중", agent=worker["agent_id"]))
                 return {"chat_id": agent.name, "busy": True, "other": worker["agent_id"]}
             if agent_id or worker is None:
                 self.workers[agent.name] = {"agent_id": agent_id, "last": now, "stopped": 0.0}
@@ -1221,7 +1298,7 @@ class ChatHub:
             if working:
                 entry["stopping"] = True
                 self._bump_progress(chat_id)
-            self._append(chat_id, {"kind": "notice", "text": "중지를 요청했어요. 지금 하던 동작 하나는 끝까지 갈 수 있어요."})
+            self._append(chat_id, {"kind": "notice", "text": T("중지를 요청했어요. 지금 하던 동작 하나는 끝까지 갈 수 있어요.")})
             meta = {"chat_id": chat_id, "app": app, "window": window, "agent": agent or "none", "stop": "requested"}
             if item and item.get("request"):
                 meta["request"] = item["request"]  # the supervisor's turn that sees to the stop is that request's doing too
@@ -1230,9 +1307,10 @@ class ChatHub:
                 meta["agent_id"] = worker["agent_id"]
             asked = " ".join(str((item or {}).get("text", "")).split())[:80]
             notification = {"jsonrpc": "2.0", "method": "notifications/claude/channel", "params": {
-                "content": "[claude-hand] 사용자가 이 채팅창에서 [중지]를 눌렀습니다" + (f': "{asked}"' if asked else "") +
-                           ". 이 요청으로 일하는 하위 세션의 다음 Unity·Blender 호출은 채널이 막습니다. 이 요청의 일을 더 맡기지 말고, "
-                           "아직 돌고 있는 하위 세션이 있으면 멈춘 뒤, 어디까지 했고 무엇이 남았는지 reply로 알리세요.",
+                "content": T("[claude-hand] 사용자가 이 채팅창에서 [중지]를 눌렀습니다{asked}"
+                             ". 이 요청으로 일하는 하위 세션의 다음 Unity·Blender 호출은 채널이 막습니다. 이 요청의 일을 더 맡기지 말고, "
+                             "아직 돌고 있는 하위 세션이 있으면 멈춘 뒤, 어디까지 했고 무엇이 남았는지 reply로 알리세요.",
+                             asked=f': "{asked}"' if asked else ""),
                 "meta": meta}}
             self._log("stop", request=(item or {}).get("request", ""), chat_id=chat_id)
             ready = self.initialized
@@ -1291,15 +1369,15 @@ class ChatHub:
     def _undo_text(label: str, results: list[dict]) -> str:
         """How undoing a request went, window by window, as one line for a chat panel."""
         if not results:
-            return f"'{label}' 요청은 다른 창에서 되돌릴 것이 없었어요."
+            return T("'{label}' 요청은 다른 창에서 되돌릴 것이 없었어요.", label=label)
         parts = []
         for result in results:
-            words = UNDO_WORDS.get(result["state"], UNDO_WORDS["failed"])
+            words = T(UNDO_WORDS.get(result["state"], UNDO_WORDS["failed"]))
             if result["state"] == "blocked" and result.get("top"):
-                words = f"그 뒤의 요청('{result['top']}')이 이 창을 바꿔서 건너뛰었어요. 그 창에서 먼저 되돌려 주세요"
+                words = T("그 뒤의 요청('{top}')이 이 창을 바꿔서 건너뛰었어요. 그 창에서 먼저 되돌려 주세요", top=result['top'])
             more = result.get("summary") if result["state"] == "undone" else result.get("detail") if result["state"] == "failed" else ""
             parts.append(f"{result['window']}: {words}" + (f" ({str(more).rstrip('.')})" if more else ""))
-        return f"'{label}' 요청 되돌리기: " + " / ".join(parts)
+        return T("'{label}' 요청 되돌리기: ", label=label) + " / ".join(parts)
 
     def undo_request(self, chat_id: str, request: str = "", skip=(), notify: bool = True) -> dict:
         """Undo a request in every window it changed: the panel's 되돌리기 for a request that reached other windows
@@ -1347,14 +1425,14 @@ class ChatHub:
                         item["points"].remove(result["chat_id"])
                     if result["state"] == "undone" and result["chat_id"] != chat_id:  # that window's own record
                         more = str(result.get("summary") or "")
-                        self._append(result["chat_id"], {"kind": "notice", "text": f"{self._window_name(chat_id)} 채팅창의 요청 "
-                                                                                    f"'{label}'을 여기서도 되돌렸어요." + (f" {more}" if more else "")})
+                        self._append(result["chat_id"], {"kind": "notice", "text": T("{window} 채팅창의 요청 '{label}'을 여기서도 되돌렸어요.",
+                                                                                     window=self._window_name(chat_id), label=label) + (f" {more}" if more else "")})
                 if self.history_dir is not None:
                     self._save_history(chat_id)
                 if notify:
                     self._append(chat_id, {"kind": "notice", "text": text})
                     if any(result["state"] == "undone" for result in results):  # the supervisor still counts on what is gone
-                        self.undo_notes[chat_id] = f"[사용자가 채팅창에서 되돌렸음: {text}]"
+                        self.undo_notes[chat_id] = T("[사용자가 채팅창에서 되돌렸음: {text}]", text=text)
                 self._bump_progress(chat_id)  # the panel's button no longer offers what went back
                 self._log("undo", request=key, chat_id=chat_id, text=eventlog.short(text))
         return {"ok": True, "request": key, "label": label, "results": results, "text": text}
@@ -1404,7 +1482,7 @@ class ChatHub:
             self.offers[offer_id] = {"chat_id": chat_id, "text": text}
             self._append(chat_id, {"kind": "protect_offer", "offer_id": offer_id, "text": text,
                                    "rule": {"kind": kind, "value": value, "lasting": bool(lasting)}})
-            self._log("protect", chat_id=chat_id, request=self._request_for(chat_id), text="제안: " + eventlog.short(text.splitlines()[0]))
+            self._log("protect", chat_id=chat_id, request=self._request_for(chat_id), text=T("제안: ") + eventlog.short(text.splitlines()[0]))
         return {"ok": True, "offer_id": offer_id}
 
     def protection_verdict(self, offer_id: str, behavior: str) -> bool:
@@ -1418,9 +1496,10 @@ class ChatHub:
                 return False
             chat_id, rule = offer["chat_id"], offer["text"].splitlines()[0]
             self._append(chat_id, {"kind": "protect_resolved", "offer_id": offer_id, "behavior": behavior})
-            note = f"[사용자가 제안된 보호 규칙을 {'추가했음' if behavior == 'added' else '추가하지 않았음'}: {rule}]"
+            note = T("[사용자가 제안된 보호 규칙을 추가했음: {rule}]", rule=rule) if behavior == "added" else \
+                T("[사용자가 제안된 보호 규칙을 추가하지 않았음: {rule}]", rule=rule)
             self.undo_notes[chat_id] = "\n".join(filter(None, [self.undo_notes.get(chat_id, ""), note]))
-            self._log("protect", chat_id=chat_id, text=("추가함: " if behavior == "added" else "추가 안 함: ") + eventlog.short(rule))
+            self._log("protect", chat_id=chat_id, text=(T("추가함: ") if behavior == "added" else T("추가 안 함: ")) + eventlog.short(rule))
         return True
 
     def protected(self, app: str, pin: str, tool: str, text: str, agent_id: str = "") -> dict | None:
@@ -1519,7 +1598,7 @@ class StdioMcp:
         elif method == "ping":
             self.send({"jsonrpc": "2.0", "id": msg_id, "result": {}})
         elif method == "tools/list":
-            self.send({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": [REPLY_TOOL, CONTEXT_TOOL, UNDO_TOOL, PROTECT_TOOL]}})
+            self.send({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": [said(tool) for tool in (REPLY_TOOL, CONTEXT_TOOL, UNDO_TOOL, PROTECT_TOOL)]}})
         elif method == "tools/call":
             self.send({"jsonrpc": "2.0", "id": msg_id, "result": self.call_tool(params)})
         elif method == "notifications/claude/channel/permission_request":
@@ -1541,9 +1620,9 @@ class StdioMcp:
                                                   lasting=args.get("lasting") not in (False, "false"), why=str(args.get("why") or ""))
             if not offered["ok"]:
                 return {"isError": True, "content": [{"type": "text", "text": "Not proposed: " + offered["reason"]}]}
-            return {"content": [{"type": "text", "text": "Proposed in that window's chat panel. It is not a rule yet: it holds once the "
+            return {"content": [{"type": "text", "text": T("Proposed in that window's chat panel. It is not a rule yet: it holds once the "
                                                          "user presses [추가] there. Tell the user so in your reply; you will hear "
-                                                         "what they chose with that panel's next message."}]}
+                                                         "what they chose with that panel's next message.")}]}
         if name == UNDO_TOOL["name"]:
             done = self.hub.undo_request(str(args.get("chat_id", "")), str(args.get("request") or ""), notify=False)
             if not done["ok"]:
@@ -1561,7 +1640,7 @@ class StdioMcp:
         changed = args.get("changed_windows")  # None from a session that knows the tool without it: the channel then guesses
         changed = [str(c) for c in changed] if isinstance(changed, list) else None
         if origin == "panel" and args.get("working") is None and self.hub.known_chat(chat_id) and self.hub.wants_working():
-            return {"isError": True, "content": [{"type": "text", "text": WORKING_ASK}]}
+            return {"isError": True, "content": [{"type": "text", "text": T(WORKING_ASK)}]}
         if not self.hub.reply(chat_id, clip(text, MAX_TEXT), origin, clip(str(args.get("request", "")), MAX_CONTEXT),
                               working=args.get("working") in (True, "true"), changed=changed):
             return {"isError": True, "content": [{"type": "text", "text": f"Unknown chat_id {chat_id!r}. Use the chat_id from the "
@@ -1715,7 +1794,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                 self._json(200, {"ok": True, **self.hub.window_undone(app, window, pin, request)})
                 return
             result = self.hub.start_undo(app, window, pin, request, skip_own=body.get("skip_own") is True)
-            self._json(200, {"ok": result["started"], **result, **({} if result["started"] else {"error": "그 요청이 바꾼 다른 창이 없습니다"})})
+            self._json(200, {"ok": result["started"], **result, **({} if result["started"] else {"error": T("그 요청이 바꾼 다른 창이 없습니다")})})
         else:
             self._json(404, {"ok": False, "error": "not found"})
 
@@ -1770,7 +1849,7 @@ def is_supervisor(env=os.environ) -> bool:
 
 CHANNEL_FLAG_RE = re.compile(r"--(dangerously-load-development-channels|channels)\b")
 HEALTH_CHECK_RE = re.compile(r"\smcp\s+(get|list)\b")  # `claude mcp get/list` starts each server once to show its status
-HEALTH_CHECK_REASON = "claude mcp get/list가 상태 확인용으로 띄운 실행"
+HEALTH_CHECK_REASON = N_("claude mcp get/list가 상태 확인용으로 띄운 실행")
 
 
 def process_table(run=subprocess.run, platform=sys.platform) -> dict[int, tuple[int, str]]:
@@ -1846,15 +1925,15 @@ def supervisor_decision(env=os.environ, table_fn=process_table, pid: int | None 
     except Exception as exc:  # never let the check stop the server from starting
         if is_supervisor(env):
             return True, "CLAUDE_HAND_SUPERVISOR=1 (start-supervisor)"
-        return False, f"채널 플래그 없이 연 세션으로 보임 (부모 프로세스 확인 실패: {exc})"
+        return False, T("채널 플래그 없이 연 세션으로 보임 (부모 프로세스 확인 실패: {exc})", exc=exc)
     if claude and HEALTH_CHECK_RE.search(claude):
         # Run inside the supervisor, `claude mcp get` passes CLAUDE_HAND_SUPERVISOR=1 on to this copy too.
         return False, HEALTH_CHECK_REASON
     if is_supervisor(env):
         return True, "CLAUDE_HAND_SUPERVISOR=1 (start-supervisor)"
     if claude and f"server:{SERVER_NAME}" in claude and CHANNEL_FLAG_RE.search(claude):
-        return True, "Claude Code가 이 서버를 채널로 불러옴"
-    return False, "채널 플래그 없이 연 Claude Code 세션 (감독 세션은 start-supervisor.cmd로 여세요)"
+        return True, T("Claude Code가 이 서버를 채널로 불러옴")
+    return False, T("채널 플래그 없이 연 Claude Code 세션 (감독 세션은 start-supervisor.cmd로 여세요)")
 
 
 SW_MINIMIZE = 6
@@ -1980,13 +2059,13 @@ def main(argv: list[str] | None = None) -> int:
     serving, reason = supervisor_decision()
     live = supervisor_running(home)
     if serving and live:
-        serving, reason = False, "다른 감독 세션이 이미 채팅창을 받고 있음"
+        serving, reason = False, T("다른 감독 세션이 이미 채팅창을 받고 있음")
     if not serving:
         # Same tools, no panels: messages only reach the session that has the channel.
-        log("passive:", reason)
+        log("passive:", T(reason))
         if reason != HEALTH_CHECK_REASON and not live:  # a status check or a second session keeps the real status
             try:
-                write_status(home, "passive", reason)
+                write_status(home, "passive", T(reason))
             except OSError:
                 pass
         mcp.serve()
@@ -1995,23 +2074,30 @@ def main(argv: list[str] | None = None) -> int:
     mcp.hub.events = eventlog.write
     mcp.hub.home = home
     protect.clear_session(home)  # the protection rules that were for the last run only ("이번만") are over
-    mcp.hub.use_history(home / "chat" / "history")
+    # The settings (the gear button of a chat panel, `claude_hand.py settings`) are read where they are used, so a
+    # change holds at once: the line of time and tokens, the pictures of other windows, the language.
+    mcp.hub.setting = lambda key: prefs.get(key, home=home)
+    mcp.hub.on_language = lambda: rewrite_installed(mcp.hub.agents_dir)
     mcp.hub.capture = lambda app, pin, path: capture_window(app, pin, path, PREVIEW_SIZE)
     mcp.hub.images_dir = home / "chat" / "images"
+    gone = mcp.hub.use_history(home / "chat" / "history", prefs.get("history_keep_days", home=home) or 0)
+    if gone:
+        log(f"chat history: {gone} messages older than the days kept were removed")
     mcp.hub.find_dialogs = lambda app, pin: waiting_dialogs(find_project(hash_=pin.rpartition("@")[2])) if app == "unity" else []
     # The tokens of each request are read from the supervisor's transcript: the one start-supervisor opened, until
-    # the supervisor's hook names it. "show_cost": false in config.json keeps the line out of the panels.
+    # the supervisor's hook names it.
     mcp.hub.find_transcript = lambda: session_transcript(str(read_user_config(home).get("supervisor_session") or ""))
-    mcp.hub.show_cost = read_user_config(home).get("show_cost", True) is not False
     threading.Thread(target=mcp.hub.watch, name="watch", daemon=True).start()
-    if sys.platform == "win32" and minimize_after_start(home):
+    if sys.platform == "win32":
         # Not at start: Claude Code may still be showing its development-channel confirmation in that window.
-        # The first tool call or permission request means the session is past it.
+        # The first tool call or permission request means the session is past it. Whether to is asked then.
         def minimize() -> None:
+            if not minimize_after_start(home):
+                return
             table = process_table()
             claude_pid = claude_ancestor_pid(table, os.getpid())
             if claude_pid and not minimize_console(console_owners(table, claude_pid)):
-                log("Claude Hand 창을 찾지 못해 최소화하지 않았습니다 (Windows Terminal 탭이면 그대로 둡니다)")
+                log(T("Claude Hand 창을 찾지 못해 최소화하지 않았습니다 (Windows Terminal 탭이면 그대로 둡니다)"))
         mcp.hub.on_first_use = lambda: threading.Thread(target=minimize, daemon=True).start()
     token = secrets.token_urlsafe(32)
     env_port = os.environ.get("CLAUDE_HAND_CHAT_PORT")
@@ -2026,7 +2112,7 @@ def main(argv: list[str] | None = None) -> int:
         httpd.shutdown()
         remove_server_file(server_file)
         try:
-            write_status(home, "stopped", "감독 세션이 종료됨")
+            write_status(home, "stopped", T("감독 세션이 종료됨"))
         except OSError:
             pass
     return 0

@@ -19,10 +19,10 @@ Supervisor session (Claude Code, the one you talk to)
  └─ exchange folder %USERPROFILE%\.claude-hand\exchange  (.unitypackage / .blend / .fbx + manifest, cleaned at startup after 30 days)
 ```
 
-> **1.0.0** (2026-11-24) · Checked on Windows with real Unity 6.3 and Blender 5.2, with the windows open and a real supervisor session. On macOS and Linux only the automated tests have been run.
+> **1.1.0** (2026-11-25) · Everything up to 1.0.0 was checked on Windows with real Unity 6.3 and Blender 5.2, with the windows open and a real supervisor session. What 1.1.0 adds (the settings window, the English interface, the lab) was checked with the automated tests, inside a Blender and a Unity run without a window, with open windows in a trial setup of its own (with a stand-in for the supervisor), and on 2026-11-26 with a real supervisor session. On macOS and Linux only the automated tests have been run.
 > What was checked and how is in the [test plan](docs/TEST-PLAN.md) and the [review notes](docs/REVIEW-2026-11-10.md) (both in Korean). What changed in each version is under [Changelog](#changelog).
 >
-> **The interface is in Korean.** The chat panels, the command output and the tool's own messages are Korean; this README gives each label with its meaning. You can write your requests in English. → [Interface language](#interface-language)
+> **The interface starts in Korean and has an English setting.** Press the gear button of a chat panel and choose **English**, or run `uv run tools/claude_hand.py settings language en`. This README shows the English interface. → [Interface language](#interface-language)
 
 ## What it does
 
@@ -34,6 +34,7 @@ Supervisor session (Claude Code, the one you talk to)
 - **Stop, overview, history.** Stop work in progress, see what the other windows are doing, and see what happened in a request and how much time and how many tokens it took (`status`, `trace`, `usage`).
 - **Protection rules.** Say "don't touch this" per window. Nobody relies on Claude remembering it: the call is blocked, or the change is undone, by the machinery. → [Protection rules](#protection-rules)
 - **Desktop app and mobile.** Watch and talk to the same session from the Claude desktop app and the mobile app. → [Watching and talking from the Claude desktop app](#watching-and-talking-from-the-claude-desktop-app)
+- **Settings window, English interface, lab.** With the gear button of a chat panel you turn features on and off, choose the interface language (Korean or English), and switch on the new features you want among those still being refined. → [Settings window](#settings-window)
 
 ## Contents
 
@@ -42,6 +43,7 @@ Supervisor session (Claude Code, the one you talk to)
 - [Installation](#installation)
 - [Daily use](#daily-use)
 - [Chatting in each window](#chatting-in-each-window)
+- [Settings window](#settings-window)
 - [Moving things between windows](#moving-things-between-windows)
 - [Watching and talking from the Claude desktop app](#watching-and-talking-from-the-claude-desktop-app)
 - [Updating](#updating)
@@ -54,37 +56,55 @@ Supervisor session (Claude Code, the one you talk to)
 
 ## Interface language
 
-claude-hand was written in Korean and has so far been used only in Korean.
+claude-hand was written in Korean. Since 1.1.0 the interface comes in English too, and a new install starts in Korean until you switch.
 
-- **In Korean:** the labels and buttons of the chat panels, the lines the tool itself writes into the chat (progress, time and tokens, refusals), the output of the `claude_hand.py` commands, the instructions given to Claude (`prompts/` and the skills), and the documents under `docs/`.
-- **Your requests can be in English.** Nothing in the code looks at the language you type in; the request goes to Claude as it is. English requests have not been tried with open windows yet, so this part is unverified.
-- The phrases this README quotes in English ("Set up claude-hand", "Start Claude Hand") are translations of the Korean phrases the skills were written for. The Korean original is given next to each.
+**Switching.** Press the gear button of a chat panel (Unity: at the top right of the chat window; Blender: at the right end of the Claude Hand Chat panel's header) and choose **English** in the row **언어 · Language**. Or run:
 
-The labels you will meet most often:
+```powershell
+uv run tools/claude_hand.py settings language en
+```
 
-| Label | Meaning |
+It applies at once to every open window, the commands and a running Claude Hand; nothing is restarted.
+
+- **In English then:** the labels and buttons of the chat panels, the lines the tool itself writes into the chat (progress, time and tokens, refusals), the output of the `claude_hand.py` commands, and what the guard hooks tell Claude.
+- **Still Korean:** the instructions given to Claude (`prompts/` and the skills), unless the lab feature **English instructions for Claude** is turned on. With Korean instructions and an English interface, a table of the English button names is added to them, so Claude names buttons as you see them. The documents under `docs/` are Korean.
+- **Your requests can be in any language.** Claude answers in the language you write in.
+- **Run with a real supervisor session.** With the English interface Claude answered in the language the request was written in and named the buttons as the interface shows them (`Undo`, `Release`); see the 1.1.0 entry under [Changelog](#changelog).
+
+The other settings, and the details of this one, are under [Settings window](#settings-window).
+
+The Korean labels and their English, for reading screenshots and the Korean documents:
+
+| Korean | English |
 |---|---|
 | **보내기** | Send |
-| **선택 항목 함께** (Unity: **선택 항목 함께 보내기**) | Send the current selection along with the message |
-| **되돌리기** | Undo (what the last request changed) |
+| **선택 항목 함께 보내기** (Blender: **선택 항목 함께**) | Send the selection along (Blender: With selection) |
+| **되돌리기** | Undo |
 | **중지** | Stop |
-| **허용** / **거부** | Allow / Deny (a permission request) |
+| **허용** / **거부** | Allow / Deny |
 | **Claude Hand 시작** | Start Claude Hand |
-| **전체 복사** | Copy the whole conversation |
+| **전체 복사** | Copy all |
 | **다른 창** | Other windows |
-| `작업 중` · `답 기다림` · `대화상자로 멈춤` · `한가함` | Working · Waiting for the reply · Stopped at a dialog · Idle |
+| **크게 보기** | View larger |
+| **한글** | Text box (Blender: opens a Windows text box, for typing with an IME) |
+| `작업 중` · `중지하는 중` · `답 기다림` · `대화상자로 멈춤` · `한가함` | Working · Stopping · Waiting for the reply · Stopped at a dialog · Idle |
 | **보호** | Protect (the protection-rules section of the panel) |
-| **선택한 것 보호** (Blender: **선택한 오브젝트 보호**) | Protect the selection |
-| **이 창 보기만** | Look only: Claude may read this window but not change it |
-| **이 창 잠금** | Lock this window: no work is handed to it at all |
-| **동작 금지** | Forbidden actions |
-| **이번만** | This run only (until Claude Hand is closed) |
-| **추가** / **취소** | Add / Cancel (a rule Claude proposed) |
-| **풀기** | Release (remove a rule) |
+| **선택한 것 보호** (Blender: **선택한 오브젝트 보호**) | Protect the selection (Blender: Protect the selected objects) |
+| **이 창 보기만** | Look only |
+| **이 창 잠금** | Lock this window |
+| **동작 금지** | Forbid an action |
+| **이번만** | This run only |
+| **추가** / **취소** | Add / Cancel |
+| **풀기** | Release |
+| `[잠김]` / `[열림]` | `[locked]` / `[open]` |
 | **Unity로 보낸 모델** | Models sent to Unity |
 | **선택한 오브젝트 보내기** | Send the selected objects |
 | **이 파일로 잇기** / **선택한 오브젝트로 잇기** | Link to this file / Link to the selected object |
-| **한글** | Opens a Windows text box for typing Korean (not needed for English) |
+| **새로 고침** | Refresh |
+| **설정** | Settings |
+| **기능 켜고 끄기** | Features |
+| **실험실** | Lab |
+| `켜짐` / `꺼짐` | On / Off |
 
 ## Requirements
 
@@ -113,7 +133,7 @@ Unlike a personal account (Pro, Max), **the organization's settings have to be s
   | Subagent and skill restrictions (`agents`, `skills` in `strictPluginOnlyCustomization`) | The window subagents in `~/.claude/agents` and the supervisor skill |
   | Permission-rule restrictions (`allowManagedPermissionRulesOnly`) | The automatic allow for the reply tools that `chat-setup` adds |
 
-  The documentation does not say what happens to hooks written in a subagent definition under a hook restriction. In an organization with such restrictions, try one window first: send a request from the chat panel, then run `uv run tools/claude_hand.py trace`. If it shows a `동작` (action) line and `(이 요청의 되돌리기 지점)` (this request's undo point), the hooks are running.
+  The documentation does not say what happens to hooks written in a subagent definition under a hook restriction. In an organization with such restrictions, try one window first: send a request from the chat panel, then run `uv run tools/claude_hand.py trace`. If it shows an `action` line and `(this request's undo point)`, the hooks are running.
 
 Also:
 
@@ -132,7 +152,7 @@ All you need is **Claude Code** and this repository.
    cd claude-hand
    ```
 2. Open Claude Code in that folder (`claude`). In the desktop app, open this folder.
-3. Say **"Set up claude-hand"** (Korean: "claude-hand 세팅해줘"), or run the skill by name with `/claude-hand-setup`.
+3. Say **"Set up claude-hand"**, or run the skill by name with `/claude-hand-setup`. The Korean phrase "claude-hand 세팅해줘" works as well.
 
 The `claude-hand-setup` skill then works through these steps.
 
@@ -206,20 +226,20 @@ uv run tools/claude_hand.py selftest    # whether it really works (about a minut
   ```powershell
   uv run tools/claude_hand.py selftest --unity-project "C:\path\to\project"
   ```
-  It opens Unity without a window, receives a model Blender really exported, replaces a model that arrives again in place, and checks undo, follow-on-save and the protection rules (72 checks). It works in a new scene that is never saved and deletes the assets it made when it finishes. Copies of the files from before a replacement, and the test assets removed while checking undo, stay in `Library/ClaudeHand/replaced/` and `removed/` (the latest 10 of each).
+  It opens Unity without a window, receives a model Blender really exported, replaces a model that arrives again in place, and checks undo, follow-on-save, the protection rules, and the settings and the interface language as well (79 checks). It works in a new scene that is never saved and deletes the assets it made when it finishes. Copies of the files from before a replacement, and the test assets removed while checking undo, stay in `Library/ClaudeHand/replaced/` and `removed/` (the latest 10 of each).
 
 ## Daily use
 
 1. Just type in the chat panel in Unity (**Window > Claude Hand > Chat**) or Blender (3D viewport `N` > **Claude Hand**).
    - If Claude Hand is not running, the chat panel starts it and sends your message once it is connected.
-   - You can also start it first with the **Claude Hand** icon on the desktop or the **[Claude Hand 시작]** (Start Claude Hand) button in the chat panel.
+   - You can also start it first with the **Claude Hand** icon on the desktop or the **[Start Claude Hand]** button in the chat panel.
 2. A black Claude Hand window appears. **Every time it starts** it shows the development-channel warning: choose "I am using this for local development" and press Enter. This is the security confirmation Claude Code always asks for a channel you built yourself, so claude-hand does not answer it for you, and on a personal account it cannot be turned off.
 3. Once the session starts working, that window minimizes itself (Windows). **Do not close it.** Closing it stops the chat.
 
 That is all.
 
 - Opening a new project or file needs nothing extra. The first message you send from it creates that window's subagent.
-- Double-clicking the icon again only tells you it is already running (`이미 실행 중`); a second one does not open.
+- Double-clicking the icon again only tells you `Claude Hand is already running.`; a second one does not open.
 - Each start continues the same conversation. To start a fresh one: `uv run tools/claude_hand.py new-session`.
 
 ## Chatting in each window
@@ -241,14 +261,14 @@ Blender panel ────┼─ channel ─ supervisor ─┼─ blender-props
 - **Your selection goes along.** The message carries the objects you have selected and the scene they are in, so you can say "duplicate this". A checkbox turns this off.
 - **Work that needs another window is asked from your window too.** Say "bring Rock from Blender's props.blend" in a Unity window; the supervisor uses both subagents and reports the result in that Unity window.
 - **A picture of the other window is attached.** If you said "send it to Unity" in a Blender window, the current view of that Unity window appears under the answer. The channel takes it directly, so it costs no tokens, and no picture is attached for a window that was only looked at.
-- **Buttons appear when permission is needed.** When Claude asks for permission to run a tool, **허용/거부** (Allow/Deny) appear in the chat panel.
+- **Buttons appear when permission is needed.** When Claude asks for permission to run a tool, **Allow / Deny** appear in the chat panel.
 - **You are told when the answer arrives.** If an answer or a permission request arrives while you are in another program, the taskbar button flashes and the Unity chat tab shows the unread count in its title.
 - **A missing answer is chased.** If the work finished but no answer came, the channel reminds the supervisor once after a minute and shows in the chat panel that it did.
 - **A dialog that stops Unity is reported at once (Windows).** If Unity stops at a dialog such as "Save the scene?", its text and buttons are reported to the supervisor and the chat panel without waiting for a timeout. Which button to press is your decision.
 
 ### Undo and Stop
 
-When the work is done, a **되돌리기** (Undo) button appears above the input box. It goes back to just before that request started.
+When the work is done, an **Undo** button appears above the input box. It goes back to just before that request started.
 
 - It uses Unity's Undo and Blender's undo history.
 - In Unity it also puts back the **files** that changed while the request was working: edited scripts and assets return to what they were, created ones leave the project, deleted ones come back.
@@ -256,11 +276,11 @@ When the work is done, a **되돌리기** (Undo) button appears above the input 
 - A request that only asked a question has nothing to undo, so it is skipped and the button points at the last request that changed something.
 - You can also just say "undo what you just did".
 
-While work is in progress there is a **중지** (Stop) button next to the "작업 중" (working) line. It blocks the subagents working on that request from their next action on (the one action already running finishes), and the supervisor tells you how far it got. What was done is not undone; press **되돌리기** afterwards for that.
+While work is in progress there is a **Stop** button next to the `Working` line. It blocks the subagents working on that request from their next action on (the one action already running finishes), and the supervisor tells you how far it got. What was done is not undone; press **Undo** afterwards for that.
 
 ### Seeing what the other windows are doing
 
-The **다른 창** (other windows) line above the input box lists the other windows that have a chat panel open, one line each: `작업 중` (working; "○○의 요청" if it is working on a request from another window), `답 기다림` (waiting for the reply), `대화상자로 멈춤` (stopped at a dialog). Idle windows share one line. It shows what the channel already knows, so it costs no tokens.
+The **Other windows** line above the input box lists the other windows that have a chat panel open, one line each: `Working` ("request of ○○" if it is working on a request from another window), `Waiting for the reply`, `Stopped at a dialog`. Idle windows share one line. It shows what the channel already knows, so it costs no tokens.
 
 There is a command too. It adds the elapsed time and the action in progress.
 
@@ -268,12 +288,12 @@ There is a command too. It adds the elapsed time and the action in progress.
 uv run tools/claude_hand.py status
 ```
 ```
-Level (Unity) · 작업 중 · 1분 15초 · props의 요청 · ch_import_model · “의자를 Level로 보내줘”
-props (Blender) · 답 기다림 · 1분 20초 · “의자를 Level로 보내줘”
-한가함: MyGame (Unity)
+Level (Unity) · Working · 1m 15s · request of props · ch_import_model · “send the chair to Level”
+props (Blender) · Waiting for the reply · 1m 20s · “send the chair to Level”
+Idle: MyGame (Unity)
 ```
 
-Read as: Level has been working for 1 min 15 s on a request from props and is running `ch_import_model`; props has been waiting 1 min 20 s for the reply to "send the chair to Level"; MyGame is idle (`한가함`).
+Read as: Level has been working for 1 min 15 s on a request from props and is running `ch_import_model`; props has been waiting 1 min 20 s for the reply to its request; MyGame is idle.
 
 ### Seeing what happened in a request
 
@@ -285,79 +305,79 @@ uv run tools/claude_hand.py trace --request <number> # the request with a number
 
 Every request sent from a chat panel gets a number, and what follows is written line by line to `%USERPROFILE%\.claude-hand\logs\<date>.jsonl`. Use it afterwards to answer "why was the reply late" or "where did it get stuck".
 
-- What is recorded: which window the supervisor handed work to (`맡김`), the subagents' tool calls, the calls the guard and the protection rules blocked and why, whether each `ch_*` call succeeded and how long it took, when Stop was pressed, when a subagent stopped, the reply, and on the last line the time and tokens.
+- What is recorded: which window the supervisor handed work to (`handed`), the subagents' tool calls, the calls the guard and the protection rules blocked and why, whether each `ch_*` call succeeded and how long it took, when Stop was pressed, when a subagent stopped, the reply, and on the last line the time and tokens.
 - What another window did is recorded under the number of the chat-panel request that caused it.
 - Only the first 200 characters of messages and replies are kept, and files older than two weeks are deleted at startup.
 - Work asked from the desktop app is recorded without a request number and does not appear in the list.
 
 ### Time and tokens per request
 
-A line is added under the result: `이 요청: 32초 · 동작 2번 · 토큰 출력 2.9천 · 새 입력 4.5천 · 다시 읽기 66만` (this request: 32 s · 2 actions · tokens: output 2.9K · new input 4.5K · re-read 660K). It is the sum for the supervisor and the windows that worked on the request. It appears a few seconds after the reply, when the supervisor finishes that turn. The numbers are read from the transcript Claude Code keeps, so showing them costs no extra tokens. The Korean units are `천` = thousand and `만` = ten thousand.
+A line is added under the result: `This request: 32s · 2 actions · tokens output 2.9k · new input 4.5k · read again 660k`. It is the sum for the supervisor and the windows that worked on the request. It appears a few seconds after the reply, when the supervisor finishes that turn. The numbers are read from the transcript Claude Code keeps, so showing them costs no extra tokens.
 
 ```powershell
 uv run tools/claude_hand.py usage             # time, actions and tokens for each request in the last two days, with totals
 uv run tools/claude_hand.py usage --days 7    # a week (with a total per day)
 ```
 ```
-11-23 14:32:41  unity-hand-test          32초 · 동작 2번 · 출력 2.9천 · 새 입력 4.5천 · 다시 읽기 66만  "빨간 큐브 하나 만들어줘"
-11-23 14:40:02  blender-test-blender     1분 9초 · 동작 8번 · 출력 6.4천 · 새 입력 9.7만 · 다시 읽기 157만  "의자를 고쳐서 Unity로 보내줘"
+11-23 14:32:41  unity-hand-test          32s · 2 actions · output 2.9k · new input 4.5k · read again 660k  "make a red cube"
+11-23 14:40:02  blender-test-blender     1m 9s · 8 actions · output 6.4k · new input 97k · read again 1.6M  "fix the chair and send it to Unity"
 
-합계: 요청 2개 · 기다린 시간 1분 41초 · 출력 9.3천 · 새 입력 10만 · 다시 읽기 223만
-  감독                     API 9번 · 출력 2.6천 · 새 입력 7.1만 · 다시 읽기 101만
-  blender-test-blender     API 7번 · 출력 5.2천 · 새 입력 2.6만 · 다시 읽기 84만
-  unity-hand-test          API 4번 · 출력 1.5천 · 새 입력 4.3천 · 다시 읽기 38만
+Total: 2 requests · waited 1m 41s · output 9.3k · new input 100k · read again 2.2M
+  supervisor               API 9 calls · output 2.6k · new input 71k · read again 1.0M
+  blender-test-blender     API 7 calls · output 5.2k · new input 26k · read again 840k
+  unity-hand-test          API 4 calls · output 1.5k · new input 4.3k · read again 380k
 ```
 
-- **Time** (`초`, `분`) runs from sending in the chat panel to the result arriving. **Actions** (`동작`) are the number of Unity/Blender tool calls the subagents made. `합계` is the total and `감독` is the supervisor.
-- **Output** (`출력`) is tokens Claude wrote, **new input** (`새 입력`) is tokens read for the first time (including what was newly written to the cache), and **re-read** (`다시 읽기`) is tokens read back from the cache. Re-reads are most of the total and much cheaper, so they are shown separately rather than added in.
-- A request sent after a long pause finds the cache cold and reads the conversation afresh, so `새 입력` jumps by tens of times. That is the place to look when cutting cost.
+- **Time** runs from sending in the chat panel to the result arriving. **Actions** are the number of Unity/Blender tool calls the subagents made. `Total` is the sum, and `supervisor` is the supervisor session.
+- `output` is tokens Claude wrote, `new input` is tokens read for the first time (including what was newly written to the cache), and `read again` is tokens read back from the cache. Tokens read again are most of the total and much cheaper, so they are shown separately rather than added in.
+- A request sent after a long pause finds the cache cold and reads the conversation afresh, so `new input` jumps by tens of times. That is the place to look when cutting cost.
 - Nothing is converted to dollars (it means something different on each plan).
-- `usage` works with Claude Hand closed. To turn off the line in the chat panel, put `"show_cost": false` in `%USERPROFILE%\.claude-hand\config.json` and restart Claude Hand. The log and `usage` still keep the numbers.
+- `usage` works with Claude Hand closed. The line in the chat panel is turned off with **Time and token line for each request** in the [Settings window](#settings-window) (it applies at once). The log and `usage` still keep the numbers.
 
 ### Letting the model in Unity follow your saves
 
 When you refine a model in Blender while looking at it in Unity, you do not have to say "send it again" after every change.
 
-1. Send it once the usual way ("send the chair to Unity"). Or, in the **Unity로 보낸 모델** (models sent to Unity) section at the bottom of the Claude Hand panel in Blender, select the objects and press **[선택한 오브젝트 보내기 → project name]** (send the selected objects). This button sends directly, without Claude, and turns following on as well.
+1. Send it once the usual way ("send the chair to Unity"). Or, in the **Models sent to Unity** section at the bottom of the Claude Hand panel in Blender, select the objects and press **[Send the selected objects → project name]**. This button sends directly, without Claude, and turns following on as well.
 2. Turn following on. Tick that model in the same section, or say "update the chair in Unity every time I save".
 3. From then on, **every time you save** in Blender (Ctrl+S) the model in Unity is replaced in place about a second later. Whatever is placed in scenes and prefabs takes the new shape where it stands.
 
 - **Claude is not involved.** Blender sends to Unity directly, so it costs no tokens and works with Claude Hand closed. Unity must be open; it may be in the background.
 - **Nothing is sent when nothing changed.** If you edit only other objects and save, Unity stays as it is.
-- **One line is left only when something changed** (`저장 → hand_test: Chair 반영`, "saved → hand_test: Chair updated"). On further saves the line does not multiply; it changes to `3번째` (3rd).
+- **One line is left only when something changed** (`Save → hand_test: Chair updated`). On further saves the line does not multiply; it changes to `#3`.
 - **Whether a model follows is recorded on the Unity side** (in the model's `.meta`). It disappears with the model, and giving the `.blend` to someone else does not send anything to their Unity.
-- **Renaming is fine.** The name the object was sent under stays on it as a custom property (`claude_hand_sent_as`). If you duplicate the object and rename both, there is no telling which one it is, and the panel asks (**[선택한 오브젝트로 잇기]**, link to the selected object).
-- **Save As is fine** (Save Copy is not). If you moved or renamed the file in Explorer, the panel shows "다른 파일에서 온 것으로 적혀 있음" (recorded as coming from another file); press **[이 파일로 잇기]** (link to this file).
+- **Renaming is fine.** The name the object was sent under stays on it as a custom property (`claude_hand_sent_as`). If you duplicate the object and rename both, there is no telling which one it is, and the panel asks (**[Link to the selected object]**).
+- **Save As is fine** (Save Copy is not). If you moved or renamed the file in Explorer, the panel shows "recorded as coming from another file"; press **[Link to this file]**.
 - **Saves made while Unity was closed** are caught up once, when Unity opens or when that `.blend` is opened again.
-- **It is not something Undo covers**, because it is not a request. The model in Unity follows the last saved `.blend`. Press **되돌리기** in Blender and the undone shape goes to Unity again. A model first sent with the panel's send button can be removed with **되돌리기** in the Unity chat panel.
+- **It is not something Undo covers**, because it is not a request. The model in Unity follows the last saved `.blend`. Press **Undo** in Blender and the undone shape goes to Unity again. A model first sent with the panel's send button can be removed with **Undo** in the Unity chat panel.
 - To turn it off, untick it or say "stop updating the chair in Unity".
 
 ### Protection rules
 
 You can decide, per window, what must not be changed. Notes (`NOTES.md`) are only something Claude reads and tries to respect; protection rules are **enforced by the machinery, which blocks the call or undoes the change.**
 
-**Setting them.** Use the **보호** (Protect) section of the Unity chat panel and the Blender panel.
+**Setting them.** Use the **Protect** section of the Unity chat panel and the Blender panel.
 
 | Button | Meaning |
 |---|---|
-| **[선택한 것 보호]** (protect the selection) | The selected objects and everything under them. In Unity, also assets and folders selected in the Project window |
-| **[이 창 보기만]** (look only) | Claude may only read this window |
-| **[이 창 잠금]** (lock this window) | No work is handed to this window at all |
-| **동작 금지** (forbidden actions) | Unity: saving the scene, deleting assets, play mode. Blender: saving the .blend |
+| **[Protect the selection]** (Blender: **[Protect the selected objects]**) | The selected objects and everything under them. In Unity, also assets and folders selected in the Project window |
+| **[Look only]** | Claude may only read this window |
+| **[Lock this window]** | No work is handed to this window at all |
+| **Forbid an action** | Unity: saving the scene, deleting assets, play mode. Blender: saving the .blend |
 
-- Add a rule with **이번만** (this run only) ticked and it lasts until Claude Hand is closed. Unticked, it is written to the project (`ClaudeHand/protect.json`) or next to the .blend (`<name>.claude-hand.protect.json`) and stays.
-- You can also say it: "don't touch Hero", "leave Assets/Art alone", "only look at this window". Claude **proposes** the rule, and it becomes a rule only when you press **[추가]** (Add) in the chat panel.
-- **Only you can release a rule.** Press **[풀기]** (Release) on its line in the Protect section. Claude has no tool that edits or removes rules.
-- The state is shown in words, not colour (`[잠김]` locked / `[열림]` open in the section title; a padlock icon in Blender).
+- Add a rule with **This run only** ticked and it lasts until Claude Hand is closed. Unticked, it is written to the project (`ClaudeHand/protect.json`) or next to the .blend (`<name>.claude-hand.protect.json`) and stays.
+- You can also say it: "don't touch Hero", "leave Assets/Art alone", "only look at this window". Claude **proposes** the rule, and it becomes a rule only when you press **[Add]** in the chat panel.
+- **Only you can release a rule.** Press **[Release]** on its line in the Protect section. Claude has no tool that edits or removes rules.
+- The state is shown in words, not colour (`[locked]` / `[open]` in the title of the Protect section; a padlock icon in Blender).
 
 **When a rule is hit.**
 
-1. A subagent reads the rules when it starts work. It leaves the protected things out, or does nothing and answers that you should press [풀기] in the Protect section and ask again.
+1. A subagent reads the rules when it starts work. It leaves the protected things out, or does nothing and answers that you should press [Release] in the Protect section and ask again.
 2. A call that would touch them anyway is **blocked before it runs**: a tool that edits a protected asset, a call that names a protected object, a forbidden action, a changing call in a look-only window.
 3. In Unity, saving, deleting and moving a protected asset is **refused by Unity itself**, whatever code attempts it.
 4. If something protected changed all the same, it is noticed right after the call and **everything that request did in that window is undone.**
 
-The chat panel shows one line: `보호 규칙이 막았어요: …` (a protection rule blocked this) or `보호된 Hero (자리)이(가) 바뀌어 이 요청이 이 창에 한 일을 되돌렸어요` (protected Hero (position) changed, so what this request did in this window was undone).
+The chat panel shows one line: `A protection rule stopped it: …` or `Protected Hero (position) was changed, so what this request did in this window was undone`.
 
 **Using** a protected asset is allowed (placing a protected prefab in the scene, putting a protected material on another object). What is blocked is changing the asset itself.
 
@@ -380,6 +400,58 @@ Good to know:
 - The channel server takes chat on one of two conditions: the mark passed by `start-supervisor` (`CLAUDE_HAND_SUPERVISOR=1`) is present, or the Claude Code that started it loaded this server as a channel.
 - The chat panels and the channel talk only inside your PC (127.0.0.1), and only between programs that know the token. The token is in `%USERPROFILE%\.claude-hand\chat\server.json`. No firewall rule is needed; if a firewall prompt appears you do not have to allow it.
 - `chat-setup` creates `.mcp.json` (the channel registration) and `.claude/settings.local.json` (automatic allow for the reply and current-context tools; a block on the tools that would let the supervisor operate Unity or Blender directly) in this folder. Existing content is kept and neither file goes into git. It also starts the channel server once to check it (the first time, uv may be slow because it downloads Python).
+
+## Settings window
+
+Press the **gear button** of a chat panel and the settings window opens. In Unity the button is at the top right of the chat window; in Blender it is at the right end of the header of the Claude Hand Chat panel. The window has two tabs, **Features** and **Lab**.
+
+### Features
+
+| Setting | What it does | A change applies |
+|---|---|---|
+| **언어 · Language** | The text of the interface, in Korean or English | At once |
+| **Time and token line for each request** | The `This request: …` line under the result | At once |
+| **Pictures of the other windows a request changed** | The picture of another window attached under the result when the request changed that window | At once |
+| **Blink the taskbar button when an answer comes** | The notice of an answer or a permission request that came while you were in another program (Windows) | At once |
+| **Show in the Claude desktop app (Remote Control)** | Watching the session from the desktop app and mobile | From the next start |
+| **Minimize the Claude Hand window by itself** | Minimizing the black Claude Hand window once the session starts working (Windows) | From the next start |
+| **Days to keep the chat history** | How many days the earlier conversation shown again in the chat panels, and its pictures, are kept. 0: never removed by date (the newest 100 items of each window) | From the next start |
+| **Days to keep transfer files** | How many days the copies of transferred files left in the exchange folder are kept. 0: never removed | From the next start |
+
+- **The state is shown in words**: `On` · `Off`, `30 days`, `never removed`. A setting marked `*` applies from the next start of Claude Hand.
+- **Written in one place.** The settings are in `%USERPROFILE%\.claude-hand\config.json`, and Unity, Blender, the channel, the commands and the guard all read that file again each time they use it. A change made in one window shows in the other windows at once, and Claude Hand does not have to be restarted (except for the four that say "From the next start" in the table).
+- **What has no off switch:** the guard, the protection rules, the undo points.
+- **Send the selection along** (Blender: **With selection**) is chosen per message, so it stays next to the Send button.
+
+### Interface language setting
+
+Choose **English** and the text of the chat panels and the Blender panel, the lines the channel writes into the chat, the output of the `claude_hand.py` commands and the reasons for refused calls come out in English. Until you choose it, everything is in Korean as before. You can write your requests in any language, and Claude answers in the language you write in.
+
+- **It applies to a running Claude Hand at once.** The channel sends the supervisor a notice that the interface language changed, with a table of the button names, and the subagent definitions and the supervisor skill are written again in that language.
+- Lines already in a chat panel stay in the language they were written in.
+- **The instructions given to Claude (`prompts/`) stay Korean.** While the interface is English, a table of the English button names is added at the end of the instructions, so Claude names buttons as the interface shows them. Giving the instructions themselves in English is in the lab, below.
+- The documents under `docs/` are in Korean.
+
+A summary, and the Korean labels next to their English, are under [Interface language](#interface-language).
+
+### Lab
+
+This is where new features arrive first. A feature here is **used only once you turn it on**; when it has been refined in use and becomes a regular feature, it leaves the lab. What is there now:
+
+| Feature | Since | What it does |
+|---|---|---|
+| **English instructions for Claude** | 1.1.0 | With the language set to English, the instructions given to Claude (subagents, supervisor rules) are given in their English edition too (`prompts/en/`). It is a line-by-line translation of the Korean edition and has not been refined in real work yet. It applies from the next start. |
+
+### Changing settings from the command line
+
+```powershell
+uv run tools/claude_hand.py settings                          # the settings and the lab features, with their current values
+uv run tools/claude_hand.py settings language en              # the interface in English (ko: in Korean)
+uv run tools/claude_hand.py settings history_keep_days 30     # keep the chat history for 30 days
+uv run tools/claude_hand.py settings lab english_prompts on   # turn a lab feature on
+```
+
+The older commands (`remote-control on|off`, `minimize on|off`, `clean-exchange --keep-days N`) still work and change the same settings.
 
 ## Moving things between windows
 
@@ -404,8 +476,8 @@ By default Claude Hand opens with **Remote Control** of Claude Code. There is on
 - **"Claude Hand"** appears in the session list of the **Code tab of the Claude desktop app** (and claude.ai/code, and the mobile app). You can watch and talk there.
 - Subagents running in the background are visible too, and you can stop them from there.
 - You can say things like "send the selection to Blender". Unity and Blender keep Claude Hand informed of what is selected, so the supervisor finds the target.
-- Work asked from the desktop app is also shown in that window's chat panel, marked **"데스크톱 앱에서"** (from the desktop app).
-- When Claude Hand is not running, say **"Start Claude Hand"** (Korean: "Claude Hand 켜줘") in any Code-tab session of the desktop app. When the black window appears, answer its confirmation and move to "Claude Hand" in the session list.
+- Work asked from the desktop app is also shown in that window's chat panel, marked **"From the desktop app"**.
+- When Claude Hand is not running, say **"Start Claude Hand"** in any Code-tab session of the desktop app. When the black window appears, answer its confirmation and move to "Claude Hand" in the session list.
 
 Good to know:
 
@@ -414,7 +486,7 @@ Good to know:
 - On Team and Enterprise accounts the organization has to turn Remote Control on. → [Team and Enterprise accounts](#team-and-enterprise-accounts)
 - When the conditions are not met (API key, Bedrock and so on), Claude Hand starts without Remote Control and shows the reason in its window. The chat panels work as usual. `/status` in the Claude Hand window shows how you are logged in.
 
-Settings:
+These settings are in the [Settings window](#settings-window), and commands change them too.
 
 ```powershell
 uv run tools/claude_hand.py remote-control off   # turn off watching from the desktop app (on to turn it back on)
@@ -430,7 +502,7 @@ uv run tools/claude_hand.py update     # bring the subagents, supervisor skill, 
 ```
 
 - Then restart Claude Hand. Blender has to be reopened to use the new add-on. A Unity project that has Claude Hand Tools by folder path compiles the new package when you reopen it or return to its window.
-- With the setup skill: **after `git pull`, restart Claude Code, then** say "continue the setup" (Korean: "세팅 이어서 해줘"). A skill is read when the session starts, so a session opened before the pull follows the old steps.
+- With the setup skill: **after `git pull`, restart Claude Code, then** say "continue the setup". A skill is read when the session starts, so a session opened before the pull follows the old steps.
 - `update` also cleans up registrations left by earlier versions. A channel that an old `chat-setup` registered at local scope is used ahead of the new `.mcp.json` and blocks the chat.
 - What changed in the version you received is under [Changelog](#changelog).
 
@@ -440,15 +512,16 @@ uv run tools/claude_hand.py update     # bring the subagents, supervisor skill, 
 |---|---|
 | `.claude/skills/claude-hand-setup/` | The first-time setup skill. Available as soon as you open Claude Code in this folder. |
 | `skills/orchestrator/` | The rules (a skill) the supervisor session follows day to day. `sync` installs it to `~/.claude/skills/claude-hand/`. |
-| `prompts/` | The source text of the instructions given to Claude: for the subagents (`unity-subagent.md`, `blender-subagent.md`) and the supervisor's rules for the chat panels (`chat-rules.md`). After editing them, reinstall with `update` and restart Claude Hand. |
-| `tools/claude_hand.py` | The commands. Creating subagents (`list`, `sync`), setup (`doctor`, `selftest`, `update`, `unity-install`, `unity-open`, `blender-open`, `chat-setup`, `blender-install-chat`, `shortcut`), settings (`mode`, `remote-control`, `minimize`, `new-session`), viewing (`status`, `trace`, `usage`, `chat-status`), cleaning (`clean-exchange`). |
+| `prompts/` | The source text of the instructions given to Claude: for the subagents (`unity-subagent.md`, `blender-subagent.md`) and the supervisor's rules for the chat panels (`chat-rules.md`). After editing them, reinstall with `update` and restart Claude Hand. `en/` is the English edition (lab), and `glossary-en.md` is the heading of the table of names added at the end of the Korean instructions while the interface is English. |
+| `settings/catalog.json` | The list of the settings and lab features the settings window shows (name, description, default, when a change applies). Python, Unity and Blender read this one file. |
+| `tools/claude_hand.py` | The commands. Creating subagents (`list`, `sync`), setup (`doctor`, `selftest`, `update`, `unity-install`, `unity-open`, `blender-open`, `chat-setup`, `blender-install-chat`, `shortcut`), settings (`settings`, `mode`, `remote-control`, `minimize`, `new-session`), viewing (`status`, `trace`, `usage`, `chat-status`), cleaning (`clean-exchange`). |
 | `tools/guard.py` | The subagents' guard (a hook). Before a call it blocks calls aimed at another target and calls that break a protection rule, shows the calls it lets through on the working line of the chat panel, places the undo point before the first change of a request, and copies the files a Unity call names beforehand. After a call it tells the subagent what the window blocked or undid. It is kept as a small separate file that uses only the standard library, so a mistake in another file cannot stop the guard. |
-| `tools/supervisor_hook.py` | The supervisor session's hook. Each time the supervisor hands work to a subagent, it tells the channel which chat-panel request that work belongs to (`[요청 <number>]`). It refuses a hand-off without a number, and a hand-off to a window still working on another request or to a locked window. |
+| `tools/supervisor_hook.py` | The supervisor session's hook. Each time the supervisor hands work to a subagent, it tells the channel which chat-panel request that work belongs to (the request tag in the first line of the hand-off: `[request <number>]`, or its Korean form under the Korean instructions). It refuses a hand-off without a number, and a hand-off to a window still working on another request or to a locked window. |
 | `tools/chat_channel.py` | The chat channel server. An MCP server run by Claude Code; it talks to the Unity and Blender chat panels over local HTTP. |
 | `tools/unity_bridge.py` | The MCP server the subagents use to call the `ch_*` tools. `--list` shows the Unity editors that have opened their bridge. |
-| `tools/handlib/` | The modules behind the scripts above: finding open windows (`discovery`), subagent definitions (`agents`), diagnosis (`checks`), the request log (`eventlog`), the overview (`overview`), telling whether code only reads (`looks`), keeping files that are about to change (`keeps`), reading tokens (`usage`), protection rules (`protect`) and more. The list is in `tools/handlib/__init__.py`. |
-| `unity/com.claudehand.tools/` | The Unity package. Adds 11 `ch_*` tools and the chat panel. The `ch_*` tools are called through a bridge this package opens itself, so it compiles without MCP for Unity and works whatever its version. |
-| `blender/claude_hand_chat.py` | The Blender chat panel add-on. |
+| `tools/handlib/` | The modules behind the scripts above: finding open windows (`discovery`), subagent definitions (`agents`), diagnosis (`checks`), the request log (`eventlog`), the overview (`overview`), telling whether code only reads (`looks`), keeping files that are about to change (`keeps`), reading tokens (`usage`), protection rules (`protect`), settings and the lab (`prefs`), the interface language (`lang`, with the English table `english`) and more. The list is in `tools/handlib/__init__.py`. |
+| `unity/com.claudehand.tools/` | The Unity package. Adds 11 `ch_*` tools, the chat panel and the settings window. The `ch_*` tools are called through a bridge this package opens itself, so it compiles without MCP for Unity and works whatever its version. |
+| `blender/claude_hand_chat.py` | The Blender chat panel add-on (with the settings window). |
 | `start-supervisor.cmd` / `.sh` | Opens the supervisor session. The desktop icon and the chat-panel button run this file. Each time, `preflight` brings the subagents and settings in line, and it tells you if one is already running. |
 | `docs/` | In Korean: [design and its reasons](docs/DESIGN.md), [detailed changelog](docs/CHANGELOG.md), [test plan](docs/TEST-PLAN.md), test results ([step 12](docs/TEST-RESULTS-12-WINDOWS.md), [step 13 on](docs/TEST-RESULTS-13-WINDOWS.md)), [structure review and later notes](docs/REVIEW-2026-11-10.md) |
 
@@ -463,7 +536,7 @@ uv run tools/claude_hand.py update     # bring the subagents, supervisor skill, 
 | `ch_import_model` | Imports an FBX (or OBJ, GLB) exported by Blender under `Assets/ClaudeHand/Imports/<name>/` and places it in the scene. **When the same object from the same .blend arrives again, the existing model file is replaced in place.** The file from before is kept in `Library/ClaudeHand/replaced/`. `dry_run=true` shows which of the two will happen, `new_copy=true` adds a separate copy, and `materials="project"` connects to the project's materials of the same name. |
 | `ch_model_follow` | Makes a model that came from Blender follow the saves of its `.blend`. `list` shows the received models and whether they follow; `set` turns it on and off. While on, the Blender panel re-sends by itself on save. |
 | `ch_export_model` | Puts scene objects (refs) or a model asset in the exchange folder as a model file for Blender (or another Unity project). An object that came from a model file is sent as that file; a mesh made in Unity is written as FBX when the FBX Exporter package (`com.unity.formats.fbx`) is present. |
-| `ch_checkpoint` | Keeps an undo point per request. It is placed by itself just before the first change of a request, and **되돌리기** in the chat panel or `action=undo` undoes the changes after it. What happened to files while the request was working is put back too. |
+| `ch_checkpoint` | Keeps an undo point per request. It is placed by itself just before the first change of a request, and **Undo** in the chat panel or `action=undo` undoes the changes after it. What happened to files while the request was working is put back too. |
 | `ch_protect` | Shows this project's protection rules (`state`). It cannot change them. |
 | `ch_apply_settings` | Sets Interaction Mode to **No Throttling**, which lets Unity process commands while it is in the background. Also in the menu **Tools > Claude Hand**. |
 | `ch_capture` | Saves the Scene view as it is to a PNG (without gizmos). Used for the result preview in the chat panel. |
@@ -507,7 +580,7 @@ The undo point is placed before the first action of a request that could change 
 
 **Environment**
 
-- Taskbar notifications, the Korean text box, dialog detection and minimizing the Claude Hand window work only on Windows. Nothing has been checked with real windows on macOS or Linux.
+- Taskbar notifications, the text box for typing with an IME (**Text box** in the Blender panel), dialog detection and minimizing the Claude Hand window work only on Windows. Nothing has been checked with real windows on macOS or Linux.
 - Running `unity-install` from a development checkout adds Claude Hand Tools by this PC's folder path (`file:`), so that project will not open on another PC. From a checkout of a release tag (for example `v1.0.0`) it is added by its GitHub address. `unity-install --dry-run` tells you which it will be.
 - When a Blender subagent first checks its connection, and when `sync` and `doctor` read the file name, read-only Python (`print(bpy.data.filepath)`) runs inside Blender.
 - When one Unity window's MCP for Unity connection is off (Window > MCP for Unity does not say Connected), calls from that window's subagent fail. They do not go to another window. Claude Hand Tools turns it back on after about 20 seconds; if it does not, reconnect in that window (Window > MCP for Unity). An MCP for Unity server attached to the supervisor session or to another Claude Code session can cut Unity's connection once when it starts or is used (those servers are outside the device).
@@ -524,7 +597,7 @@ The undo point is placed before the first action of a request that could change 
 - **A bake is a fixed image.** Node effects that depend on the viewing angle or on time are not captured. When several objects whose UVs overlap share one material, the baked image is drawn over itself.
 - **What does not go across yet:** shaders other than Principled BSDF, transparency that passes through nodes (you are told what was left out on import), simulations that move vertices such as cloth and soft body, particles, hair, Grease Pencil, the world.
 - Materials are built only in URP projects and projects without a render pipeline (in HDRP you get the default materials Unity makes). Another way is to create materials of the same name in the project and receive with `materials="project"`.
-- **When a model is replaced in place:** when the same object is sent from a saved .blend. It also works after renaming the object or after Save As in Blender. If you moved the .blend in Explorer you have to press **[이 파일로 잇기]** (link to this file) in the Blender panel; otherwise it arrives as a new model.
+- **When a model is replaced in place:** when the same object is sent from a saved .blend. It also works after renaming the object or after Save As in Blender. If you moved the .blend in Explorer you have to press **[Link to this file]** in the Blender panel; otherwise it arrives as a new model.
 
 **Unity → Blender**
 
@@ -548,7 +621,7 @@ The undo point is placed before the first action of a request that could change 
 
 **Time and tokens**
 
-- They are read from the transcript files Claude Code keeps. That is an undocumented internal format (checked on 2.1.322), so when Claude Code changes, the line may lose its tokens and show only time and actions. The `selftest` item "감독 세션 기록에서 토큰 읽기" (reading tokens from the supervisor's transcript) tells you when that happens.
+- They are read from the transcript files Claude Code keeps. That is an undocumented internal format (checked on 2.1.322), so when Claude Code changes, the line may lose its tokens and show only time and actions. The `selftest` item "reading tokens from the supervisor session's transcript" tells you when that happens.
 - Tokens spent on the request after the line appeared are not included. When the supervisor works on two requests in one turn, its tokens go to the request that started that turn.
 - Work asked from the desktop app or a terminal is not shown per request. The line in the chat panel disappears when Claude Hand restarts; the log (`trace`, `usage`) keeps it for two weeks.
 
@@ -566,30 +639,35 @@ The undo point is placed before the first action of a request that could change 
 - Blender's "saving the .blend" ban blocks only when a save call is visible in the code.
 - If the name of a protected object appears in quotes in the code, the call is blocked once even when it only meant to read, with advice to split the reading call from the changing call.
 
+**Settings and language**
+
+- Watching from the desktop app (Remote Control) is decided when Claude Code starts. To change it in a Claude Hand that is running, you have to type `/remote-control` in that window yourself (only the user can type slash commands, so the settings window applies it from the next start).
+- After the interface language is changed, the lines already in a chat panel and the earlier lines of the log (`trace`) stay in the language of their time.
+- The instructions the supervisor received at the start change only after a restart. Until then, naming the buttons as the interface shows them depends on the notice the channel sends.
+- The English edition of the instructions (lab) is a line-by-line translation of the Korean edition, refined so far with one real supervisor session. There the supervisor told the Unity worker to save the scene although nobody had asked (with the Korean edition it tells the worker not to); one sentence added to the English chat rules stopped that. It stays in the lab until it has seen more work.
+- The tooltips of the Blender buttons (the text shown when the mouse rests on one) and the descriptions and errors of the Unity tools have been in English from the start and do not follow the language setting.
+- The list in the settings window is read from `settings/catalog.json` in the claude-hand folder. If `chat-setup` has never been run and the location of the folder is therefore unknown, only the language can be chosen.
+- The English interface has been checked with the automated tests, with open windows (a stand-in for the supervisor) and with a real supervisor session, in which Claude answered in the language the request was written in and called the buttons by the names the interface shows (`Undo`, `Release`); see step 34 of the [test plan](docs/TEST-PLAN.md).
+
 ## Changelog
 
 The number follows `VERSION` at the repository root. Tags exist for `v0.9.0` and `v1.0.0`. The detailed record of what changed in each version and why is in [docs/CHANGELOG.md](docs/CHANGELOG.md) (in Korean).
 
-### 1.0.1 (2026-11-25): a subagent reaching into another Unity window, and connections being cut
+### 1.1.0 (2026-11-25): settings window, English interface, lab
 
-With two or more Unity windows open, what one window's subagent did could land in another window. When the pinned window's MCP for Unity connection dropped for a moment, or it was slow to answer, the server picked another window that did answer, and stayed with it until that subagent finished. claude-hand had a part in the dropped connections: the Unity side closes its existing connections whenever a new one arrives, and claude-hand connected to that port every time it looked for windows.
-
-- Each subagent's server now sees only its own window, connects to no other window's port, and uses a new connection only after that window has said it is the pinned project (`tools/unity_pin`). When the window does not answer, the call fails, and work goes on once the window is back.
-- claude-hand no longer connects to Unity's port when it looks for windows, so it does not cut a working subagent's connection.
-- To get it: rewrite the subagent definitions with `update` (or `sync`), then restart Claude Hand. In `doctor`, the line "MCP for Unity 서버가 맡은 창만 봄" (the MCP for Unity server sees only its own window) should say OK.
-- Checked: an automated test runs the MCP for Unity server's real code against two fake windows and shows that the cases that went to the other window before no longer do. Checked with one real Unity window (hand_test); not yet with two open together ([test plan](docs/TEST-PLAN.md), step 33).
-- When a window's MCP for Unity connection is off, Claude Hand Tools turns it back on after about 20 seconds. Until then that window's calls fail; they do not go to another window.
-
-### 1.0.0 (2026-11-24, tag `v1.0.0`): first full release
-
-Everything planned for 1.0 is in: undoing files whichever tool changed them (0.13.0), undoing several windows at once (0.14.0), time and tokens per request (0.15.0), re-sending automatically on save (0.16.0), models from Blender arriving clean (0.17.0), protection rules per window (0.18.0). The features are those of 0.18.0; what changed in this version is the number and the documents.
-
-- The README was rewritten: what it does and a table of contents at the top, requirements (including what to watch for on Team and Enterprise accounts) and installation moved forward, one section per feature, and the detailed per-version record moved to its own file. An English README was added; the Korean one is [README.ko.md](README.ko.md).
-- Checked: 0.13.0 through 0.18.0 with open windows and a real supervisor session ([test plan](docs/TEST-PLAN.md), steps 27 to 32). Upgrading from an older version with `update` on another PC worked too.
-- Not yet checked: step 28 H, step 29 E and G. These are things to watch while using it.
+- **Settings window.** Opened with the gear button of the Unity chat panel and the Blender panel. It has two tabs, "Features" and "Lab", and a change is written to `config.json` at once and reaches every window, the commands and the guard. The number of days to keep the chat history can now be set, and attaching pictures of other windows and blinking the taskbar button got switches. The command is `settings`.
+- **English interface.** Choose English under the language in the settings window and the chat panels, the Blender panel, the command output and the reasons for refused calls come out in English. Claude Hand does not have to be restarted. The text shown when it is used in Korean (the default) is unchanged.
+- **Lab.** This is where new features arrive first. The first feature is an English edition of the instructions given to Claude.
+- **On top of 1.0.1.** It includes what 1.0.1 fixed (a subagent's server stays with its own Unity window; the row below and the [changelog](docs/CHANGELOG.md)), and what 1.0.1 added to say has its English too: the `doctor` item, the line of the Unity instructions, the lines Claude Hand Tools leaves in the Console.
+- Checked: 559 Python tests (including that every Korean string has its English, that the English tables kept for each implementation do not disagree with one another, and that the English edition of the instructions matches the Korean one line by line), 120 tests inside a Blender run without a window, and the 79 checks of the self-test inside a Unity run without a window (7 of them new: the language and the settings). Also looked at with open windows: in a trial setup of its own, the two settings windows and the English interface were captured as pictures and their buttons pressed, and requests were run through the real channel and hooks with a stand-in for the supervisor. That turned up texts that were cut off in English, and a Send button in the Unity chat window that stayed disabled after a script reload (there since 1.0.0); both are fixed.
+- Checked with a real supervisor session (2026-11-26, the real `hand_test` and `test_blender` open, Claude Hand started twice): a Korean request as before; the language changed to English while the supervisor was running (the notice reached it, both windows changed where they stood); English requests in Unity and Blender answered in English, with the work line, the time and token line and `Undo: …` in English; asked in Korean where the undo button is, Claude answered in Korean and called it `[Undo]`; a request stopped by a protection rule was answered with "open the Protect section … press [Release]"; a request that went from Blender to Unity was undone in both windows with the real Undo button; with the lab's English instructions the definitions and the skill were in English and requests ran to the end with `[request <id>]`; with Remote Control and minimizing turned off Claude Hand started without `--remote-control` and its window stayed; back in Korean the two definition files were byte for byte what they had been.
+- Found in that session and fixed: with the English instructions the supervisor had the Unity worker save the scene unasked (measured without a window, the supervisor alone: 5 of 5 hand-offs before the added sentence, 0 of 5 after; 0 of 4 with the Korean instructions). With Remote Control off the Claude Hand window was titled `claude` (since 1.0.0): the session is now always named. `start` and the window's first lines said the window minimizes by itself also when that was turned off. `CLAUDE_HAND_LANG=en … doctor` called the installed definitions and skill made by an earlier version. A column of the `settings` list, and a particle in the Korean language notice.
+- Not yet looked at: whether the session is gone from the desktop app's list with Remote Control off (seen only as far as the command line), the taskbar button's blinking, the tooltips of the settings rows.
 
 | Version | Date | What changed |
 |---|---|---|
+| 1.0.1 | 2026-11-25 | A subagent's server stays with its own Unity window, claude-hand no longer cuts a working Unity connection, and a dropped MCP for Unity connection is turned back on (rewrite the definitions with `update`, then restart Claude Hand) |
+| 1.0.0 | 2026-11-24 | First full release: the number and the documents (tag `v1.0.0`) |
 | 0.18.0 | 2026-11-24 | Protection rules per window |
 | 0.17.1 | 2026-11-24 | Three more things found with the windows open |
 | 0.17.0 | 2026-11-24 | Models from Blender arrive clean |
@@ -615,8 +693,10 @@ python -m unittest discover -s tools/tests -v     # Python 3.10 or later, nothin
 - The version is set in one place, `VERSION` at the repository root, and a test checks that the numbers in the Unity package and the Blender add-on match it.
 - `tools/tests/test_blender_chat_addon.py` runs the Blender add-on inside a real Blender. The command above skips it (Python has no `bpy`); `uv run tools/claude_hand.py selftest` starts the installed Blender without a window and runs it.
 - On the Unity side, `ChSelfTest.cs` in the package runs the tools in a real Unity. `selftest --unity-project <closed project>` opens Unity without a window to run it.
-- The tests run with `CLAUDE_HAND_LOG=off` so that they do not touch the real event log.
-- Code comments and commit messages are in English; the user-facing strings and the documents under `docs/` are in Korean.
+- The tests run with `CLAUDE_HAND_LOG=off` so that they do not touch the real event log, and in Korean whatever the language setting of this PC is (`CLAUDE_HAND_LANG=ko`).
+- **A visible text you add gets its English with it.** The Korean text stays in the code as `T("…")`, and the English goes into the table each implementation has: `tools/handlib/english.py` for the Python tools, `tools/guard.py` for the guard, `ChText.cs` for Unity, `_EN` at the end of the Blender add-on. A text that counts something also gets its wording for a count of one (`1 action`) in the table beside it (`EN_ONE`, `EnglishOne`, `_EN_ONE`). `tools/tests/test_lang.py` catches a text that has no English and a text on which the tables disagree. When you edit the instructions (`prompts/`), edit the same line of `prompts/en/` as well (the same test compares the number of lines and the placeholders).
+- **A new setting or lab feature** goes into `settings/catalog.json` as one entry and then shows in both settings windows and in the `settings` command. To promote a lab feature to a regular one, change the `stage` of its entry from `lab` to `stable` (it is then on for everybody and leaves the Lab tab).
+- Code comments and commit messages are in English. User-facing strings are written in Korean in the code, with their English in the tables; the documents under `docs/` are in Korean.
 
 ## License
 

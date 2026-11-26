@@ -1,0 +1,62 @@
+{
+  "about": "Every setting the settings window shows (the gear button in the Unity chat window and in the Blender panel, and `claude_hand.py settings`), and every feature of the lab. This file is the one list: tools/handlib/prefs.py, Claude Hand Tools in Unity (ChSettings.cs) and the Blender add-on all read it, and draw a row for each entry. The values themselves are in ~/.claude-hand/config.json: a setting under its key, a lab feature under \"lab\". kind: switch (true/false), choice (one of choices), days (a whole number, 0 for never). applies: now (every part reads config.json again when it changes) or start (from the next start of Claude Hand). A lab feature is off until the user turns it on; once it has proved itself, change its stage from \"lab\" to \"stable\": it is then on for everybody, whatever config.json says, and leaves the lab tab. What guards the windows (the guard hook, protection rules, undo points) is not a setting and never goes into the lab.",
+  "settings": [
+    {
+      "key": "language", "kind": "choice", "default": "ko", "applies": "now",
+      "choices": [{"value": "ko", "label": "한국어"}, {"value": "en", "label": "English"}],
+      "name": {"ko": "언어 · Language", "en": "언어 · Language"},
+      "hint": {"ko": "화면에 보이는 글의 언어입니다. 요청은 어느 언어로 써도 됩니다.",
+               "en": "The language of the interface. You can write your requests in any language."}
+    },
+    {
+      "key": "show_cost", "kind": "switch", "default": true, "applies": "now",
+      "name": {"ko": "요청마다 든 시간 · 토큰 줄", "en": "Time and token line for each request"},
+      "hint": {"ko": "결과 답 아래에 그 요청에 든 시간 · 동작 · 토큰을 한 줄로 보여 줍니다. 꺼도 기록과 usage 명령에는 남습니다.",
+               "en": "Shows under each result what the request took in time, actions and tokens. Turned off, it is still recorded and shown by the usage command."}
+    },
+    {
+      "key": "show_previews", "kind": "switch", "default": true, "applies": "now",
+      "name": {"ko": "바뀐 다른 창의 그림 붙이기", "en": "Pictures of the other windows a request changed"},
+      "hint": {"ko": "요청이 다른 창을 바꿨으면 결과 아래에 그 창의 지금 모습을 그림으로 붙입니다.",
+               "en": "When a request changed another window, a picture of how that window looks now is attached under the result."}
+    },
+    {
+      "key": "flash_taskbar", "kind": "switch", "default": true, "applies": "now",
+      "name": {"ko": "답이 오면 작업 표시줄 깜빡임", "en": "Blink the taskbar button when an answer comes"},
+      "hint": {"ko": "다른 프로그램을 보는 동안 답이나 허락 요청이 오면 작업 표시줄 단추를 깜빡입니다(Windows).",
+               "en": "Blinks the taskbar button when an answer or a permission request comes while you are in another program (Windows)."}
+    },
+    {
+      "key": "remote_control", "kind": "switch", "default": true, "applies": "start",
+      "name": {"ko": "Claude 데스크톱 앱에서 보기 (Remote Control)", "en": "Show in the Claude desktop app (Remote Control)"},
+      "hint": {"ko": "Claude 데스크톱 앱의 Code 탭, claude.ai/code, 모바일 앱에 'Claude Hand' 세션이 보입니다.",
+               "en": "The 'Claude Hand' session shows in the Code tab of the Claude desktop app, on claude.ai/code and in the mobile app."}
+    },
+    {
+      "key": "minimize_after_start", "kind": "switch", "default": true, "applies": "start",
+      "name": {"ko": "Claude Hand 창 자동 최소화", "en": "Minimize the Claude Hand window by itself"},
+      "hint": {"ko": "세션이 일을 시작하면 검은 Claude Hand 창을 최소화합니다(Windows).",
+               "en": "Minimizes the black Claude Hand window once the session starts working (Windows)."}
+    },
+    {
+      "key": "history_keep_days", "kind": "days", "default": 0, "applies": "start",
+      "name": {"ko": "대화 내용 보관 일수", "en": "Days to keep the chat history"},
+      "hint": {"ko": "채팅창에 다시 보여 주는 지난 대화와 그 그림을 이 날수만큼 둡니다. 0이면 날짜로는 지우지 않습니다(창마다 최근 100개).",
+               "en": "How long the earlier conversation shown again in the chat panels, and its pictures, are kept. 0: never removed by date (the newest 100 items of each window)."}
+    },
+    {
+      "key": "exchange_keep_days", "kind": "days", "default": 30, "applies": "start",
+      "name": {"ko": "옮긴 파일 보관 일수", "en": "Days to keep transfer files"},
+      "hint": {"ko": "창 사이에 옮기며 교환 폴더에 남은 파일 사본을 이 날수만큼 둡니다. 0이면 지우지 않습니다.",
+               "en": "How long the copies left in the exchange folder by moving things between windows are kept. 0: never removed."}
+    }
+  ],
+  "lab": [
+    {
+      "key": "english_prompts", "stage": "lab", "since": "1.1.0", "default": false, "applies": "start",
+      "name": {"ko": "Claude 지침 영어판", "en": "English instructions for Claude"},
+      "hint": {"ko": "언어가 English일 때 Claude에게 주는 지침(하위 세션, 감독 규칙)도 영어판으로 줍니다. 꺼 두면 지침은 한국어 그대로이고 영어 버튼 이름 대조표만 붙습니다. 아직 실제 작업으로 다듬지 않은 글입니다.",
+               "en": "With the language set to English, Claude's own instructions (subagents, supervisor rules) are given in their English edition too. Turned off, the instructions stay Korean and only a table of the English button names is added. These texts have not been refined in real work yet."}
+    }
+  ]
+}

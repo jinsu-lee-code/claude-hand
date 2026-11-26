@@ -8,6 +8,8 @@ using UnityEditor;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
+using static ClaudeHand.Editor.ChText;
+
 namespace ClaudeHand.Editor
 {
     /// <summary>
@@ -125,12 +127,12 @@ namespace ClaudeHand.Editor
             public string Summary()
             {
                 var parts = new List<string>();
-                if (restored.Count > 0) parts.Add($"파일 {restored.Count}개를 이전 것으로 되돌렸어요");
-                if (removed.Count > 0) parts.Add($"이 요청으로 생긴 에셋 {removed.Count}개를 프로젝트에서 뺐어요({RemovedFolder}에 보관)");
-                if (returned.Count > 0) parts.Add($"지워졌던 에셋 {returned.Count}개를 되살렸어요");
-                if (moved.Count > 0) parts.Add($"옮겨졌던 에셋 {moved.Count}개를 제자리로 돌렸어요");
-                if (unkept.Count > 0) parts.Add($"이전 내용이 보관되지 않은 파일 {unkept.Count}개는 그대로예요({Few(unkept)})");
-                if (problems.Count > 0) parts.Add($"{problems.Count}개는 되돌리지 못했어요({problems[0]})");
+                if (restored.Count > 0) parts.Add(T("파일 {0}개를 이전 것으로 되돌렸어요", restored.Count));
+                if (removed.Count > 0) parts.Add(T("이 요청으로 생긴 에셋 {0}개를 프로젝트에서 뺐어요({1}에 보관)", removed.Count, RemovedFolder));
+                if (returned.Count > 0) parts.Add(T("지워졌던 에셋 {0}개를 되살렸어요", returned.Count));
+                if (moved.Count > 0) parts.Add(T("옮겨졌던 에셋 {0}개를 제자리로 돌렸어요", moved.Count));
+                if (unkept.Count > 0) parts.Add(T("이전 내용이 보관되지 않은 파일 {0}개는 그대로예요({1})", unkept.Count, Few(unkept)));
+                if (problems.Count > 0) parts.Add(T("{0}개는 되돌리지 못했어요({1})", problems.Count, problems[0]));
                 return parts.Count == 0 ? null : string.Join(", ", parts) + ".";
             }
         }
@@ -171,7 +173,7 @@ namespace ClaudeHand.Editor
 
         internal static string Few(List<string> paths)
         {
-            return string.Join(", ", paths.Take(2).Select(Path.GetFileName)) + (paths.Count > 2 ? " 등" : "");
+            return string.Join(", ", paths.Take(2).Select(Path.GetFileName)) + (paths.Count > 2 ? T(" 등") : "");
         }
 
         /// <summary>request: the request's name; when not given, the one the guard hook says is at work now, if any.</summary>
@@ -181,7 +183,7 @@ namespace ClaudeHand.Editor
             var mark = new Mark
             {
                 group = Undo.GetCurrentGroup(),
-                label = string.IsNullOrWhiteSpace(label) ? "Claude 요청" : label.Trim(),
+                label = string.IsNullOrWhiteSpace(label) ? T("Claude 요청") : label.Trim(),
                 time = DateTime.Now.ToString("HH:mm"),
                 request = string.IsNullOrWhiteSpace(request) ? RequestAtWork() : request.Trim(),
                 stamp = Now,

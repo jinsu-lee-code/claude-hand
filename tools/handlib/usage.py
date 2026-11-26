@@ -30,9 +30,11 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-SUPERVISOR = "감독"
+from handlib.lang import N_, T, language
+
+SUPERVISOR = N_("감독")
 NAME_WAIT = 5.0  # seconds a new subagent's transcript may be without the file that names the subagent
-TAG = re.compile(r"\[\s*요청\s*[:：]?\s*(없음|none|\d{4}-\d{6}-\d+)\s*\]", re.IGNORECASE)  # as tools/supervisor_hook.py reads it
+TAG = re.compile(r"\[\s*(?:요청|request)\s*[:：]?\s*(없음|none|\d{4}-\d{6}-\d+)\s*\]", re.IGNORECASE)  # as tools/supervisor_hook.py reads it
 CHANNEL_REQUEST = re.compile(r'<channel\b[^>]*\brequest="(\d{4}-\d{6}-\d+)"')
 TASK_ID = re.compile(r"<task-id>([A-Za-z0-9_-]+)</task-id>")
 SEEK_ABOVE = 1024 * 1024  # a smaller file is simply read from its start
@@ -317,6 +319,12 @@ def count(tokens: int) -> str:
     tokens = int(tokens)
     if tokens < 1000:
         return str(tokens)
+    if language() == "en":  # thousands and millions, where Korean counts by ten thousands
+        if tokens < 99_950:
+            return f"{tokens / 1000:.1f}k"
+        if tokens < 999_500:
+            return f"{tokens / 1000:.0f}k"
+        return f"{tokens / 1_000_000:.1f}M"
     if tokens < 9950:
         return f"{tokens / 1000:.1f}천"
     if tokens < 99500:
@@ -329,10 +337,10 @@ def count(tokens: int) -> str:
 def duration(seconds: float) -> str:
     seconds = max(0, round(seconds))
     if seconds < 60:
-        return f"{seconds}초"
+        return T("{seconds}초", seconds=seconds)
     if seconds < 3600:
-        return f"{seconds // 60}분 {seconds % 60}초" if seconds % 60 else f"{seconds // 60}분"
-    return f"{seconds // 3600}시간 {seconds % 3600 // 60}분"
+        return T("{minutes}분 {seconds}초", minutes=seconds // 60, seconds=seconds % 60) if seconds % 60 else T("{minutes}분", minutes=seconds // 60)
+    return T("{hours}시간 {minutes}분", hours=seconds // 3600, minutes=seconds % 3600 // 60)
 
 
 def together(cost: dict[str, dict]) -> dict:
@@ -344,20 +352,27 @@ def together(cost: dict[str, dict]) -> dict:
 
 
 def tokens_text(total: dict) -> str:
-    return f"출력 {count(total['output'])} · 새 입력 {count(total['input'])} · 다시 읽기 {count(total['cached'])}"
+    return T("출력 {output} · 새 입력 {input} · 다시 읽기 {cached}", output=count(total['output']), input=count(total['input']), cached=count(total['cached']))
 
 
 def line(seconds: float, actions: int, cost: dict[str, dict]) -> str:
     """A request in one line for its chat panel: how long the user waited, how many actions, and the tokens of
     everybody together. Without tokens (no transcript to read) it says the time alone."""
-    parts = [duration(seconds)] + ([f"동작 {actions}번"] if actions else [])
+    parts = [duration(seconds)] + ([T("동작 {actions}번", actions=actions)] if actions else [])
     if any(one.get("calls") for one in cost.values()):
-        parts.append("토큰 " + tokens_text(together(cost)))
+        parts.append(T("토큰 ") + tokens_text(together(cost)))
     return " · ".join(parts)
 
 
 def detail(cost: dict[str, dict]) -> str:
     """Who spent what, the supervisor first: "감독 12초 API 4번 출력 1.3천 · 새 입력 2.8천 · 다시 읽기 46만 / hand_test …"."""
     order = sorted(cost, key=lambda who: (who != SUPERVISOR, who))
-    return " / ".join(f"{who} {duration(cost[who].get('seconds') or 0)} API {cost[who].get('calls') or 0}번 {tokens_text({**blank(), **cost[who]})}"
+    return " / ".join(T("{who} {duration} API {calls}번 {tokens}", who=shown(who), duration=duration(cost[who].get('seconds') or 0),
+                        calls=cost[who].get('calls') or 0, tokens=tokens_text({**blank(), **cost[who]}))
                       for who in order if cost[who].get("calls"))
+
+
+def shown(who: str) -> str:
+    """Who spent it, as it is shown: a subagent by its name, the supervisor by its word in the language in use (in the
+    event log it stays SUPERVISOR, whatever the language was when the line was written)."""
+    return T(SUPERVISOR) if who == SUPERVISOR else who

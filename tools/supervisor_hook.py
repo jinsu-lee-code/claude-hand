@@ -34,9 +34,19 @@ import sys
 import urllib.request
 from pathlib import Path
 
-TAG_RE = re.compile(r"\[\s*요청\s*[:：]?\s*(없음|none|\d{4}-\d{6}-\d+)\s*\]", re.IGNORECASE)
-HOW = ("프롬프트(SendMessage면 메시지) 첫 줄에 `[요청 <번호>]`를 적고 다시 부르세요. 번호는 그 채팅창 메시지의 <channel> 태그에 있는 "
-       "request 값입니다. 채널 태그 없이 터미널이나 Claude 앱에서 온 요청이면 `[요청 없음]`이라고 적습니다.")
+try:
+    from handlib.lang import N_, T
+except Exception:  # never in the way (see above): then what the hook has to say, it says in Korean
+    def N_(text):
+        return text
+
+    def T(text, /, **values):
+        return text.format(**values) if values else text
+
+# `[요청 <id>]` as the Korean instructions have the supervisor write it, `[request <id>]` as the English ones do.
+TAG_RE = re.compile(r"\[\s*(?:요청|request)\s*[:：]?\s*(없음|none|\d{4}-\d{6}-\d+)\s*\]", re.IGNORECASE)
+HOW = N_("프롬프트(SendMessage면 메시지) 첫 줄에 `[요청 <번호>]`를 적고 다시 부르세요. 번호는 그 채팅창 메시지의 <channel> 태그에 있는 "
+         "request 값입니다. 채널 태그 없이 터미널이나 Claude 앱에서 온 요청이면 `[요청 없음]`이라고 적습니다.")
 
 
 def tag_of(text: str) -> str | None:
@@ -86,20 +96,21 @@ def decision(event: dict, post) -> str | None:
         return None  # not a window's subagent (or no Claude Hand to ask)
     window = answer.get("chat_id") or target
     if answer.get("missing"):
-        return f"{window}에게 맡기는 일이 어느 채팅창 요청 때문인지 적혀 있지 않아 막았습니다. " + HOW
+        return T("{window}에게 맡기는 일이 어느 채팅창 요청 때문인지 적혀 있지 않아 막았습니다. ", window=window) + T(HOW)
     if answer.get("unknown"):
-        return f"`[요청 {tag_of(text)}]`은 채널이 모르는 요청 번호라 {window}에게 맡기는 호출을 막았습니다. " + HOW
+        return T("`[요청 {tag}]`은 채널이 모르는 요청 번호라 {window}에게 맡기는 호출을 막았습니다. ", tag=tag_of(text), window=window) + T(HOW)
     if answer.get("stop"):
-        return ("사용자가 그 채팅창에서 [중지]를 누른 요청이라 이 호출을 막았습니다. 이 요청의 일은 더 맡기지 말고, 어디까지 했고 "
-                "무엇이 남았는지 reply로 알리세요.")
+        return T("사용자가 그 채팅창에서 [중지]를 누른 요청이라 이 호출을 막았습니다. 이 요청의 일은 더 맡기지 말고, 어디까지 했고 "
+                 "무엇이 남았는지 reply로 알리세요.")
     if answer.get("locked"):
-        return (f"{window}은(는) 사용자가 잠가 둔 창이라(보호 규칙: 잠금) 이 호출을 막았습니다. 그 창에는 일을 맡기지 말고, 그 창이 "
-                "잠겨 있어 하지 못했다고 reply로 알리세요. 잠금은 사용자가 그 창의 패널(보호 → 풀기)에서만 풉니다.")
+        return T("{window}은(는) 사용자가 잠가 둔 창이라(보호 규칙: 잠금) 이 호출을 막았습니다. 그 창에는 일을 맡기지 말고, 그 창이 "
+                 "잠겨 있어 하지 못했다고 reply로 알리세요. 잠금은 사용자가 그 창의 패널(보호 → 풀기)에서만 풉니다.", window=window)
     if answer.get("busy"):
         other = str(answer.get("other") or "")
-        return (f"{window}은(는) 지금 다른 요청" + (f"('{other}')" if other else "") + "으로 일하는 중이라 이 호출을 막았습니다. 한 창에 두 "
-                "요청의 일이 겹치면 기록, 되돌리기 지점, 중지가 엉뚱한 요청 몫이 됩니다. 그 일이 끝났다는 알림이 온 뒤에 다시 맡기세요. "
-                "기다리는 동안 이 요청의 채팅창에는 reply(working: true)로 \"앞의 일이 끝나면 할게요\"라고 알려 둡니다.")
+        return T("{window}은(는) 지금 다른 요청{other}으로 일하는 중이라 이 호출을 막았습니다. 한 창에 두 "
+                 "요청의 일이 겹치면 기록, 되돌리기 지점, 중지가 엉뚱한 요청 몫이 됩니다. 그 일이 끝났다는 알림이 온 뒤에 다시 맡기세요. "
+                 "기다리는 동안 이 요청의 채팅창에는 reply(working: true)로 \"앞의 일이 끝나면 할게요\"라고 알려 둡니다.",
+                 window=window, other=f"('{other}')" if other else "")
     return None
 
 

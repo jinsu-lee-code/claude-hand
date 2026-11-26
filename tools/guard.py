@@ -44,6 +44,67 @@ import time
 import urllib.request
 from pathlib import Path
 
+# --------------------------------------------------------------------------- what the guard says, and in which language
+
+# The Korean text stays where it is said; with the language set to English (the settings window writes "language" into
+# config.json) T looks it up here. The guard carries its own few texts and its own reader of that file, standard
+# library only like everything before the decision: nothing elsewhere in claude-hand can keep a refusal from being said.
+EN = {
+    "이 하위 세션은 {pin} 전용입니다. {what} 도구는 {prefix}* 만 쓸 수 있습니다.":
+        "This subagent works for {pin} only. Of the {what} tools it may use {prefix}* alone.",
+    "대상 프로젝트는 {pin}로 고정돼 있어 바꿀 수 없습니다.": "The target project is fixed to {pin} and cannot be changed.",
+    "unity_instance={value!r}는 이 하위 세션의 프로젝트({pin})가 아닙니다. unity_instance 없이 호출하세요.":
+        "unity_instance={value!r} is not this subagent's project ({pin}). Call without unity_instance.",
+    "Unity가 대화상자 때문에 멈춰 있어 이 호출을 막았습니다: {dialogs}. 더 부르지 말고 이 내용을 그대로 감독에게 보고하세요. 어느 버튼을 누를지는 사용자가 정합니다.":
+        "Unity is stopped at a dialog, so this call was refused: {dialogs}. Make no more calls and report this as it is to the "
+        "supervisor. Which button to press is the user's decision.",
+    "Blender가 보호 규칙을 알려 주지 않았습니다: ": "Blender did not tell its protection rules: ",
+    "Blender가 보호 규칙을 알 수 없는 모양으로 알려 주었습니다": "Blender told its protection rules in a form that cannot be read",
+    "ch_protect의 before · after는 Claude Hand의 가드가 부릅니다. 직접 부르지 마세요(state는 됩니다).":
+        "ch_protect's before and after are called by Claude Hand's guard. Do not call them yourself (state is fine).",
+    "보호 규칙 파일을 읽지 못해 이 호출을 막았습니다: {problem}. 더 부르지 말고 이 내용을 그대로 감독에게 보고하세요. 그 파일은 사용자가 고쳐야 합니다.":
+        "The protection rules file could not be read, so this call was refused: {problem}. Make no more calls and report this as "
+        "it is to the supervisor. The user has to fix that file.",
+    "사용자가 채팅창에서 [중지]를 눌러 이 호출을 막았습니다. 더 부르지 말고, 지금까지 한 것과 남은 것을 그대로 "
+    "감독에게 보고하고 끝내세요. 한 것을 되돌리지는 마세요(되돌릴지는 사용자가 정합니다).":
+        "The user pressed [Stop] in the chat panel, so this call was refused. Make no more calls: report to the supervisor what "
+        "was done so far and what is left, and finish. Do not undo what was done (whether to undo is the user's decision).",
+    "이 창({pin})은 지금 다른 하위 세션이 작업 중이라 이 호출을 막았습니다. 같은 대상에 둘이 동시에 일하면 서로 덮어씁니다. 더 부르지 말고 이 내용을 그대로 감독에게 보고하세요.":
+        "Another subagent is at work in this window ({pin}) right now, so this call was refused. Two working on the same target at "
+        "once overwrite each other. Make no more calls and report this as it is to the supervisor.",
+    "이 요청의 되돌리기 지점은 Claude Hand가 이미 찍어 두었습니다(채팅창의 [되돌리기]). 따로 찍지 않아도 되니 "
+    "이 호출 없이 하던 일을 이어서 하세요. 문제가 아니므로 보고에 적지 않아도 됩니다.":
+        "Claude Hand has already set this request's undo point (the chat panel's [Undo]). There is no need to set another: carry "
+        "on with your work without this call. This is not a problem and need not be in your report.",
+    "claude-hand guard 오류로 호출을 막았습니다: {exc}": "The call was refused because of an error in the claude-hand guard: {exc}",
+    "보호 규칙을 확인하지 못해 이 호출을 막았습니다: {exc}. 더 부르지 말고 이 내용을 그대로 감독에게 보고하세요.":
+        "The protection rules could not be checked, so this call was refused: {exc}. Make no more calls and report this as it is "
+        "to the supervisor.",
+}
+
+
+def language() -> str:
+    """"ko" or "en": CLAUDE_HAND_LANG when it is one of the two, else config.json's "language". Korean whatever goes
+    wrong (no file, a file that is being written, anything)."""
+    try:
+        import os
+        forced = os.environ.get("CLAUDE_HAND_LANG", "").strip().lower()
+        if forced in ("ko", "en"):
+            return forced
+        home = Path(os.environ.get("CLAUDE_HAND_HOME") or Path.home() / ".claude-hand")
+        value = json.loads((home / "config.json").read_text(encoding="utf-8-sig")).get("language")
+        return value if value in ("ko", "en") else "ko"
+    except Exception:
+        return "ko"
+
+
+def T(text: str, /, **values) -> str:
+    """`text` as the user's language has it (Korean as written, or English from EN), its {names} filled in."""
+    if language() == "en":
+        text = EN.get(text, text)
+    return text.format(**values) if values else text
+
+
 # --------------------------------------------------------------------------- the decision
 
 
@@ -84,7 +145,7 @@ def guard_decision(event: dict, pin: str, server: str, transport: str, app: str 
         return None  # claude-hand's own ch_* server: pinned to this project by its arguments, takes no unity_instance
     if not tool.startswith(prefix):
         what = "Blender" if app == "blender" else "Unity"
-        return f"이 하위 세션은 {pin} 전용입니다. {what} 도구는 {prefix}* 만 쓸 수 있습니다."
+        return T("이 하위 세션은 {pin} 전용입니다. {what} 도구는 {prefix}* 만 쓸 수 있습니다.", pin=pin, what=what, prefix=prefix)
     if app == "blender":
         return None  # one MCP for Blender server talks to exactly one port, so its own tools cannot reach another Blender
     short = tool[len(prefix):]
@@ -93,10 +154,10 @@ def guard_decision(event: dict, pin: str, server: str, transport: str, app: str 
         target = str(tool_input.get("instance", ""))
         if transport == "http" and instance_matches(target, pin):
             return None
-        return f"대상 프로젝트는 {pin}로 고정돼 있어 바꿀 수 없습니다."
+        return T("대상 프로젝트는 {pin}로 고정돼 있어 바꿀 수 없습니다.", pin=pin)
     for value in find_instance_values(tool_input):
         if not instance_matches(value, pin):
-            return f"unity_instance={value!r}는 이 하위 세션의 프로젝트({pin})가 아닙니다. unity_instance 없이 호출하세요."
+            return T("unity_instance={value!r}는 이 하위 세션의 프로젝트({pin})가 아닙니다. unity_instance 없이 호출하세요.", value=value, pin=pin)
     return None
 
 
@@ -111,8 +172,8 @@ def dialog_block(event: dict, pin: str, server: str, waiting=None) -> str | None
         dialogs = (waiting or (lambda: unity_bridge.waiting_dialogs(unity_bridge.find_project(hash_=pin.rpartition("@")[2]))))()
         if not dialogs:
             return None
-        return (f"Unity가 대화상자 때문에 멈춰 있어 이 호출을 막았습니다: {unity_bridge.describe_dialogs(dialogs)}. 더 부르지 말고 "
-                "이 내용을 그대로 감독에게 보고하세요. 어느 버튼을 누를지는 사용자가 정합니다.")
+        return T("Unity가 대화상자 때문에 멈춰 있어 이 호출을 막았습니다: {dialogs}. 더 부르지 말고 이 내용을 그대로 감독에게 보고하세요. 어느 버튼을 누를지는 사용자가 정합니다.",
+                 dialogs=unity_bridge.describe_dialogs(dialogs))
     except Exception:
         return None
 
@@ -256,10 +317,10 @@ def ask_blender(pin: str, call: str, request=None, timeout: float = 5.0) -> dict
     printed = printed.get("result") if isinstance(printed, dict) else printed
     start = str(printed or "").find("CH_PROTECT ")
     if start < 0:
-        raise ValueError("Blender가 보호 규칙을 알려 주지 않았습니다: " + str(reply)[:200])
+        raise ValueError(T("Blender가 보호 규칙을 알려 주지 않았습니다: ") + str(reply)[:200])
     state = json.loads(str(printed)[start + len("CH_PROTECT "):].splitlines()[0])
     if not isinstance(state, dict):
-        raise ValueError("Blender가 보호 규칙을 알 수 없는 모양으로 알려 주었습니다")
+        raise ValueError(T("Blender가 보호 규칙을 알 수 없는 모양으로 알려 주었습니다"))
     return state
 
 
@@ -292,7 +353,7 @@ def protection_block(event: dict, pin: str, server: str, app: str, home: Path | 
     from handlib import link, protect
     tool_input = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
     if short == "ch_protect" and str(tool_input.get("action") or "state").strip().lower() != "state":
-        return "ch_protect의 before · after는 Claude Hand의 가드가 부릅니다. 직접 부르지 마세요(state는 됩니다).", False
+        return T("ch_protect의 before · after는 Claude Hand의 가드가 부릅니다. 직접 부르지 마세요(state는 됩니다)."), False
     looking = call_looks(app, short, tool_input)
     home = home or link.claude_hand_home()
     key = protect.session_key(app, pin)
@@ -317,8 +378,8 @@ def protection_block(event: dict, pin: str, server: str, app: str, home: Path | 
             covered = state.get("covered") if isinstance(state.get("covered"), dict) else {}
             pending = state.get("pending")
     if rules.problems and not looking:
-        return ("보호 규칙 파일을 읽지 못해 이 호출을 막았습니다: " + rules.problems[0][:300] + ". 더 부르지 말고 이 내용을 그대로 "
-                "감독에게 보고하세요. 그 파일은 사용자가 고쳐야 합니다."), False
+        return T("보호 규칙 파일을 읽지 못해 이 호출을 막았습니다: {problem}. 더 부르지 말고 이 내용을 그대로 감독에게 보고하세요. 그 파일은 사용자가 고쳐야 합니다.",
+                 problem=rules.problems[0][:300]), False
     told = protect.found_after(pending)[1]
     if told and not looking:  # found by the window since the last call, and nobody was told yet
         return told, False
@@ -400,11 +461,10 @@ def report_progress(event: dict, pin: str, server: str, app: str, home: Path | N
         pass
     try:
         if reply.get("stop"):
-            return ("사용자가 채팅창에서 [중지]를 눌러 이 호출을 막았습니다. 더 부르지 말고, 지금까지 한 것과 남은 것을 그대로 "
-                    "감독에게 보고하고 끝내세요. 한 것을 되돌리지는 마세요(되돌릴지는 사용자가 정합니다).")
+            return (T("사용자가 채팅창에서 [중지]를 눌러 이 호출을 막았습니다. 더 부르지 말고, 지금까지 한 것과 남은 것을 그대로 "
+                    "감독에게 보고하고 끝내세요. 한 것을 되돌리지는 마세요(되돌릴지는 사용자가 정합니다)."))
         if reply.get("busy"):
-            return (f"이 창({pin})은 지금 다른 하위 세션이 작업 중이라 이 호출을 막았습니다. 같은 대상에 둘이 동시에 일하면 서로 "
-                    "덮어씁니다. 더 부르지 말고 이 내용을 그대로 감독에게 보고하세요.")
+            return (T("이 창({pin})은 지금 다른 하위 세션이 작업 중이라 이 호출을 막았습니다. 같은 대상에 둘이 동시에 일하면 서로 덮어씁니다. 더 부르지 말고 이 내용을 그대로 감독에게 보고하세요.", pin=pin))
         own_mark = short == "ch_checkpoint" and str(tool_input.get("action") or "mark").strip().lower() == "mark"
         # A "cancel that" request starts with the undo itself: a fresh point there would leave nothing to undo.
         undoing = (short == "ch_checkpoint" and not own_mark) or "undo_last_request" in str(tool_input.get("code", ""))
@@ -419,8 +479,8 @@ def report_progress(event: dict, pin: str, server: str, app: str, home: Path | N
             # With Claude Hand running, every request has its point already (set here, named after what the user
             # asked). A second one from the subagent would take over the chat window's 되돌리기 button under a name
             # the user never typed, and leave the first behind with nothing to undo.
-            return ("이 요청의 되돌리기 지점은 Claude Hand가 이미 찍어 두었습니다(채팅창의 [되돌리기]). 따로 찍지 않아도 되니 "
-                    "이 호출 없이 하던 일을 이어서 하세요. 문제가 아니므로 보고에 적지 않아도 됩니다.")
+            return (T("이 요청의 되돌리기 지점은 Claude Hand가 이미 찍어 두었습니다(채팅창의 [되돌리기]). 따로 찍지 않아도 되니 "
+                    "이 호출 없이 하던 일을 이어서 하세요. 문제가 아니므로 보고에 적지 않아도 됩니다."))
         keep_named_files(project, key, short, tool_input)
     except Exception:  # progress is a nicety; the guard's answer must not depend on it
         pass
@@ -521,7 +581,7 @@ def run_guard(args: argparse.Namespace, stdin=None, stdout=None) -> int:
         event = read_event(stdin)
         reason = guard_decision(event, args.pin, args.server, args.transport, args.app)
     except Exception as exc:  # fail closed: a broken guard must not let calls through
-        event, reason = {}, f"claude-hand guard 오류로 호출을 막았습니다: {exc}"
+        event, reason = {}, T("claude-hand guard 오류로 호출을 막았습니다: {exc}", exc=exc)
     if not reason and args.app == "unity":
         reason = dialog_block(event, args.pin, args.server)
     watch = False
@@ -531,7 +591,7 @@ def run_guard(args: argparse.Namespace, stdin=None, stdout=None) -> int:
         try:
             reason, watch = protection_block(event, args.pin, args.server, args.app)
         except Exception as exc:  # fail closed here too: rules that cannot be looked up are not rules that are not there
-            reason = (f"보호 규칙을 확인하지 못해 이 호출을 막았습니다: {exc}. 더 부르지 말고 이 내용을 그대로 감독에게 보고하세요.")
+            reason = (T("보호 규칙을 확인하지 못해 이 호출을 막았습니다: {exc}. 더 부르지 말고 이 내용을 그대로 감독에게 보고하세요.", exc=exc))
         if reason:
             try:
                 from handlib import protect

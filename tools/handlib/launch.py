@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path
 
 from handlib import constants, link, settings
+from handlib.lang import N_, T
 
 
 def write_user_config(home: Path | None = None, root: Path = constants.REPO_ROOT, start_script: Path = constants.START_SCRIPT) -> Path:
@@ -153,12 +154,15 @@ def supervisor_session(config: dict, transcript=session_transcript, latest=lates
 
 def launch_args(config: dict, env=os.environ) -> str:
     """Extra arguments for the supervisor's `claude` command, one line, as start-supervisor pastes it.
+    The session always carries its name: Claude Code titles the terminal window with it (without one the taskbar
+    button says "claude", and "the Claude Hand window" is not to be found), and `claude --resume` lists it by it.
     Remote Control is left out when this login cannot use it (it would only print an error at start)."""
+    name = f'--name "{constants.REMOTE_CONTROL_NAME}"'
     if remote_control_wanted(config) and not remote_control_problems(env):
         # Remote Control: the session (and the subagents it runs) shows up in the Claude desktop app's Code tab,
         # claude.ai/code and the mobile app under this name.
-        return f'--remote-control --name "{constants.REMOTE_CONTROL_NAME}"'
-    return ""
+        return "--remote-control " + name
+    return name
 
 
 def remote_control_problems(env=os.environ) -> list[str]:
@@ -166,32 +170,35 @@ def remote_control_problems(env=os.environ) -> list[str]:
     problems = []
     provider = [name for name in constants.THIRD_PARTY_PROVIDER_ENV if env.get(name, "").lower() in ("1", "true")]
     if provider:
-        problems.append("Bedrock/Vertex/Foundry(" + ", ".join(provider) + ")에서는 Remote Control을 쓸 수 없습니다")
+        problems.append(T("Bedrock/Vertex/Foundry({names})에서는 Remote Control을 쓸 수 없습니다", names=", ".join(provider)))
     base_url = env.get("ANTHROPIC_BASE_URL", "").strip().rstrip("/")
     if base_url and base_url != "https://api.anthropic.com":  # the desktop app sets the official address itself
-        problems.append("ANTHROPIC_BASE_URL이 다른 서버를 가리키고 있으면 Remote Control을 쓸 수 없습니다")
+        problems.append(T("ANTHROPIC_BASE_URL이 다른 서버를 가리키고 있으면 Remote Control을 쓸 수 없습니다"))
     if env.get("ANTHROPIC_API_KEY"):
-        problems.append("ANTHROPIC_API_KEY가 설정돼 있습니다. Remote Control은 API 키로는 안 되고 claude.ai 로그인(Pro·Max·Team 등)이 필요합니다")
+        problems.append(T("ANTHROPIC_API_KEY가 설정돼 있습니다. Remote Control은 API 키로는 안 되고 claude.ai 로그인(Pro·Max·Team 등)이 필요합니다"))
     return problems
 
 
-BANNER = """\
+BANNER = N_("""\
 ────────────────────────────────────────────────────────
  Claude Hand 감독 세션
    Unity   : Window > Claude Hand > Chat
    Blender : 3D 뷰포트에서 N > Claude Hand 탭
  이 창은 닫지 마세요. 닫으면 채팅이 멈춥니다. 일을 시작하면 저절로 최소화됩니다.
  켤 때마다 개발용 채널(claude-hand-chat) 경고가 뜹니다: I am using this for local development 를 고르세요.
-────────────────────────────────────────────────────────"""
+────────────────────────────────────────────────────────""")
+# The banner's sentence that is left out when the user turned "minimize_after_start" off (preflight): part of BANNER in
+# both languages, word for word.
+BANNER_MINIMIZES = N_(" 일을 시작하면 저절로 최소화됩니다.")
 
 
-FIRST_RUN_GUIDE = """\
+FIRST_RUN_GUIDE = N_("""\
 처음에는 Claude Code가 몇 가지를 확인합니다. 화살표 키로 고르고 Enter를 누르세요.
   - 이 폴더(claude-hand)를 믿는지: 믿는다(Yes)를 고르세요.
   - 개발용 채널(claude-hand-chat) 경고(켤 때마다 뜸): I am using this for local development 를 고르세요.
   - (뜨면) MCP 서버 claude-hand-chat 사용: 사용하는 쪽을 고르세요.
   - 로그인을 묻으면 화면 안내대로 로그인하세요.
-  - 데스크톱 앱에서 보려면 구독(Pro·Max 등) 계정 로그인이 필요합니다. /status 로 확인하고, 아니면 /login 하세요."""
+  - 데스크톱 앱에서 보려면 구독(Pro·Max 등) 계정 로그인이 필요합니다. /status 로 확인하고, 아니면 /login 하세요.""")
 
 
 SHORTCUT_PS = r"""

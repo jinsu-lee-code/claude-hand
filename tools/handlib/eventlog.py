@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 from handlib import link
+from handlib.lang import N_, T
 
 KEEP_DAYS = 14
 TEXT_LIMIT = 200  # of a message or reply kept in the log: enough to recognize it, not a second chat history
@@ -120,10 +121,10 @@ def trace(events: list[dict], request: str) -> list[dict]:
             if e.get("request") == request or (start < i < end and not e.get("request") and e.get("pin") in pins)]
 
 
-LABELS = {"message": "요청", "assigned": "맡김", "action": "동작", "refused": "막음", "call": "ch 호출", "stopped": "멈춤", "reply": "답",
-          "reminder": "다시 알림", "dialog": "대화상자", "stop": "중지 누름", "permission": "허락 요청", "verdict": "허락 답",
-          "undo": "되돌림", "cost": "시간·토큰", "held": "쥐고 있음", "released": "넘김",
-          "protected": "막음 (보호 규칙)", "protect": "보호 규칙"}
+LABELS = {"message": N_("요청"), "assigned": N_("맡김"), "action": N_("동작"), "refused": N_("막음"), "call": N_("ch 호출"), "stopped": N_("멈춤"), "reply": N_("답"),
+          "reminder": N_("다시 알림"), "dialog": N_("대화상자"), "stop": N_("중지 누름"), "permission": N_("허락 요청"), "verdict": N_("허락 답"),
+          "undo": N_("되돌림"), "cost": N_("시간·토큰"), "held": N_("쥐고 있음"), "released": N_("넘김"),
+          "protected": N_("막음 (보호 규칙)"), "protect": N_("보호 규칙")}
 
 
 def describe(event: dict, since: float | None = None) -> str:
@@ -135,25 +136,25 @@ def describe(event: dict, since: float | None = None) -> str:
         parts = [who, f'"{event.get("text", "")}"']
         if kind == "reply":
             if event.get("working"):
-                parts.append("(하는 중이라는 답)")
+                parts.append(T("(하는 중이라는 답)"))
             elif since is not None:
-                parts.append(f"({event['ts'] - since:.1f}초 만에)")
+                parts.append(T("({seconds:.1f}초 만에)", seconds=event['ts'] - since))
             if event.get("origin") == "desktop":
-                parts.append("(데스크톱 앱에서 시킨 일)")
+                parts.append(T("(데스크톱 앱에서 시킨 일)"))
     elif kind == "action":
         parts = [who, " ".join(filter(None, [event.get("tool", ""), event.get("detail", "")]))]
         if event.get("first"):
-            parts.append("(이 요청의 되돌리기 지점)")
+            parts.append(T("(이 요청의 되돌리기 지점)"))
     elif kind in ("refused", "protected"):
         parts = [who, event.get("tool", ""), event.get("reason", "")]
     elif kind == "call":
-        result = "성공" if event.get("ok") else f"실패 {event.get('code', '')}".strip()
+        result = T("성공") if event.get("ok") else T("실패 {code}", code=event.get('code', '')).strip()
         parts = [who, event.get("tool", ""), f"{result} {event.get('ms', 0)} ms"]
     elif kind in ("permission", "verdict"):
         parts = [event.get("tool", ""), event.get("behavior", "")]
     elif kind == "cost":  # what the request took: the wait in the panel, then who spent what (handlib/usage.py wrote the words)
-        waited = f"{event.get('seconds', 0):.1f}초" + (f" · 동작 {event['actions']}번" if event.get("actions") else "")
-        parts = [who, waited, event.get("text") or "(토큰 기록 없음)"]
+        waited = T("{seconds:.1f}초", seconds=event.get('seconds', 0)) + (T(" · 동작 {actions}번", actions=event['actions']) if event.get("actions") else "")
+        parts = [who, waited, event.get("text") or T("(토큰 기록 없음)")]
     else:
         parts = [who, event.get("text", "")]
-    return f"{stamp}  {LABELS.get(kind, kind):<8}  " + "  ".join(p for p in parts if p)
+    return f"{stamp}  {T(LABELS[kind]) if kind in LABELS else kind:<8}  " + "  ".join(p for p in parts if p)

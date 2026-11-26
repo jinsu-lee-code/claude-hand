@@ -10,6 +10,8 @@ using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
+using static ClaudeHand.Editor.ChText;
+
 namespace ClaudeHand.Editor
 {
     [ChTool("ch_import_model",
@@ -288,8 +290,8 @@ namespace ClaudeHand.Editor
                               : place ? "No object in the open scenes used it, so one was placed. The scene is modified but not saved."
                                   : "No object in the open scenes uses it.") +
                           (undoable
-                              ? $" The chat window's 되돌리기 (ch_checkpoint undo) puts the file it replaced back; it is kept at {previous}."
-                              : $" No undo point is set, so 되돌리기 will not put the file it replaced back; it is kept at {previous}.");
+                              ? T(" The chat window's 되돌리기 (ch_checkpoint undo) puts the file it replaced back; it is kept at {0}.", previous)
+                              : T(" No undo point is set, so 되돌리기 will not put the file it replaced back; it is kept at {0}.", previous));
             }
             else
             {

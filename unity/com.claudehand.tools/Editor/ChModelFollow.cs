@@ -7,6 +7,8 @@ using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
 
+using static ClaudeHand.Editor.ChText;
+
 namespace ClaudeHand.Editor
 {
     /// <summary>
@@ -205,11 +207,11 @@ namespace ClaudeHand.Editor
             int uses = ChImportModel.InstancesInOpenScenes(AssetDatabase.LoadAssetAtPath<GameObject>(existing)).Count;
             var blend = Path.GetFileName(incoming.Source ?? string.Empty);
             // Mostly a save; also the state after a 되돌리기 in Blender, or what was saved while this editor was closed.
-            var why = string.IsNullOrWhiteSpace(p.why) ? "저장" : p.why.Trim();
+            var why = string.IsNullOrWhiteSpace(p.why) ? T("저장") : p.why.Trim();
             if (why.Length > 20) why = why.Substring(0, 20);
             ChChatWindow.Tell("follow:" + existing,
-                $"{blend} {why} → {Path.GetFileName(existing)} 반영" + (uses > 0 ? $" (씬 오브젝트 {uses}개)" : string.Empty),
-                $"[이 프로젝트의 모델 {existing}이(가) Blender의 {blend} 저장을 따라 바뀌었음 ({why}, Claude를 거치지 않음)]");
+                T("{0} {1} → {2} 반영", blend, why, Path.GetFileName(existing)) + (uses > 0 ? T(" (씬 오브젝트 {0}개)", uses) : string.Empty),
+                T("[이 프로젝트의 모델 {0}이(가) Blender의 {1} 저장을 따라 바뀌었음 ({2}, Claude를 거치지 않음)]", existing, blend, why));
             return new ChSuccess($"Replaced {existing} with what {blend} holds now.",
                 new { state = "updated", asset_path = existing, instance_count = uses, previous_file = previous, materials_made = made,
                       shape_check = shape, warnings });
@@ -230,7 +232,7 @@ namespace ClaudeHand.Editor
             if (busy != null) return busy;
 
             // So that the chat window's 되돌리기 can take it out again, as it can a model Claude brought in.
-            ChCheckpoint.Add("Blender에서 보냄: " + incoming.Name);
+            ChCheckpoint.Add(T("Blender에서 보냄: ") + incoming.Name);
             var result = ChImportModel.Import(new ChImportModel.Parameters { manifest = p.manifest }, true);
             if (!(result is ChSuccess done)) return result;
             var data = JObject.FromObject(done.Data);
@@ -239,8 +241,8 @@ namespace ClaudeHand.Editor
             data["follow"] = ChImportModel.ReadRecord(AssetImporter.GetAtPath(path))?.follow == true;
             var blend = Path.GetFileName(incoming.Source ?? string.Empty);
             ChChatWindow.Tell("sent:" + path,
-                $"Blender({blend})에서 {Path.GetFileName(path)}을(를) 보냈어요. 저장할 때마다 다시 옵니다. 되돌리기로 뺄 수 있어요.",
-                $"[사용자가 Blender 패널에서 {blend}의 모델을 이 프로젝트에 직접 보냈음: {path} (Claude를 거치지 않음, 저장할 때마다 다시 옴)]");
+                T("Blender({0})에서 {1}을(를) 보냈어요. 저장할 때마다 다시 옵니다. 되돌리기로 뺄 수 있어요.", blend, Path.GetFileName(path)),
+                T("[사용자가 Blender 패널에서 {0}의 모델을 이 프로젝트에 직접 보냈음: {1} (Claude를 거치지 않음, 저장할 때마다 다시 옴)]", blend, path));
             return new ChSuccess(done.Message, data);
         }
     }

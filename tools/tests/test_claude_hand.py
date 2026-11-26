@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ["CLAUDE_HAND_LOG"] = "off"  # the tests leave the real event log alone
+os.environ["CLAUDE_HAND_LANG"] = "ko"  # the words here are the Korean ones, whatever this PC is set to
 import claude_hand as ch  # noqa: E402
 import handlib.agents  # noqa: E402
 import handlib.capture  # noqa: E402
@@ -1191,7 +1192,8 @@ class UpdateAndStatusTests(unittest.TestCase):
             (skills / "claude-hand-unity").mkdir()
             (skills / "claude-hand-unity" / "SKILL.md").write_text("---\nname: claude-hand-unity\n---\n", encoding="utf-8")
             with unittest.mock.patch.object(handlib.discovery, "candidate_config_files", lambda cwd=None: []), \
-                 unittest.mock.patch.object(handlib.install, "find_chat_addon_installs", lambda base=None: []):
+                 unittest.mock.patch.object(handlib.install, "find_chat_addon_installs", lambda base=None: []), \
+                 unittest.mock.patch.dict(os.environ, {"CLAUDE_HAND_HOME": str(Path(tmp) / "home")}):  # no config.json: Korean
                 items = {c.item for c in handlib.checks.stale_checks(agents, skills)}
                 self.assertIn("설치된 감독 스킬이 저장소 버전과 다름", items)
                 self.assertIn("이전 버전으로 만든 하위 세션 정의", items)
@@ -1204,6 +1206,9 @@ class UpdateAndStatusTests(unittest.TestCase):
                      unittest.mock.patch.object(handlib.constants, "REPO_ROOT", Path(tmp) / "repo"):
                     ch.main(["update", "--agents-dir", str(agents), "--skills-dir", str(skills)])
                 self.assertEqual(handlib.checks.stale_checks(agents, skills), [])
+                # A doctor asked to speak English this once: the files are in the configured language, and still right.
+                with unittest.mock.patch.dict(os.environ, {"CLAUDE_HAND_LANG": "en"}):
+                    self.assertEqual(handlib.checks.stale_checks(agents, skills), [])
             self.assertFalse((skills / "claude-hand-unity").exists())
             self.assertIn("## 작업 순서", agent_file.read_text(encoding="utf-8"))
 
@@ -1408,12 +1413,18 @@ class StatusTests(unittest.TestCase):
 
 
 class RemoteControlTests(unittest.TestCase):
+    def test_the_banner_can_leave_out_that_the_window_minimizes(self):
+        from handlib import english
+        self.assertIn(handlib.launch.BANNER_MINIMIZES, handlib.launch.BANNER)
+        self.assertIn(english.EN[handlib.launch.BANNER_MINIMIZES], english.EN[handlib.launch.BANNER])
+
     def test_launch_args(self):
         on = '--remote-control --name "Claude Hand"'
         self.assertEqual(handlib.launch.launch_args({}, env={}), on)  # on by default
         self.assertEqual(handlib.launch.launch_args({"remote_control": True}, env={}), on)
-        self.assertEqual(handlib.launch.launch_args({"remote_control": False}, env={}), "")
-        self.assertEqual(handlib.launch.launch_args({}, env={"ANTHROPIC_API_KEY": "x"}), "")  # cannot work with this login: left out
+        # Without Remote Control the session still has its name: the window is titled by it ("claude" otherwise).
+        self.assertEqual(handlib.launch.launch_args({"remote_control": False}, env={}), '--name "Claude Hand"')
+        self.assertEqual(handlib.launch.launch_args({}, env={"ANTHROPIC_API_KEY": "x"}), '--name "Claude Hand"')  # cannot work with this login: left out
 
     def test_problems(self):
         self.assertEqual(handlib.launch.remote_control_problems({}), [])

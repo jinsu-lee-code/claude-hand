@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from handlib import constants, discovery, link, settings
+from handlib.lang import T
 
 
 def direct_app_servers(files: list[Path] | None = None) -> list[str]:
@@ -150,37 +151,37 @@ def chat_status_report(home: Path | None = None, mcp_entry=claude_mcp_get, fetch
     entry = mcp_entry()
     config = settings.read_json_file(root / ".mcp.json").get("mcpServers", {}).get(constants.CHAT_SERVER_NAME)
     if config is None:
-        lines.append("!! 이 폴더의 .mcp.json에 claude-hand-chat이 없습니다 → uv run tools/claude_hand.py chat-setup")
+        lines.append(T("!! 이 폴더의 .mcp.json에 claude-hand-chat이 없습니다 → uv run tools/claude_hand.py chat-setup"))
     elif "CLAUDE_HAND_SUPERVISOR" not in (config.get("env") or {}):
-        lines.append("!! .mcp.json이 이전 버전 형식입니다 → uv run tools/claude_hand.py chat-setup 으로 고치세요")
+        lines.append(T("!! .mcp.json이 이전 버전 형식입니다 → uv run tools/claude_hand.py chat-setup 으로 고치세요"))
     if entry is not None and entry.exists and entry.scope == "local":
-        lines.append("!! 이전 버전이 local 범위로 등록한 claude-hand-chat이 남아 있어 .mcp.json보다 먼저 쓰입니다 "
-                     "→ uv run tools/claude_hand.py update (또는 claude mcp remove claude-hand-chat -s local)")
+        lines.append(T("!! 이전 버전이 local 범위로 등록한 claude-hand-chat이 남아 있어 .mcp.json보다 먼저 쓰입니다 "
+                     "→ uv run tools/claude_hand.py update (또는 claude mcp remove claude-hand-chat -s local)"))
     if entry is not None and entry.pending:
-        lines.append("!! .mcp.json의 claude-hand-chat이 승인 대기 중입니다 → start-supervisor.cmd로 연 Claude Code에서 승인하세요 "
-                     "(거절했었다면 claude mcp reset-project-choices 후 다시)")
+        lines.append(T("!! .mcp.json의 claude-hand-chat이 승인 대기 중입니다 → start-supervisor.cmd로 연 Claude Code에서 승인하세요 "
+                     "(거절했었다면 claude mcp reset-project-choices 후 다시)"))
     if server:
         try:
             req = urllib.request.Request(f"http://127.0.0.1:{server['port']}/v1/status",
                                          headers={"X-Claude-Hand-Token": server.get("token", "")})
             state = (fetch or (lambda r: json.loads(urllib.request.urlopen(r, timeout=3).read().decode("utf-8"))))(req)
         except (OSError, ValueError, KeyError) as exc:
-            lines.append(f"!! server.json은 있지만 채널 서버가 응답하지 않습니다({exc}). 감독 세션이 비정상 종료됐을 수 있습니다 "
-                         "→ start-supervisor.cmd로 다시 여세요")
+            lines.append(T("!! server.json은 있지만 채널 서버가 응답하지 않습니다({exc}). 감독 세션이 비정상 종료됐을 수 있습니다 → start-supervisor.cmd로 다시 여세요", exc=exc))
         else:
             if state.get("claude_connected"):
-                lines.append(f"OK 감독 세션이 채팅을 받고 있습니다 (포트 {server['port']}, 채팅 {', '.join(state.get('chats', [])) or '아직 없음'})")
+                lines.append(T("OK 감독 세션이 채팅을 받고 있습니다 (포트 {port}, 채팅 {chats})", port=server['port'], chats=', '.join(state.get('chats', [])) or T('아직 없음')))
             else:
-                lines.append("!! 채널 서버는 떴지만 Claude Code와의 연결이 아직 끝나지 않았습니다. 잠시 뒤 다시 확인하세요")
+                lines.append(T("!! 채널 서버는 떴지만 Claude Code와의 연결이 아직 끝나지 않았습니다. 잠시 뒤 다시 확인하세요"))
     elif status and status.get("mode") == "passive":
-        lines.append(f"!! 채널 서버가 대기 모드로 떴습니다: {status.get('reason')}")
-        lines.append("   → 감독 세션은 claude-hand 폴더의 start-supervisor.cmd로 여세요. 데스크톱 앱이나 그냥 연 claude는 채팅을 받지 않습니다")
+        lines.append(T("!! 채널 서버가 대기 모드로 떴습니다: {reason}", reason=status.get('reason')))
+        lines.append(T("   → 감독 세션은 claude-hand 폴더의 start-supervisor.cmd로 여세요. 데스크톱 앱이나 그냥 연 claude는 채팅을 받지 않습니다"))
     elif status and status.get("mode") == "stopped":
-        lines.append("!! 감독 세션이 종료됐습니다 → start-supervisor.cmd로 다시 여세요")
+        lines.append(T("!! 감독 세션이 종료됐습니다 → start-supervisor.cmd로 다시 여세요"))
     else:
-        lines.append("!! 채널 서버가 아직 한 번도 시작되지 않았습니다")
-        lines.append("   → start-supervisor.cmd로 연 Claude Code에서 /mcp 를 입력해 claude-hand-chat 상태를 보세요 "
-                     "(⏸ 승인 대기면 승인, failed면 uv가 PATH에 있는지와 chat-setup 점검 결과를 확인)")
+        lines.append(T("!! 채널 서버가 아직 한 번도 시작되지 않았습니다"))
+        lines.append(T("   → start-supervisor.cmd로 연 Claude Code에서 /mcp 를 입력해 claude-hand-chat 상태를 보세요 "
+                     "(⏸ 승인 대기면 승인, failed면 uv가 PATH에 있는지와 chat-setup 점검 결과를 확인)"))
     if os.environ.get("CLAUDE_HAND_HOME"):
-        lines.append(f"-- CLAUDE_HAND_HOME={os.environ['CLAUDE_HAND_HOME']} 가 설정돼 있습니다. Unity·Blender도 같은 값을 써야 합니다")
+        lines.append(T("-- CLAUDE_HAND_HOME={home} 가 설정돼 있습니다. Unity·Blender도 같은 값을 써야 합니다",
+                       home=os.environ['CLAUDE_HAND_HOME']))
     return lines

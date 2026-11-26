@@ -72,6 +72,8 @@ namespace ClaudeHand.Editor
             bool waiting = false;
             try
             {
+                LanguageChecks();
+                ChText.Forced = "ko";  // the checks below hold the package to its Korean words, whatever this PC is set to
                 ModelChecks();
                 waiting = StartPackageChecks();
             }
@@ -80,6 +82,70 @@ namespace ClaudeHand.Editor
                 Check("ran to the end", false, ex.ToString());
             }
             if (!waiting) Finish();
+        }
+
+        /// <summary>
+        /// The settings and the two languages: what the settings window writes is read back (in a file of this test's
+        /// own, not the user's config.json), and the words of the package follow the language it says, at once.
+        /// </summary>
+        private static void LanguageChecks()
+        {
+            var file = Path.Combine(ChPaths.LibraryDir, "selftest-config.json");
+            Directory.CreateDirectory(ChPaths.LibraryDir);
+            var forcedBefore = Environment.GetEnvironmentVariable("CLAUDE_HAND_LANG");
+            try
+            {
+                Environment.SetEnvironmentVariable("CLAUDE_HAND_LANG", null);  // these go by the settings file
+                ChText.Forced = null;
+                ChSettings.FileOverride = file;
+                File.WriteAllText(file, "{\"repo\": \"C:/claude-hand\", \"show_cost\": false}");
+                var row = new ChProtect.Row { kind = "window", value = "look", lasting = false };
+                Func<string> words = () => ChProtect.Label(row) + " / " + ChText.T("되돌리기: {0} ({1})", "큐브", "14:02") + " / " +
+                                           ChText.T(ChProtect.ActionWords["save_scene"]) + " / " + ChText.T("이전 대화 {0}개 더 보기", 3);
+                string asWritten = words();
+                Check("language: Korean is the text as it is written, and what is used when the settings name none",
+                    ChSettings.Language == "ko" && asWritten == "이 창: 보기만 (이번만) / 되돌리기: 큐브 (14:02) / 씬 저장 / 이전 대화 3개 더 보기", asWritten);
+
+                string problem = ChSettings.Set("language", "en");
+                string english = words();
+                Check("language: English at once when the settings window says so",
+                    problem == null && ChSettings.Language == "en" &&
+                    english == "This window: Look only (this run only) / Undo: 큐브 (14:02) / Save scene / Show 3 earlier messages" &&
+                    ChText.T("{0}일", 1) == "1 day" && ChText.T("{0}일", 30) == "30 days", $"{problem} / {english} / {ChText.T("{0}일", 1)}");  // one of a thing: its own wording
+                Check("language: a text with no English comes out in Korean", ChText.T("번역이 아직 없는 글 {0}", 1) == "번역이 아직 없는 글 1");
+
+                problem = ChSettings.SetLab("selftest_feature", true) ?? ChSettings.Set("flash_taskbar", false);
+                var written = JObject.Parse(File.ReadAllText(file));
+                Check("settings: a change is in config.json at once and leaves what else is there",
+                    problem == null && written.Value<string>("language") == "en" && written.Value<string>("repo") == "C:/claude-hand" &&
+                    written.Value<bool?>("show_cost") == false && written["lab"].Value<bool>("selftest_feature") && !ChSettings.On("flash_taskbar") &&
+                    ChSettings.On("show_previews"), written.ToString(Formatting.None));
+
+                File.WriteAllText(file, "{\"language\": \"k");  // caught while another window is writing it
+                Check("settings: a file caught half written leaves the settings as they were", ChSettings.Language == "en" && !ChSettings.On("flash_taskbar"));
+                File.WriteAllText(file, "{\"language\": \"ko\"}");
+                Check("settings: a change made by another window is read", ChSettings.Language == "ko" && ChSettings.On("flash_taskbar") && words() == asWritten);
+
+                ChSettings.FileOverride = null;
+                var listed = ChSettings.Settings;
+                Check("settings: the window has its rows from the catalog, the language among them",
+                    listed.Any(e => e.key == "language" && e.kind == "choice" && e.choices.Count == 2) &&
+                    (!ChSettings.CatalogFound || (listed.Any(e => e.key == "show_cost" && e.kind == "switch") && listed.Any(e => e.key == "history_keep_days" && e.kind == "days"))),
+                    $"catalog {(ChSettings.CatalogFound ? "read" : "not found")}: {string.Join(", ", listed.Select(e => e.key))} / lab: {string.Join(", ", ChSettings.Lab.Select(e => e.key))}");
+            }
+            finally
+            {
+                ChSettings.FileOverride = null;
+                Environment.SetEnvironmentVariable("CLAUDE_HAND_LANG", forcedBefore);
+                try
+                {
+                    File.Delete(file);
+                }
+                catch (Exception)
+                {
+                    // a small file in Library
+                }
+            }
         }
 
         private static void ModelChecks()
@@ -882,6 +948,7 @@ namespace ClaudeHand.Editor
         /// <summary>Deletes what the test made, writes the result and, without a window, ends Unity.</summary>
         private static void Finish()
         {
+            ChText.Forced = null;
             try
             {
                 foreach (var parent in new[] { "Assets/ClaudeHand/Imports", Transfers })

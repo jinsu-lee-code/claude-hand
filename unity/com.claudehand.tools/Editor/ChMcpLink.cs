@@ -108,7 +108,7 @@ namespace ClaudeHand.Editor
             bool? running = Running();
             if (running == true && _tries > 0 && _downSince >= 0)
             {
-                Debug.Log("[Claude Hand] MCP for Unity의 연결이 " + Math.Round(now - _downSince) + "초 동안 꺼져 있어 다시 켰습니다 (포트 " + Port() + ").");
+                Debug.Log("[Claude Hand] " + ChText.T("MCP for Unity의 연결이 {0}초 동안 꺼져 있어 다시 켰습니다 (포트 {1}).", Math.Round(now - _downSince), Port()));
             }
             if (running != false || EditorApplication.isCompiling || EditorApplication.isUpdating || OnHttp || !Keeping)
             {
@@ -133,8 +133,8 @@ namespace ClaudeHand.Editor
             {
                 if (_tries == 1)
                 {
-                    Debug.LogWarning("[Claude Hand] MCP for Unity의 연결이 꺼져 있는데 다시 켜지 못했습니다: " + (ex.InnerException ?? ex).Message +
-                                     "  Window > MCP for Unity에서 직접 연결해 주세요.");
+                    Debug.LogWarning("[Claude Hand] " + ChText.T("MCP for Unity의 연결이 꺼져 있는데 다시 켜지 못했습니다: {0}  Window > MCP for Unity에서 직접 연결해 주세요.",
+                                                              (ex.InnerException ?? ex).Message));
                 }
             }
         }
@@ -152,7 +152,7 @@ namespace ClaudeHand.Editor
                 return;
             }
             var direct = Host?.GetMethod("StartAutoConnect", Any);
-            if (direct == null) throw new InvalidOperationException("MCP for Unity의 연결을 켜는 길을 찾지 못했습니다.");
+            if (direct == null) throw new InvalidOperationException(ChText.T("MCP for Unity의 연결을 켜는 길을 찾지 못했습니다."));
             direct.Invoke(null, null);
         }
     }

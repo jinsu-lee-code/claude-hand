@@ -31,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from handlib import eventlog  # noqa: E402
 from handlib.constants import VERSION  # noqa: E402
+from handlib.lang import T  # noqa: E402
 from handlib.link import claude_hand_home  # noqa: E402
 
 SERVER_VERSION = VERSION
@@ -150,17 +151,17 @@ def describe_dialogs(dialogs: list[dict]) -> str:
     """"'Save Scene' 창: Do you want to save? [버튼: Save / Don't Save / Cancel]" for each dialog."""
     parts = []
     for d in dialogs:
-        part = f"'{d.get('title') or '제목 없음'}' 창" + (f": {d['text']}" if d.get("text") else "")
+        part = T("'{title}' 창", title=d.get('title') or T('제목 없음')) + (f": {d['text']}" if d.get("text") else "")
         if d.get("buttons"):
-            part += " [버튼: " + " / ".join(d["buttons"]) + "]"
+            part += T(" [버튼: ") + " / ".join(d["buttons"]) + "]"
         parts.append(part)
     return "; ".join(parts)
 
 
 def dialog_error(entry: dict, dialogs: list[dict]) -> BridgeError:
-    return BridgeError("DIALOG", f"Unity {entry.get('name')}가 대화상자 때문에 멈춰 있습니다: {describe_dialogs(dialogs)}. "
-                                 "누를 버튼은 사용자가 정합니다. 그대로 감독에게 보고하세요. 대화상자가 닫히면 이 호출이 "
-                                 "그때 실행될 수 있으니 다시 하기 전에 상태부터 확인하세요.", "check_first")
+    return BridgeError("DIALOG", T("Unity {name}가 대화상자 때문에 멈춰 있습니다: {dialogs}. 누를 버튼은 사용자가 정합니다. 그대로 감독에게 보고하세요. 대화상자가 닫히면 이 호출이 그때 "
+                                   "실행될 수 있으니 다시 하기 전에 상태부터 확인하세요.",
+                                   name=entry.get('name'), dialogs=describe_dialogs(dialogs)), "check_first")
 
 
 def request(entry: dict, tool: str, params: dict | None = None, timeout: float = 130.0, connect_timeout: float = 1.0,

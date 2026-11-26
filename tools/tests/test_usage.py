@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+os.environ["CLAUDE_HAND_LANG"] = "ko"  # the words here are the Korean ones, whatever this PC is set to
 from handlib import usage  # noqa: E402
 
 BASE = datetime(2026, 11, 23, 3, 0, 0, tzinfo=timezone.utc).timestamp()

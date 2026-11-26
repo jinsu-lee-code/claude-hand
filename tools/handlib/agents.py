@@ -11,7 +11,8 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from handlib import constants, discovery, settings
+from handlib import constants, discovery, prefs, settings
+from handlib.lang import T
 
 
 def slug(name: str) -> str:
@@ -125,8 +126,8 @@ def render_agent(inst: discovery.Instance, name: str, server: discovery.ServerCo
         "---",
         f"name: {name}",
         "description: " + q(
-            f"Unity 프로젝트 {inst.name} 전담 작업자 ({inst.id}). 이 프로젝트의 씬·오브젝트·에셋을 보거나 고칠 때, "
-            f"또는 다른 Unity 프로젝트와 오브젝트를 주고받을 때 맡긴다. 이 프로젝트 말고는 건드리지 못한다."
+            T("Unity 프로젝트 {name} 전담 작업자 ({id}). 이 프로젝트의 씬·오브젝트·에셋을 보거나 고칠 때, 또는 다른 Unity 프로젝트와 오브젝트를 주고받을 때 맡긴다. 이 프로젝트 말고는 건드리지 못한다.",
+              name=inst.name, id=inst.id)
         ),
     ]
     bridge_key = f"{key}_ch"
@@ -171,9 +172,38 @@ def blender_notes_path(filepath: str) -> str:
     return Path(filepath).with_suffix(".claude-hand.md").as_posix() if filepath else ""
 
 
+def prompt_language() -> str:
+    """The language of the instructions Claude is given. Korean, the edition refined in real work, unless the
+    interface is English and the lab's "english_prompts" is on (settings/catalog.json): then prompts/en/."""
+    return "en" if prefs.language() == "en" and prefs.lab_on("english_prompts") else "ko"
+
+
+def P(text: str, /, **values) -> str:
+    """A piece that goes into a prompt, in the prompt's language (T goes by the interface's: with Korean
+    instructions and an English interface the two differ)."""
+    if prompt_language() == "en":
+        from handlib import english
+        text = english.EN.get(text, text)
+    return text.format(**values) if values else text
+
+
 def prompt_template(name: str) -> str:
-    """A subagent prompt as it is written in prompts/<name>.md."""
+    """A prompt as it is written in prompts/<name>.md, or in prompts/en/<name>.md for English instructions."""
+    english = constants.PROMPTS_DIR / "en" / f"{name}.md"
+    if prompt_language() == "en" and english.is_file():
+        return english.read_text(encoding="utf-8")
     return (constants.PROMPTS_DIR / f"{name}.md").read_text(encoding="utf-8")
+
+
+def glossary() -> str:
+    """What Korean instructions get at their end while the interface is English: the names they use in Korean for
+    the panels' buttons and for what the hooks say, with what the user and the tool results show instead (the pairs
+    are english.GLOSSARY, taken from the same texts the interface says). "" when the two languages are the same."""
+    if prefs.language() != "en" or prompt_language() != "ko":
+        return ""
+    from handlib import english
+    rows = "\n".join(f"- {ko} → {en}" for ko, en in english.GLOSSARY)
+    return "\n" + fill((constants.PROMPTS_DIR / "glossary-en.md").read_text(encoding="utf-8"), ROWS=rows)
 
 
 def fill(template: str, flags: dict[str, bool] | None = None, **values: str) -> str:
@@ -198,8 +228,8 @@ def notes_section(path: str, what: str) -> str:
 
 def render_agent_prompt(inst: discovery.Instance, key: str, transport: str) -> str:
     return fill(prompt_template("unity-subagent"), flags={"HTTP": transport == "http"},
-                NAME=inst.name, LOCATION=f" (경로: `{inst.path}`)" if inst.path else "", PIN=inst.id, KEY=key,
-                NOTES=notes_section(unity_notes_path(inst.path), "프로젝트"))
+                NAME=inst.name, LOCATION=P(" (경로: `{path}`)", path=inst.path) if inst.path else "", PIN=inst.id, KEY=key,
+                NOTES=notes_section(unity_notes_path(inst.path), P("프로젝트"))) + glossary()
 
 
 def blender_agent_names(instances: list[discovery.BlenderInstance]) -> dict[str, str]:
@@ -230,13 +260,14 @@ def with_port(args: list[str], port: int) -> list[str]:
 
 def render_blender_agent(inst: discovery.BlenderInstance, name: str, server: discovery.ServerConfig, runner: str, allowlist: bool) -> str:
     key = server_key(name)
-    shown = inst.filepath or "(저장 안 된 파일)"
+    shown = inst.filepath or T("(저장 안 된 파일)")
     lines = [
         "---",
         f"name: {name}",
         "description: " + q(
-            f"Blender 창 전담 작업자: {inst.name} ({shown}, MCP for Blender 포트 {inst.port}). 이 Blender의 오브젝트·머티리얼·씬을 "
-            f"보거나 고칠 때, 또는 다른 Blender나 Unity로 모델을 보내고 받을 때 맡긴다. 다른 Blender 창은 건드리지 못한다."
+            T("Blender 창 전담 작업자: {name} ({shown}, MCP for Blender 포트 {port}). 이 Blender의 오브젝트·머티리얼·씬을 보거나 고칠 때, 또는 다른 Blender나 Unity로 모델을 "
+              "보내고 받을 때 맡긴다. 다른 Blender 창은 건드리지 못한다.",
+              name=inst.name, shown=shown, port=inst.port)
         ),
         "tools: " + q(f"mcp__{key}__*, Read, Glob, Grep") if allowlist else "disallowedTools: " + q(f"mcp__{server.key}__*"),
         "mcpServers:",
@@ -256,8 +287,8 @@ def render_blender_agent(inst: discovery.BlenderInstance, name: str, server: dis
 
 
 def render_blender_prompt(inst: discovery.BlenderInstance, key: str) -> str:
-    return fill(prompt_template("blender-subagent"), NAME=inst.name, FILE=inst.filepath or "저장 안 된 파일",
-                PORT=str(inst.port), KEY=key, NOTES=notes_section(blender_notes_path(inst.filepath), "파일"))
+    return fill(prompt_template("blender-subagent"), NAME=inst.name, FILE=inst.filepath or P("저장 안 된 파일"),
+                PORT=str(inst.port), KEY=key, NOTES=notes_section(blender_notes_path(inst.filepath), P("파일"))) + glossary()
 
 
 @dataclass
@@ -326,9 +357,15 @@ def sync_agents(instances: list[discovery.Instance], agents_dir: Path, server: d
 def rendered_skill(root: Path = constants.REPO_ROOT) -> str:
     """The supervisor skill as installed. {{CLAUDE_HAND}} becomes this checkout's folder, so the skill can run
     claude_hand.py itself from any working folder (the Desktop app's Code tab has no start script). {{CHAT_RULES}}
-    becomes prompts/chat-rules.md, the same text the chat channel gives the supervisor as its instructions."""
-    return fill(constants.SKILL_SOURCE.read_text(encoding="utf-8"), CLAUDE_HAND=root.as_posix(),
-                CHAT_RULES=prompt_template("chat-rules"))
+    becomes prompts/chat-rules.md, the same text the chat channel gives the supervisor as its instructions.
+    English instructions (prompt_language) come from SKILL.en.md beside it. The description, which the user sees in
+    the list of skills and which makes Claude take the skill up, is said in the interface's language either way."""
+    source = constants.SKILL_SOURCE.with_name("SKILL.en.md")
+    if prompt_language() != "en" or not source.is_file():
+        source = constants.SKILL_SOURCE
+    text = fill(source.read_text(encoding="utf-8"), CLAUDE_HAND=root.as_posix(), CHAT_RULES=prompt_template("chat-rules"))
+    text = re.sub(r"^description: (.+)$", lambda found: "description: " + T(found.group(1)), text, count=1, flags=re.M)
+    return text + glossary()
 
 
 def install_skill(skills_dir: Path, dry_run: bool = False) -> Path:
@@ -351,6 +388,27 @@ def refresh_agents(agents_dir: Path | None = None, runner: str = "uv run -q --no
         return SyncResult()
     return sync_agents(unity, agents_dir, server, runner, blender=blender,
                        blender_server=discovery.detect_blender_config() if blender else None, notes_root=constants.REPO_ROOT)
+
+
+def rewrite_installed(agents_dir: Path | None = None, skills_dir: Path | None = None, runner: str = "uv run -q --no-project") -> SyncResult:
+    """Write every subagent file sync made, and the supervisor skill where it is installed, again from the templates
+    as they stand now: the interface's language changed, or the language of the instructions (the lab's
+    "english_prompts"). Windows need not be open for it; a file that is as it would be written is left alone.
+    The skill is looked for beside the agents folder (~/.claude/agents, ~/.claude/skills) unless its folder is given:
+    whoever points this at another agents folder, a test or a trial run, does not have the real skill rewritten."""
+    agents_dir = agents_dir or Path.home() / ".claude" / "agents"
+    skills_dir = skills_dir or agents_dir.parent / "skills"
+    known = [info.instance() for info in installed_agents(agents_dir)]
+    unity = [inst for inst in known if isinstance(inst, discovery.Instance)]
+    blender = [inst for inst in known if isinstance(inst, discovery.BlenderInstance)]
+    result = SyncResult()
+    if unity or blender:
+        result = sync_agents(unity, agents_dir, discovery.detect_server_config(), runner, blender=blender,
+                             blender_server=discovery.detect_blender_config() if blender else None)
+    skill = skills_dir / "claude-hand" / "SKILL.md"
+    if skill.exists() and skill.read_text(encoding="utf-8") != rendered_skill():
+        result.written.append(install_skill(skill.parent.parent))
+    return result
 
 
 META_PREFIX = "<!-- claude-hand: "

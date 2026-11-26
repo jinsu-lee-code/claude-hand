@@ -19,7 +19,7 @@ Unity·Blender 안의 채팅창 ──(claude-hand-chat 채널)──┐
  └─ 교환 폴더 %USERPROFILE%\.claude-hand\exchange  (.unitypackage / .blend / .fbx + manifest, 30일 지나면 켤 때 정리)
 ```
 
-> **1.0.0** (2026-11-24) · Windows의 실제 Unity 6.3과 Blender 5.2에서, 열린 창과 실제 감독 세션으로 확인했습니다. macOS·Linux에서는 자동 테스트만 돌렸습니다.
+> **1.1.0** (2026-11-25) · 1.0.0까지는 Windows의 실제 Unity 6.3과 Blender 5.2에서, 열린 창과 실제 감독 세션으로 확인했습니다. 1.1.0에서 더한 설정창 · 화면 영어 · 실험실은 자동 테스트, 창 없는 Blender · Unity 안 테스트, 열린 창(따로 꾸민 시험 환경, 감독 자리는 흉내)으로 확인했고, 2026-11-26에 실제 감독 세션으로도 확인했습니다. macOS·Linux에서는 자동 테스트만 돌렸습니다.
 > 무엇을 어떻게 확인했는지는 [검증 순서](docs/TEST-PLAN.md)와 [점검 기록](docs/REVIEW-2026-11-10.md)에, 버전마다 바뀐 것은 [버전별 변경 내용](#버전별-변경-내용)에 있습니다.
 
 ## 할 수 있는 것
@@ -32,6 +32,7 @@ Unity·Blender 안의 채팅창 ──(claude-hand-chat 채널)──┐
 - **중지 · 현황 · 기록.** 일하는 중에 멈추고, 다른 창이 무엇을 하는지 보고, 한 요청에 무슨 일이 있었는지와 든 시간 · 토큰을 봅니다(`status`, `trace`, `usage`).
 - **보호 규칙.** "이건 건드리지 마"를 창마다 정해 두면 Claude가 지키기를 기대하지 않고 기계가 막거나 되돌립니다. → [건드리면 안 되는 것 정해 두기](#건드리면-안-되는-것-정해-두기-보호-규칙)
 - **데스크톱 앱 · 모바일.** 같은 세션을 Claude 데스크톱 앱과 모바일 앱에서 보고 말합니다. → [Claude 데스크톱 앱에서 보고 말하기](#claude-데스크톱-앱에서-보고-말하기)
+- **설정창 · 화면 영어 · 실험실.** 채팅창의 톱니바퀴 버튼으로 기능을 켜고 끄고, 화면 언어(한국어 · English)를 고르고, 아직 다듬는 중인 새 기능을 골라 켭니다. → [설정창](#설정창)
 
 ## 목차
 
@@ -39,6 +40,7 @@ Unity·Blender 안의 채팅창 ──(claude-hand-chat 채널)──┐
 - [설치](#설치)
 - [매일 쓰는 법](#매일-쓰는-법)
 - [창마다 채팅하기](#창마다-채팅하기)
+- [설정창](#설정창)
 - [창 사이 옮기기](#창-사이-옮기기)
 - [Claude 데스크톱 앱에서 보고 말하기](#claude-데스크톱-앱에서-보고-말하기)
 - [새 버전 받기](#새-버전-받기)
@@ -169,7 +171,7 @@ uv run tools/claude_hand.py selftest    # 실제로 동작하는지 (1분쯤, �
   ```powershell
   uv run tools/claude_hand.py selftest --unity-project "C:\경로\프로젝트"
   ```
-  Unity를 창 없이 열어 Blender가 실제로 내보낸 모델을 받고, 다시 온 모델을 제자리에서 바꾸고, 되돌리기 · 저장 따라가기 · 보호 규칙까지 확인합니다(72개 항목). 저장하지 않는 새 씬에서 하고, 만든 에셋은 끝나면 지웁니다. 바꾸기 전 파일 사본과 되돌리기를 확인하며 뺀 시험용 에셋이 `Library/ClaudeHand/replaced/`와 `removed/`에 남습니다(둘 다 최근 10개만).
+  Unity를 창 없이 열어 Blender가 실제로 내보낸 모델을 받고, 다시 온 모델을 제자리에서 바꾸고, 되돌리기 · 저장 따라가기 · 보호 규칙, 그리고 설정과 화면 언어까지 확인합니다(79개 항목). 저장하지 않는 새 씬에서 하고, 만든 에셋은 끝나면 지웁니다. 바꾸기 전 파일 사본과 되돌리기를 확인하며 뺀 시험용 에셋이 `Library/ClaudeHand/replaced/`와 `removed/`에 남습니다(둘 다 최근 10개만).
 
 ## 매일 쓰는 법
 
@@ -273,7 +275,7 @@ uv run tools/claude_hand.py usage --days 7    # 일주일 치 (날짜별 합계�
 - **출력**은 Claude가 써낸 토큰, **새 입력**은 새로 읽은 토큰(캐시에 새로 쓴 것 포함), **다시 읽기**는 캐시에서 다시 읽은 토큰입니다. 다시 읽기가 대부분이고 훨씬 싸서 합치지 않고 따로 보여 줍니다.
 - 한참 쉬었다가 보낸 요청은 캐시가 식어서 대화를 새로 읽으므로 `새 입력`이 수십 배로 뜁니다. 비용을 줄일 때 볼 곳이 거기입니다.
 - 달러로는 바꿔 보여 주지 않습니다(요금제마다 뜻이 다릅니다).
-- `usage`는 Claude Hand가 꺼져 있어도 됩니다. 채팅창의 줄을 끄려면 `%USERPROFILE%\.claude-hand\config.json`에 `"show_cost": false`를 넣고 Claude Hand를 다시 켭니다. 기록과 `usage`에는 그대로 남습니다.
+- `usage`는 Claude Hand가 꺼져 있어도 됩니다. 채팅창의 줄은 [설정창](#설정창)의 **요청마다 든 시간 · 토큰 줄**로 끕니다(바로 적용됩니다). 기록과 `usage`에는 그대로 남습니다.
 
 ### 저장하면 Unity의 모델이 따라오게 하기
 
@@ -342,6 +344,56 @@ uv run tools/claude_hand.py chat-status
 - 채팅창과 채널은 내 PC 안(127.0.0.1)에서만, 토큰을 아는 프로그램끼리만 통신합니다. 토큰은 `%USERPROFILE%\.claude-hand\chat\server.json`에 있습니다. 방화벽 규칙은 필요 없고, 방화벽 창이 떠도 허용하지 않아도 됩니다.
 - `chat-setup`은 이 폴더에 `.mcp.json`(채널 등록)과 `.claude/settings.local.json`(답장 · 현재 상황 도구 자동 허용, 감독이 Unity · Blender를 직접 조작하는 도구 막기)을 만듭니다. 기존 내용은 유지하고, 둘 다 git에 올라가지 않습니다. 채널 서버도 한 번 미리 실행해 점검합니다(처음에는 uv가 Python을 내려받느라 늦을 수 있어서).
 
+## 설정창
+
+채팅창의 **톱니바퀴 버튼**을 누르면 설정창이 뜹니다. Unity는 채팅창 맨 위 오른쪽에, Blender는 Claude Hand Chat 패널 제목 줄의 오른쪽 끝에 있습니다. 탭이 둘입니다.
+
+### 기능 켜고 끄기
+
+| 설정 | 하는 일 | 바꾸면 |
+|---|---|---|
+| **언어 · Language** | 화면의 글을 한국어나 English로 | 바로 |
+| **요청마다 든 시간 · 토큰 줄** | 결과 답 아래의 `이 요청: …` 줄 | 바로 |
+| **바뀐 다른 창의 그림 붙이기** | 요청이 다른 창을 바꿨을 때 결과 아래에 붙는 그 창의 그림 | 바로 |
+| **답이 오면 작업 표시줄 깜빡임** | 다른 프로그램을 보는 동안 온 답 · 허락 요청 알림 (Windows) | 바로 |
+| **Claude 데스크톱 앱에서 보기 (Remote Control)** | 데스크톱 앱 · 모바일에서 세션 보기 | 다음에 켤 때 |
+| **Claude Hand 창 자동 최소화** | 세션이 일을 시작하면 검은 Claude Hand 창 최소화 (Windows) | 다음에 켤 때 |
+| **대화 내용 보관 일수** | 채팅창에 다시 보여 주는 지난 대화와 그 그림을 며칠 둘지. 0이면 날짜로는 지우지 않습니다(창마다 최근 100개) | 다음에 켤 때 |
+| **옮긴 파일 보관 일수** | 교환 폴더에 남은 옮긴 파일 사본을 며칠 둘지. 0이면 지우지 않습니다 | 다음에 켤 때 |
+
+- **상태는 글로 보입니다**: `켜짐` · `꺼짐`, `30일`, `지우지 않음`. `*`가 붙은 것은 다음에 Claude Hand를 켤 때부터 적용됩니다.
+- **한 곳에 적힙니다.** 설정은 `%USERPROFILE%\.claude-hand\config.json`에 있고, Unity · Blender · 채널 · 명령 · 안전장치가 모두 이 파일을 쓸 때마다 다시 읽습니다. 한 창에서 바꾸면 다른 창에도 바로 반영되고, Claude Hand를 다시 켤 필요가 없습니다(표에서 "다음에 켤 때"인 넷은 빼고).
+- **끄는 스위치가 없는 것:** 안전장치, 보호 규칙, 되돌리기 지점.
+- "선택 항목 함께 보내기"는 메시지마다 고르는 것이라 보내기 버튼 옆에 그대로 있습니다.
+
+### 화면 언어
+
+**English**를 고르면 채팅창과 Blender 패널의 글, 채널이 채팅창에 쓰는 줄, `claude_hand.py` 명령의 출력, 막힌 호출의 이유가 영어로 나옵니다. 고르지 않으면 지금까지처럼 한국어입니다. 요청은 어느 언어로 써도 되고, Claude는 사용자가 쓴 언어로 답합니다.
+
+- **켜져 있는 Claude Hand에도 바로 적용됩니다.** 채널이 감독에게 "화면 언어가 바뀌었다"는 알림과 버튼 이름 대조표를 보내고, 하위 세션 정의와 감독 스킬을 그 언어로 다시 씁니다.
+- 이미 채팅창에 찍힌 줄은 찍힐 때의 언어로 남습니다.
+- **Claude에게 주는 지침(`prompts/`)은 한국어 그대로입니다.** 화면이 영어일 때는 지침 끝에 영어 버튼 이름 대조표가 붙어, Claude가 버튼을 화면에 보이는 이름으로 말합니다. 지침까지 영어판으로 주는 것은 아래 실험실에 있습니다.
+- `docs/` 아래 문서는 한국어입니다.
+
+### 실험실
+
+새 기능이 먼저 들어오는 자리입니다. 여기 있는 기능은 **켜야 쓰이고**, 써 보며 다듬은 뒤 기본 기능이 되면 실험실에서 빠집니다. 지금 있는 것:
+
+| 기능 | 들어온 버전 | 하는 일 |
+|---|---|---|
+| **Claude 지침 영어판** | 1.1.0 | 언어가 English일 때 Claude에게 주는 지침(하위 세션, 감독 규칙)도 영어판(`prompts/en/`)으로 줍니다. 한국어판을 줄마다 옮긴 것이고 아직 실제 작업으로 다듬지 않았습니다. 다음에 켤 때부터 적용됩니다. |
+
+### 명령으로 바꾸기
+
+```powershell
+uv run tools/claude_hand.py settings                          # 설정과 실험실 목록, 지금 값
+uv run tools/claude_hand.py settings language en              # 화면을 영어로 (ko: 한국어로)
+uv run tools/claude_hand.py settings history_keep_days 30     # 대화 내용을 30일 동안
+uv run tools/claude_hand.py settings lab english_prompts on   # 실험실 기능 켜기
+```
+
+예전 명령(`remote-control on|off`, `minimize on|off`, `clean-exchange --keep-days N`)도 그대로 되고, 같은 설정을 바꿉니다.
+
 ## 창 사이 옮기기
 
 채팅창이나 감독 세션에 그냥 말하면 됩니다.
@@ -375,7 +427,7 @@ Claude Hand는 기본으로 Claude Code의 **Remote Control**로 열립니다. �
 - Team · Enterprise 계정은 조직에서 Remote Control을 켜야 합니다. → [Team과 Enterprise 계정에서 쓸 때](#team과-enterprise-계정에서-쓸-때)
 - 조건이 안 맞으면(API 키, Bedrock 등) Claude Hand는 Remote Control을 빼고 켜고 그 이유를 창에 보여 줍니다. 채팅창은 그대로 됩니다. 로그인 방식은 Claude Hand 창에서 `/status`로 볼 수 있습니다.
 
-설정:
+이 설정들은 [설정창](#설정창)에 있고, 명령으로도 바꿉니다.
 
 ```powershell
 uv run tools/claude_hand.py remote-control off   # 데스크톱 앱에서 보기 끄기 (on으로 다시 켜기)
@@ -401,15 +453,16 @@ uv run tools/claude_hand.py update     # 하위 세션·감독 스킬·채팅 �
 |---|---|
 | `.claude/skills/claude-hand-setup/` | 처음 세팅 스킬. 이 폴더에서 Claude Code를 열면 바로 쓸 수 있습니다. |
 | `skills/orchestrator/` | 평소에 감독 세션이 따르는 규칙(스킬). `sync`가 `~/.claude/skills/claude-hand/`에 설치합니다. |
-| `prompts/` | Claude에게 주는 지침의 원문. 하위 세션용(`unity-subagent.md`, `blender-subagent.md`)과 감독이 채팅창을 다루는 규칙(`chat-rules.md`). 고친 뒤에는 `update`로 다시 설치하고 Claude Hand를 다시 켭니다. |
-| `tools/claude_hand.py` | 명령 모음. 하위 세션 생성(`list`, `sync`), 세팅(`doctor`, `selftest`, `update`, `unity-install`, `unity-open`, `blender-open`, `chat-setup`, `blender-install-chat`, `shortcut`), 설정(`mode`, `remote-control`, `minimize`, `new-session`), 보기(`status`, `trace`, `usage`, `chat-status`), 정리(`clean-exchange`). |
+| `prompts/` | Claude에게 주는 지침의 원문. 하위 세션용(`unity-subagent.md`, `blender-subagent.md`)과 감독이 채팅창을 다루는 규칙(`chat-rules.md`). 고친 뒤에는 `update`로 다시 설치하고 Claude Hand를 다시 켭니다. `en/`은 영어판(실험실)이고, `glossary-en.md`는 화면이 영어일 때 한국어 지침 끝에 붙는 이름 대조표의 머리말입니다. |
+| `settings/catalog.json` | 설정창이 보여 주는 설정과 실험실 기능의 목록(이름 · 설명 · 기본값 · 언제 적용되는지). Python · Unity · Blender가 이 한 파일을 읽습니다. |
+| `tools/claude_hand.py` | 명령 모음. 하위 세션 생성(`list`, `sync`), 세팅(`doctor`, `selftest`, `update`, `unity-install`, `unity-open`, `blender-open`, `chat-setup`, `blender-install-chat`, `shortcut`), 설정(`settings`, `mode`, `remote-control`, `minimize`, `new-session`), 보기(`status`, `trace`, `usage`, `chat-status`), 정리(`clean-exchange`). |
 | `tools/guard.py` | 하위 세션의 안전장치(훅). 호출 전에 다른 대상으로 가는 호출과 보호 규칙을 어기는 호출을 막고, 통과시킨 호출은 채팅창의 작업 줄에 보이게 하고, 요청의 첫 변경 앞에 되돌리기 지점을 찍고, Unity 호출이 이름 붙인 파일을 미리 복사합니다. 호출 뒤에는 창이 막았거나 되돌린 것을 하위 세션에게 알립니다. 표준 라이브러리만 쓰는 작은 파일로 따로 두어, 다른 파일의 실수가 안전장치를 멈추지 못하게 했습니다. |
 | `tools/supervisor_hook.py` | 감독 세션의 훅. 감독이 하위 세션에게 일을 맡길 때마다 그 일이 어느 채팅창 요청의 것인지(`[요청 <번호>]`) 채널에 알립니다. 번호가 빠진 맡기기, 아직 다른 요청으로 일하는 창이나 잠긴 창에 맡기는 것은 거부합니다. |
 | `tools/chat_channel.py` | 채팅 채널 서버. Claude Code가 실행하는 MCP 서버이고, Unity · Blender 채팅창과는 로컬 HTTP로 통신합니다. |
 | `tools/unity_bridge.py` | 하위 세션이 `ch_*` 도구를 부를 때 쓰는 MCP 서버. `--list`로 통로를 연 Unity를 볼 수 있습니다. |
-| `tools/handlib/` | 위 스크립트들을 이루는 모듈: 열린 창 찾기(`discovery`), 하위 세션 정의(`agents`), 진단(`checks`), 요청 기록(`eventlog`), 현황(`overview`), 코드가 읽기만 하는지 보기(`looks`), 바뀔 파일 미리 보관(`keeps`), 토큰 읽기(`usage`), 보호 규칙(`protect`) 등. 목록은 `tools/handlib/__init__.py`에 있습니다. |
-| `unity/com.claudehand.tools/` | Unity 패키지. `ch_*` 도구 11개와 채팅창을 추가합니다. `ch_*` 도구는 이 패키지가 여는 자기 통로로 불려서, MCP for Unity 없이도 컴파일되고 그 버전에 상관없이 동작합니다. |
-| `blender/claude_hand_chat.py` | Blender 채팅 패널 애드온. |
+| `tools/handlib/` | 위 스크립트들을 이루는 모듈: 열린 창 찾기(`discovery`), 하위 세션 정의(`agents`), 진단(`checks`), 요청 기록(`eventlog`), 현황(`overview`), 코드가 읽기만 하는지 보기(`looks`), 바뀔 파일 미리 보관(`keeps`), 토큰 읽기(`usage`), 보호 규칙(`protect`), 설정과 실험실(`prefs`), 화면 언어(`lang`, 영어 표 `english`) 등. 목록은 `tools/handlib/__init__.py`에 있습니다. |
+| `unity/com.claudehand.tools/` | Unity 패키지. `ch_*` 도구 11개와 채팅창 · 설정창을 추가합니다. `ch_*` 도구는 이 패키지가 여는 자기 통로로 불려서, MCP for Unity 없이도 컴파일되고 그 버전에 상관없이 동작합니다. |
+| `blender/claude_hand_chat.py` | Blender 채팅 패널 애드온(설정창 포함). |
 | `start-supervisor.cmd` / `.sh` | 감독 세션을 엽니다. 바탕화면 아이콘과 채팅창 버튼이 이 파일을 실행합니다. 열 때마다 `preflight`가 하위 세션과 설정을 맞추고, 이미 켜져 있으면 알려 줍니다. |
 | `docs/` | [설계와 그 이유](docs/DESIGN.md), [버전별 자세한 기록](docs/CHANGELOG.md), [PC 검증 순서](docs/TEST-PLAN.md), 검증 결과([12단계](docs/TEST-RESULTS-12-WINDOWS.md), [13단계부터](docs/TEST-RESULTS-13-WINDOWS.md)), [구조 점검과 그 뒤의 기록](docs/REVIEW-2026-11-10.md) |
 
@@ -527,30 +580,35 @@ Blender 쪽 일은 MCP for Blender의 Python 실행 도구로 합니다. 옮기�
 - Blender의 `.blend 저장` 금지는 코드에 저장 호출이 보일 때만 막습니다.
 - 코드에 보호 오브젝트의 이름이 따옴표로 나오면, 읽기만 하려던 것이어도 한 번 막히고 "읽는 호출과 바꾸는 호출을 나누라"는 안내가 갑니다.
 
+**설정 · 언어**
+
+- 데스크톱 앱에서 보기(Remote Control)는 Claude Code를 켤 때 정해집니다. 켜져 있는 Claude Hand에서 바꾸려면 그 창에 `/remote-control`을 직접 입력해야 합니다(슬래시 명령은 사용자만 칠 수 있어서, 설정창은 다음에 켤 때부터 적용합니다).
+- 화면 언어를 바꿔도 이미 찍힌 채팅창 줄과 기록(`trace`)의 지난 줄은 그때의 언어로 남습니다.
+- 감독이 처음 받은 지침은 다시 켜야 바뀝니다. 그 사이에 버튼 이름을 화면대로 말하는 것은 채널이 보내는 알림에 달려 있습니다.
+- 지침 영어판(실험실)은 한국어판을 줄마다 옮긴 것이고, 실제 감독 세션으로는 한 번 다듬었습니다. 그때 감독이 시키지 않은 씬 저장을 Unity 담당에게 맡겼고(한국어판에서는 저장하지 말라고 맡깁니다), 영어 채팅 규칙에 한 문장을 더해 막았습니다. 더 써 볼 때까지 실험실에 둡니다.
+- Blender 버튼의 도움말(마우스를 올리면 뜨는 글)과 Unity 도구의 설명 · 오류는 처음부터 영어이고, 언어 설정을 따르지 않습니다.
+- 설정창의 목록은 claude-hand 폴더의 `settings/catalog.json`에서 읽습니다. `chat-setup`을 한 적이 없어 폴더 위치를 모르면 언어만 고를 수 있습니다.
+- 영어 화면은 자동 테스트, 열린 창(감독 자리는 흉내), 실제 감독 세션으로 확인했습니다. 실제 세션에서 Claude는 요청이 쓰인 언어로 답하고 버튼을 화면의 이름(`Undo`, `Release`)으로 불렀습니다([검증 순서](docs/TEST-PLAN.md) 34단계).
+
 ## 버전별 변경 내용
 
 번호는 저장소 루트의 `VERSION`을 따릅니다. 태그는 `v0.9.0`과 `v1.0.0`에 붙어 있습니다. 버전마다 무엇이 왜 바뀌었는지 자세한 기록은 [docs/CHANGELOG.md](docs/CHANGELOG.md)에 있습니다.
 
-### 1.0.1 (2026-11-25): 하위 세션이 다른 Unity 창을 건드리던 것, 연결이 끊기던 것
+### 1.1.0 (2026-11-25): 설정창 · 화면 영어 · 실험실
 
-Unity 창을 둘 이상 열어 두고 쓰면, 한 창의 하위 세션이 한 일이 다른 창에 들어가는 일이 있었습니다. 맡은 창의 MCP for Unity 연결이 잠깐 꺼지거나 응답이 늦으면 서버가 응답하는 다른 창을 대신 골랐고, 한 번 넘어가면 그 하위 세션이 끝날 때까지 거기 붙어 있었습니다. 연결이 끊기는 데는 claude-hand도 한몫했습니다: Unity 쪽은 새 연결이 오면 기존 연결을 닫는데, 창을 찾을 때마다 그 포트에 붙어 보고 있었습니다.
-
-- 각 하위 세션의 서버는 맡은 창만 보고, 다른 창의 포트에는 연결하지 않고, 새 연결은 그 창이 맡은 프로젝트라고 답할 때만 씁니다(`tools/unity_pin`). 창이 응답하지 않으면 그 호출은 실패하고, 창이 돌아오면 이어집니다.
-- claude-hand가 창을 찾을 때 Unity의 포트에 붙지 않습니다. 일하던 하위 세션의 연결을 끊지 않습니다.
-- 받는 법: `update`(또는 `sync`)로 하위 세션 정의를 다시 쓴 뒤 Claude Hand를 다시 켭니다. `doctor`의 "MCP for Unity 서버가 맡은 창만 봄"이 OK인지 보세요.
-- 확인: MCP for Unity 서버의 실제 코드와 가짜 창 둘로, 고치기 전에는 다른 창으로 가던 경우들이 고친 뒤에는 가지 않는 것을 자동 테스트로 봅니다. 실제 Unity 창 하나(hand_test)로 봤고, 창 둘을 함께 열고는 아직 보지 않았습니다([검증 순서](docs/TEST-PLAN.md) 33단계).
-- 한 창의 MCP for Unity 연결이 꺼지면 Claude Hand Tools가 20초쯤 뒤에 다시 켭니다. 그동안 그 창의 호출은 실패하고, 다른 창으로 가지는 않습니다.
-
-### 1.0.0 (2026-11-24, 태그 `v1.0.0`): 첫 정식 버전
-
-1.0에 넣기로 한 것이 모두 들어갔습니다: 어떤 도구가 바꿨든 파일까지 되돌리기(0.13.0), 여러 창을 한 번에 되돌리기(0.14.0), 요청마다 시간 · 토큰(0.15.0), 저장하면 자동으로 다시 보내기(0.16.0), Blender에서 보낸 모델이 깔끔하게 들어오게(0.17.0), 창마다 보호 규칙(0.18.0). 기능은 0.18.0과 같고, 이 버전에서 바뀐 것은 번호와 문서입니다.
-
-- README를 새로 썼습니다: 첫머리에 할 수 있는 것과 목차, 필요한 것(Team · Enterprise 계정에서의 주의점 포함), 설치를 앞으로, 기능마다 절을 나눠 정리했고, 버전별 자세한 기록은 따로 옮겼습니다. 영어 README를 더해 첫 화면(`README.md`)으로 두었고, 한국어판은 `README.ko.md`입니다.
-- 확인: 0.13.0부터 0.18.0까지 열린 창과 실제 감독 세션으로 봤습니다([검증 순서](docs/TEST-PLAN.md) 27~32단계). 다른 PC에서 `update`로 예전 버전에서 올라오는 것도 됐습니다.
-- 아직 보지 않은 것: 28단계 H, 29단계 E · G. 써 가며 볼 항목들입니다.
+- **설정창.** Unity 채팅창과 Blender 패널의 톱니바퀴 버튼으로 엽니다. "기능 켜고 끄기"와 "실험실" 두 탭이고, 바꾼 것은 `config.json`에 바로 적혀 모든 창 · 명령 · 안전장치에 반영됩니다. 대화 내용 보관 일수를 정할 수 있게 됐고, 다른 창 그림 붙이기와 작업 표시줄 깜빡임에 스위치가 생겼습니다. 명령은 `settings`입니다.
+- **화면 영어.** 설정창의 언어에서 English를 고르면 채팅창 · Blender 패널 · 명령 출력 · 막힌 호출의 이유가 영어로 나옵니다. Claude Hand를 다시 켜지 않아도 됩니다. 한국어(기본)로 쓸 때의 글은 그대로입니다.
+- **1.0.1 위에.** 1.0.1이 고친 것(하위 세션의 서버가 맡은 Unity 창에만 닿음; 아래 표와 [변경 기록](docs/CHANGELOG.md))이 들어 있고, 1.0.1이 새로 하는 말(`doctor`의 항목, Unity 지침의 한 줄, Claude Hand Tools가 Console에 남기는 줄)에도 영어가 있습니다.
+- **실험실.** 새 기능이 먼저 들어오는 자리입니다. 첫 기능은 Claude에게 주는 지침의 영어판입니다.
+- 확인: Python 테스트 559개(한글 문자열마다 영어가 있는지, 구현마다 둔 영어 표가 서로 어긋나지 않는지, 지침 영어판이 한국어판과 줄마다 맞는지 포함), 창 없는 Blender 안 테스트 120개, 창 없는 Unity 안 자가 테스트 79개(새 7개: 언어 · 설정). 열린 창으로도 봤습니다: 따로 꾸민 시험 환경에서 두 설정창과 영어 화면을 그림으로 떠서 보고, 실제 채널과 훅에 감독 자리만 흉내를 세워 요청을 돌렸습니다. 이때 영어에서 글이 잘리던 곳과, Unity 채팅창이 다시 읽힌 뒤 보내기가 막히던 것(1.0.0부터 있던 것)을 찾아 고쳤습니다.
+- 실제 감독 세션으로 확인(2026-11-26, 실제 `hand_test`와 `test_blender`를 열고 Claude Hand를 두 번 켬): 한국어 요청은 전과 같음. 감독이 켜진 채 언어를 English로 바꾸면 알림이 가고 두 창이 그 자리에서 바뀜. 영어 요청은 Unity · Blender 모두 영어로 답하고 작업 줄 · 시간과 토큰 줄 · `Undo: …`가 영어. 한국어로 되돌리기 버튼을 물으면 한국어로 답하되 `[Undo]`라고 부름. 보호 규칙에 막히면 "open the Protect section … press [Release]"라고 안내. Blender에서 Unity로 간 요청을 실제 되돌리기 버튼으로 두 창 함께 되돌림. 실험실의 지침 영어판에서는 정의와 스킬이 영어이고 요청이 `[request <번호>]`와 함께 끝까지 됨. 데스크톱 앱에서 보기와 자동 최소화를 끄면 `--remote-control` 없이 켜지고 창이 그대로 있음. 한국어로 돌리면 정의 두 파일이 전과 바이트까지 같음.
+- 그 세션에서 찾아 고친 것: 지침 영어판에서 감독이 시키지 않은 씬 저장을 Unity 담당에게 맡기던 것(창 없이 감독만 따로 돌려 재 봄: 한 문장을 더하기 전 5번 중 5번, 더한 뒤 5번 중 0번, 한국어판은 4번 중 0번). 데스크톱 앱에서 보기를 끄면 Claude Hand 창의 제목이 `claude`이던 것(1.0.0부터): 이제 세션에 늘 이름을 줍니다. 자동 최소화를 꺼도 `start`와 창 첫머리가 "저절로 최소화됩니다"라고 하던 것. `CLAUDE_HAND_LANG=en`으로 `doctor`를 한 번만 영어로 보면 설치된 정의와 스킬을 이전 버전 것이라고 하던 것. `settings` 목록의 칸 하나, 언어 알림의 "한국어(으)로".
+- 아직 보지 않은 것: 데스크톱 앱에서 보기를 껐을 때 앱의 세션 목록에서 빠지는지(명령줄까지만 봄), 작업 표시줄 깜빡임, 설정창 줄에 마우스를 올리면 뜨는 설명.
 
 | 버전 | 날짜 | 무엇이 바뀌었나 |
 |---|---|---|
+| 1.0.1 | 2026-11-25 | 하위 세션의 서버가 맡은 Unity 창에만 닿음 · claude-hand가 일하던 Unity 연결을 끊지 않음 · 꺼진 MCP for Unity 연결 다시 켜기 (`update`로 정의를 다시 쓰고 Claude Hand를 다시 켜면 적용) |
+| 1.0.0 | 2026-11-24 | 첫 정식 버전: 번호와 문서 (태그 `v1.0.0`) |
 | 0.18.0 | 2026-11-24 | 창마다 보호 규칙 |
 | 0.17.1 | 2026-11-24 | 열린 창에서 더 찾은 셋 |
 | 0.17.0 | 2026-11-24 | Blender에서 보낸 모델이 깔끔하게 들어오게 |
@@ -576,7 +634,9 @@ python -m unittest discover -s tools/tests -v     # Python 3.10 이상, 따로 �
 - 버전은 저장소 루트의 `VERSION` 한 곳에서 정하고, Unity 패키지와 Blender 애드온에 적힌 번호가 같은지 테스트가 확인합니다.
 - `tools/tests/test_blender_chat_addon.py`는 Blender 애드온을 실제 Blender 안에서 실행합니다. 위 명령으로는 건너뛰고(Python에 `bpy`가 없으므로), `uv run tools/claude_hand.py selftest`가 설치된 Blender를 화면 없이 띄워 돌립니다.
 - Unity 쪽은 패키지 안의 `ChSelfTest.cs`가 도구들을 실제 Unity에서 돌립니다. `selftest --unity-project <닫힌 프로젝트>`가 Unity를 창 없이 열어 실행합니다.
-- 테스트는 진짜 이벤트 기록을 건드리지 않게 `CLAUDE_HAND_LOG=off`로 돕니다.
+- 테스트는 진짜 이벤트 기록을 건드리지 않게 `CLAUDE_HAND_LOG=off`로, 이 PC의 언어 설정과 상관없이 한국어로(`CLAUDE_HAND_LANG=ko`) 돕니다.
+- **화면에 보이는 글을 더하면 영어도 함께 넣습니다.** 한국어 글은 코드에 `T("…")`로 두고, 영어는 구현마다 있는 표에 넣습니다: Python 도구 `tools/handlib/english.py`, 안전장치 `tools/guard.py`, Unity `ChText.cs`, Blender 애드온 끝의 `_EN`. 수를 세는 글이면 하나일 때의 영어(`1 action`)도 그 옆의 표(`EN_ONE` · `EnglishOne` · `_EN_ONE`)에 넣습니다. `tools/tests/test_lang.py`가 영어가 빠진 글, 표끼리 어긋난 글을 잡습니다. 지침(`prompts/`)을 고치면 `prompts/en/`의 같은 줄도 고칩니다(같은 테스트가 줄 수와 자리 표시를 견줍니다).
+- **새 설정이나 실험실 기능**은 `settings/catalog.json`에 한 줄 넣으면 두 설정창과 `settings` 명령에 나옵니다. 실험실 기능을 기본 기능으로 올릴 때는 그 줄의 `stage`를 `lab`에서 `stable`로 바꿉니다(모두에게 켜지고 실험실 탭에서 빠집니다).
 
 ## 라이선스
 

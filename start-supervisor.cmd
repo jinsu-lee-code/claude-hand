@@ -5,15 +5,30 @@ chcp 65001 >nul
 title Claude Hand
 cd /d "%~dp0"
 
+rem The language of the two messages below, which come before anything of claude_hand.py can run: "language" in
+rem config.json (the settings window writes it). Everything else is said by claude_hand.py itself.
+set "CH_EN="
+set "CH_CONFIG=%USERPROFILE%\.claude-hand\config.json"
+if defined CLAUDE_HAND_HOME set "CH_CONFIG=%CLAUDE_HAND_HOME%\config.json"
+if exist "%CH_CONFIG%" findstr /R /C:"\"language\" *: *\"en\"" "%CH_CONFIG%" >nul 2>nul && set "CH_EN=1"
+
 where uv >nul 2>nul
 if errorlevel 1 (
-  echo [Claude Hand] uv가 설치돼 있지 않습니다. claude-hand 폴더에서 Claude Code를 열고 "claude-hand 세팅해줘"라고 해 주세요.
+  if defined CH_EN (
+    echo [Claude Hand] uv is not installed. Open Claude Code in the claude-hand folder and say "Set up claude-hand".
+  ) else (
+    echo [Claude Hand] uv가 설치돼 있지 않습니다. claude-hand 폴더에서 Claude Code를 열고 "claude-hand 세팅해줘"라고 해 주세요.
+  )
   pause
   exit /b 1
 )
 where claude >nul 2>nul
 if errorlevel 1 (
-  echo [Claude Hand] Claude Code 명령 claude 가 없습니다. 설치 명령: winget install Anthropic.ClaudeCode
+  if defined CH_EN (
+    echo [Claude Hand] The Claude Code command claude is missing. To install it: winget install Anthropic.ClaudeCode
+  ) else (
+    echo [Claude Hand] Claude Code 명령 claude 가 없습니다. 설치 명령: winget install Anthropic.ClaudeCode
+  )
   pause
   exit /b 1
 )

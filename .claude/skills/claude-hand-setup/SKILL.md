@@ -1,6 +1,6 @@
 ---
 name: claude-hand-setup
-description: claude-hand를 처음 설치하고 세팅할 때 쓴다. 사용자가 "claude-hand 세팅해줘", "처음 설정해줘", "설치해줘", "agent-desktop 설치", "Blender MCP 설치"라고 하거나, doctor 결과에 빠진 항목이 있을 때 사용한다. agent-desktop(vercel-labs)과 MCP for Blender(ahujasid/blender-mcp)를 설치하고, Unity와 Blender 설정은 명령어로 하고, 명령어로 안 되는 화면 조작은 agent-desktop으로 한다. 모든 설치와 변경은 사용자가 허락한 뒤에만 한다.
+description: claude-hand를 처음 설치하고 세팅할 때 쓴다. 사용자가 "claude-hand 세팅해줘", "처음 설정해줘", "설치해줘", "agent-desktop 설치", "Blender MCP 설치"라고 하거나(영어로는 "set up claude-hand", "install claude-hand"), doctor 결과에 빠진 항목이 있을 때 사용한다. agent-desktop(vercel-labs)과 MCP for Blender(ahujasid/blender-mcp)를 설치하고, Unity와 Blender 설정은 명령어로 하고, 명령어로 안 되는 화면 조작은 agent-desktop으로 한다. 모든 설치와 변경은 사용자가 허락한 뒤에만 한다.
 ---
 
 # claude-hand 처음 세팅
@@ -18,6 +18,12 @@ description: claude-hand를 처음 설치하고 세팅할 때 쓴다. 사용자�
    이런 창이 뜨면 무엇을 눌러야 하는지 설명하고 기다린다.
 4. **열려 있는 작업을 지킨다.** 저장 안 된 Blender나 Unity 창을 닫거나 다시 열어야 하면, 사용자에게 먼저 저장하고 닫아 달라고 부탁한다. `close-app`으로 대신 닫지 않는다.
 5. **단계마다 확인한다.** 끝날 때마다 `doctor`나 해당 확인 명령으로 결과를 보고, 실패하면 오류 문구를 그대로 보여준다.
+
+## 사용자의 언어
+
+- 안내는 사용자가 쓴 언어로 한다. 이 스킬에 한국어로 적힌 안내 문장은 그 언어로 옮겨 말한다.
+- claude-hand의 화면(채팅창, 명령 출력)은 한국어로 시작한다. 사용자가 한국어를 쓰지 않으면, 진단을 보여 주기 전에 화면을 영어로 바꿀지 묻는다. 바꾸겠다고 하면 `uv run tools/claude_hand.py settings language en`을 실행한다(되돌리기는 `settings language ko`). 그때부터 `doctor`를 비롯한 명령의 출력과 채팅창의 글이 영어로 나온다. 채팅창의 톱니바퀴(설정창)에서도 바꿀 수 있다고 알려 준다.
+- 화면이 영어이면 이 스킬이 한국어로 적어 둔 출력 문구가 영어로 나온다. `doctor`의 `[갱신]` 항목은 `[update]`, "빠진 항목"은 "items missing", "점검 통과"는 "check passed", 버튼 [Claude Hand 시작]은 [Start Claude Hand]다. `doctor --json`의 `area`와 `item`도 그 언어로 온다. 뜻이 같으면 같은 대로 한다.
 
 ## 이미 설치했던 경우 (갱신)
 

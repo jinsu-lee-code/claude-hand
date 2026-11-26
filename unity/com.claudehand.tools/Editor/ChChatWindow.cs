@@ -14,6 +14,8 @@ using UnityEditorInternal;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
+using static ClaudeHand.Editor.ChText;
+
 namespace ClaudeHand.Editor
 {
     /// <summary>
@@ -49,7 +51,7 @@ namespace ClaudeHand.Editor
         private bool _followNewest = true;  // scrolled to the bottom: new messages keep it there; reading older ones: stay put
         private float _contentHeight;
         private bool _includeSelection = true;
-        private string _status = "연결 중...";
+        private string _status;             // null until the first word from the channel: "연결 중..." is shown meanwhile
         private string _chatId;
         private string _agent;
         private long _after;
@@ -118,7 +120,7 @@ namespace ClaudeHand.Editor
                 if (same != null)
                 {
                     same.Count++;
-                    same.Text = $"{text} · {same.Count}번째 ({DateTime.Now:HH:mm})";
+                    same.Text = T("{0} · {1}번째 ({2:HH:mm})", text, same.Count, DateTime.Now);
                 }
                 else
                 {
@@ -142,10 +144,13 @@ namespace ClaudeHand.Editor
             _entries.Clear();
             _after = 0;
             _chatId = null;
+            // Unity brings a string field back from a script reload as "" where it was null: nothing was waiting to be sent.
+            if (string.IsNullOrWhiteSpace(_pendingText)) _pendingText = _pendingContext = null;
             _polling = new CancellationTokenSource();
             PollLoop(_polling.Token);
             ChCheckpoint.Changed += Repaint;
             ChProtect.Changed += Repaint;
+            ChSettings.Changed += Repaint;  // the language, among them: every word here is asked for anew when drawn
         }
 
         private void OnDisable()
@@ -154,6 +159,7 @@ namespace ClaudeHand.Editor
             EditorApplication.update -= RepaintWhileBusy;
             ChCheckpoint.Changed -= Repaint;
             ChProtect.Changed -= Repaint;
+            ChSettings.Changed -= Repaint;
             foreach (var texture in _images.Values.Where(t => t != null)) DestroyImmediate(texture);
             _images.Clear();
         }
@@ -197,18 +203,18 @@ namespace ClaudeHand.Editor
                     var mode = status.Value<string>("mode");
                     if (mode == "passive")
                     {
-                        return "채널 서버가 대기 중입니다: " + status.Value<string>("reason") +
-                               ". 아래 버튼으로 Claude Hand를 켜거나, 메시지를 보내면 자동으로 켜집니다.";
+                        return T("채널 서버가 대기 중입니다: {0}. 아래 버튼으로 Claude Hand를 켜거나, 메시지를 보내면 자동으로 켜집니다.",
+                            status.Value<string>("reason"));
                     }
-                    if (mode == "stopped") return "Claude Hand가 꺼져 있습니다. 메시지를 보내면 자동으로 켜집니다.";
+                    if (mode == "stopped") return T("Claude Hand가 꺼져 있습니다. 메시지를 보내면 자동으로 켜집니다.");
                 }
             }
             catch (Exception)
             {
                 // fall through to the generic message
             }
-            return "Claude Hand가 꺼져 있습니다. 메시지를 보내면 자동으로 켜집니다. 켜도 연결되지 않으면 " +
-                   "claude-hand 폴더에서 uv run tools/claude_hand.py chat-status 를 실행하세요.";
+            return T("Claude Hand가 꺼져 있습니다. 메시지를 보내면 자동으로 켜집니다. 켜도 연결되지 않으면 " +
+                   "claude-hand 폴더에서 uv run tools/claude_hand.py chat-status 를 실행하세요.");
         }
 
         internal static async Task<JObject> Call(ServerInfo server, HttpMethod method, string path, object body, CancellationToken token)
@@ -267,8 +273,8 @@ namespace ClaudeHand.Editor
 
                     SetServerMissing(false);
                     SetStatus(_agent != null
-                        ? $"담당: {_agent}"
-                        : "이 프로젝트의 하위 세션이 없습니다. uv run tools/claude_hand.py sync 를 실행하세요.");
+                        ? T("담당: {0}", _agent)
+                        : T("이 프로젝트의 하위 세션이 없습니다. uv run tools/claude_hand.py sync 를 실행하세요."));
                     if (_pendingText != null) SendPending();
 
                     var updates = await Call(server, HttpMethod.Get,
@@ -288,7 +294,7 @@ namespace ClaudeHand.Editor
                 catch (Exception ex)
                 {
                     SetServerMissing(true);
-                    SetStatus("감독 세션에 연결할 수 없습니다: " + ex.Message);
+                    SetStatus(T("감독 세션에 연결할 수 없습니다: ") + ex.Message);
                     if (!await Delay(3000, token)) return;
                 }
             }
@@ -377,7 +383,7 @@ namespace ClaudeHand.Editor
                 _unread += count;
                 UpdateTitle();
             }
-            if (!InternalEditorUtility.isApplicationActive) ChTaskbar.Flash();
+            if (!InternalEditorUtility.isApplicationActive && ChSettings.On("flash_taskbar")) ChTaskbar.Flash();
         }
 
         private void OnFocus()
@@ -446,16 +452,16 @@ namespace ClaudeHand.Editor
                 {
                     onSent();
                     _lastUserMessageTime = EditorApplication.timeSinceStartup;
-                    if (result.Value<bool?>("delivered") == false) SetStatus("Claude Hand가 아직 연결 중입니다. 연결되면 바로 전달됩니다.");
+                    if (result.Value<bool?>("delivered") == false) SetStatus(T("Claude Hand가 아직 연결 중입니다. 연결되면 바로 전달됩니다."));
                 }
                 else
                 {
-                    SetStatus("보내지 못했습니다: " + (result.Value<string>("error") ?? "알 수 없는 오류"));
+                    SetStatus(T("보내지 못했습니다: ") + (result.Value<string>("error") ?? T("알 수 없는 오류")));
                 }
             }
             catch (Exception ex)
             {
-                SetStatus("보내지 못했습니다: " + ex.Message);
+                SetStatus(T("보내지 못했습니다: ") + ex.Message);
             }
             finally
             {
@@ -474,21 +480,21 @@ namespace ClaudeHand.Editor
             }
             catch (Exception ex)
             {
-                SetStatus("응답을 보내지 못했습니다: " + ex.Message);
+                SetStatus(T("응답을 보내지 못했습니다: ") + ex.Message);
             }
         }
 
         /// <summary>What the user is looking at, so "this object" in a message means something.</summary>
         internal static string BuildContext()
         {
-            var lines = new List<string> { "활성 씬: " + SceneManager.GetActiveScene().name };
+            var lines = new List<string> { T("활성 씬: ") + SceneManager.GetActiveScene().name };
             var selected = Selection.gameObjects;
             if (selected.Length > 0)
             {
-                lines.Add("선택한 오브젝트: " + string.Join(", ", selected.Take(10).Select(go => ChRefs.HierarchyPath(go.transform))));
+                lines.Add(T("선택한 오브젝트: ") + string.Join(", ", selected.Take(10).Select(go => ChRefs.HierarchyPath(go.transform))));
             }
             var assets = Selection.assetGUIDs.Take(10).Select(AssetDatabase.GUIDToAssetPath).Where(p => !string.IsNullOrEmpty(p)).ToList();
-            if (assets.Count > 0) lines.Add("선택한 에셋: " + string.Join(", ", assets));
+            if (assets.Count > 0) lines.Add(T("선택한 에셋: ") + string.Join(", ", assets));
             return string.Join("\n", lines);
         }
 
@@ -515,9 +521,9 @@ namespace ClaudeHand.Editor
 
         private bool Starting => _startRequestedAt > 0 && EditorApplication.timeSinceStartup - _startRequestedAt < StartWaitSeconds;
 
-        private const string StartingMessage =
+        private static string StartingMessage => T(
             "Claude Hand 창을 여는 중입니다. 그 창에 확인 질문이 보이면 화살표 키로 고르고 Enter를 눌러 주세요 " +
-            "(개발용 채널 경고는 I am using this for local development). 연결되면 이 채팅창이 이어서 진행합니다.";
+            "(개발용 채널 경고는 I am using this for local development). 연결되면 이 채팅창이 이어서 진행합니다.");
 
         /// <summary>start-supervisor next to this claude-hand: from ~/.claude-hand/config.json (written by setup),
         /// else from where this package is installed (claude-hand/unity/com.claudehand.tools).</summary>
@@ -547,7 +553,7 @@ namespace ClaudeHand.Editor
             var script = FindStartScript();
             if (script == null)
             {
-                SetStatus("start-supervisor를 찾지 못했습니다. 바탕화면의 Claude Hand 아이콘을 누르거나 claude-hand 폴더의 start-supervisor.cmd를 실행하세요.");
+                SetStatus(T("start-supervisor를 찾지 못했습니다. 바탕화면의 Claude Hand 아이콘을 누르거나 claude-hand 폴더의 start-supervisor.cmd를 실행하세요."));
                 return;
             }
             try
@@ -571,7 +577,7 @@ namespace ClaudeHand.Editor
             }
             catch (Exception ex)
             {
-                SetStatus("Claude Hand를 시작하지 못했습니다: " + ex.Message);
+                SetStatus(T("Claude Hand를 시작하지 못했습니다: ") + ex.Message);
             }
         }
 
@@ -586,38 +592,42 @@ namespace ClaudeHand.Editor
 
         private void OnGUI()
         {
-            EditorGUILayout.LabelField(_status, EditorStyles.wordWrappedMiniLabel);
+            GUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField(_status ?? T("연결 중..."), EditorStyles.wordWrappedMiniLabel);
+            // The gear: the settings window (what to show, the language, how long to keep things, the lab).
+            if (GUILayout.Button(ChSettingsWindow.Gear(), EditorStyles.miniButton, GUILayout.Width(26), GUILayout.Height(20))) ChSettingsWindow.Open();
+            GUILayout.EndHorizontal();
             if (_serverMissing)
             {
                 bool starting = Starting;
                 GUI.enabled = !starting;
-                if (GUILayout.Button(starting ? "여는 중... (새로 뜬 Claude Hand 창을 확인하세요)" : "▶  Claude Hand 시작", GUILayout.Height(36)))
+                if (GUILayout.Button(starting ? T("여는 중... (새로 뜬 Claude Hand 창을 확인하세요)") : T("▶  Claude Hand 시작"), GUILayout.Height(36)))
                 {
                     StartSupervisor();
                 }
                 GUI.enabled = true;
                 EditorGUILayout.HelpBox(starting
-                    ? "Claude Hand 창에서 확인을 눌러 주세요. 세션이 일을 시작하면 그 창은 저절로 최소화됩니다. 닫지는 마세요."
-                    : "Claude Hand(감독 세션)가 꺼져 있습니다. 버튼을 누르거나 메시지를 보내면 켜집니다.", MessageType.Info);
+                    ? T("Claude Hand 창에서 확인을 눌러 주세요. 세션이 일을 시작하면 그 창은 저절로 최소화됩니다. 닫지는 마세요.")
+                    : T("Claude Hand(감독 세션)가 꺼져 있습니다. 버튼을 누르거나 메시지를 보내면 켜집니다."), MessageType.Info);
             }
 
             _scroll = GUILayout.BeginScrollView(_scroll);
             GUILayout.BeginVertical();
             int first = Math.Max(0, _entries.Count - _shownEntries);
-            if (first > 0 && GUILayout.Button($"이전 대화 {first}개 더 보기")) _shownEntries += ShownStep;
+            if (first > 0 && GUILayout.Button(T("이전 대화 {0}개 더 보기", first))) _shownEntries += ShownStep;
             for (int i = first; i < _entries.Count; i++)
             {
                 var entry = _entries[i];
                 switch (entry.Kind)
                 {
                     case "user":
-                        EditorGUILayout.LabelField("나", EditorStyles.boldLabel);
+                        EditorGUILayout.LabelField(T("나"), EditorStyles.boldLabel);
                         DrawText(entry.Text, entry.Text);
                         break;
                     case "reply":
                         if (entry.Origin == "desktop")
                         {
-                            EditorGUILayout.LabelField("데스크톱 앱에서", EditorStyles.boldLabel);
+                            EditorGUILayout.LabelField(T("데스크톱 앱에서"), EditorStyles.boldLabel);
                             if (!string.IsNullOrEmpty(entry.Request)) EditorGUILayout.LabelField(Shorten(entry.Request, 300), EditorStyles.wordWrappedMiniLabel);
                         }
                         EditorGUILayout.LabelField("Claude", EditorStyles.boldLabel);
@@ -641,14 +651,14 @@ namespace ClaudeHand.Editor
             }
             if (_pendingText != null)
             {
-                EditorGUILayout.LabelField("나 (Claude Hand가 켜지면 보냅니다)", EditorStyles.boldLabel);
+                EditorGUILayout.LabelField(T("나 (Claude Hand가 켜지면 보냅니다)"), EditorStyles.boldLabel);
                 EditorGUILayout.LabelField(_pendingText, EditorStyles.wordWrappedLabel);
-                if (!Starting && GUILayout.Button("보내지 않고 지우기", GUILayout.Width(140))) _pendingText = _pendingContext = null;
+                if (!Starting && GUILayout.Button(T("보내지 않고 지우기"), GUILayout.ExpandWidth(false))) _pendingText = _pendingContext = null;
             }
             if (_lastUserMessageTime > 0 && EditorApplication.timeSinceStartup - _lastUserMessageTime > NoReplyHintSeconds)
             {
-                EditorGUILayout.HelpBox("1분 넘게 답이 없습니다. 감독 세션을 start-supervisor.cmd(채널을 켜고 시작)로 열었는지, " +
-                                        "Claude Code 창에 확인을 기다리는 질문이 없는지 봐 주세요.", MessageType.Info);
+                EditorGUILayout.HelpBox(T("1분 넘게 답이 없습니다. 감독 세션을 start-supervisor.cmd(채널을 켜고 시작)로 열었는지, " +
+                                        "Claude Code 창에 확인을 기다리는 질문이 없는지 봐 주세요."), MessageType.Info);
             }
             GUILayout.EndVertical();
             if (Event.current.type == EventType.Repaint) _contentHeight = GUILayoutUtility.GetLastRect().height;
@@ -666,10 +676,10 @@ namespace ClaudeHand.Editor
             bool submit = e.type == EventType.KeyDown && e.keyCode == KeyCode.Return && (e.control || e.command);
             _input = EditorGUILayout.TextArea(_input, GUILayout.MinHeight(48));
             GUILayout.BeginHorizontal();
-            _includeSelection = EditorGUILayout.ToggleLeft("선택 항목 함께 보내기", _includeSelection);
+            _includeSelection = EditorGUILayout.ToggleLeft(T("선택 항목 함께 보내기"), _includeSelection);
             GUILayout.FlexibleSpace();
             GUI.enabled = !_sending && _pendingText == null && _input.Trim().Length > 0;
-            if (GUILayout.Button("보내기 (Ctrl+Enter)", GUILayout.Width(140)) || (submit && GUI.enabled))
+            if (GUILayout.Button(T("보내기 (Ctrl+Enter)"), GUILayout.Width(140)) || (submit && GUI.enabled))
             {
                 Send();
                 if (submit) e.Use();
@@ -699,11 +709,11 @@ namespace ClaudeHand.Editor
                 return;
             }
             if (mark == null) return;
-            if (!GUILayout.Button($"되돌리기: {mark.label} ({mark.time})", EditorStyles.miniButton)) return;
-            var ok = EditorUtility.DisplayDialog("Claude Hand 되돌리기",
-                $"'{mark.label}' 요청({mark.time}) 이후 이 Unity에서 바뀐 것을 모두 되돌립니다.\n" +
-                "그 뒤에 직접 고친 것도 함께 되돌아갑니다(파일은 이 요청이 일하는 동안 바뀐 것만). " +
-                "저장해 둔 씬 파일은 다시 저장해야 바뀝니다." + FileLines(mark), "되돌리기", "취소");
+            if (!GUILayout.Button(T("되돌리기: {0} ({1})", mark.label, mark.time), EditorStyles.miniButton)) return;
+            var ok = EditorUtility.DisplayDialog(T("Claude Hand 되돌리기"),
+                T("'{0}' 요청({1}) 이후 이 Unity에서 바뀐 것을 모두 되돌립니다.\n", mark.label, mark.time) +
+                T("그 뒤에 직접 고친 것도 함께 되돌아갑니다(파일은 이 요청이 일하는 동안 바뀐 것만). " +
+                "저장해 둔 씬 파일은 다시 저장해야 바뀝니다.") + FileLines(mark), T("되돌리기"), T("취소"));
             if (!ok) return;
             var undone = UndoHere();
             // So that no other panel still offers this window along with that request.
@@ -716,20 +726,20 @@ namespace ClaudeHand.Editor
         {
             var label = _offer.Value<string>("label");
             var others = string.Join(", ", (_offer["windows"] as JArray ?? new JArray()).Select(w => w.ToString()));
-            var where = mark != null ? "이 창 + " + others : others;
-            if (!GUILayout.Button($"되돌리기: {label} ({where})", EditorStyles.miniButton)) return;
-            var ok = EditorUtility.DisplayDialog("Claude Hand 되돌리기",
-                $"'{label}' 요청이 바꾼 것을 되돌립니다: {where}.\n" +
+            var where = mark != null ? T("이 창 + ") + others : others;
+            if (!GUILayout.Button(T("되돌리기: {0} ({1})", label, where), EditorStyles.miniButton)) return;
+            var ok = EditorUtility.DisplayDialog(T("Claude Hand 되돌리기"),
+                T("'{0}' 요청이 바꾼 것을 되돌립니다: {1}.\n", label, where) +
                 (mark != null
-                    ? "이 Unity에서는 그 요청 이후 바뀐 것을 모두 되돌립니다. 그 뒤에 직접 고친 것도 함께 되돌아갑니다" +
-                      "(파일은 이 요청이 일하는 동안 바뀐 것만). 저장해 둔 씬 파일은 다시 저장해야 바뀝니다.\n"
+                    ? T("이 Unity에서는 그 요청 이후 바뀐 것을 모두 되돌립니다. 그 뒤에 직접 고친 것도 함께 되돌아갑니다" +
+                      "(파일은 이 요청이 일하는 동안 바뀐 것만). 저장해 둔 씬 파일은 다시 저장해야 바뀝니다.\n")
                     : "") +
-                $"다른 창({others})은 그 창에 더 새 요청이 있거나 작업 중이면 건너뛰고, 그렇게 알려 줍니다." +
-                (mark != null ? FileLines(mark) : ""), "되돌리기", "취소");
+                T("다른 창({0})은 그 창에 더 새 요청이 있거나 작업 중이면 건너뛰고, 그렇게 알려 줍니다.", others) +
+                (mark != null ? FileLines(mark) : ""), T("되돌리기"), T("취소"));
             if (!ok) return;
             if (mark != null) UndoHere();
             // The other windows: the channel undoes the request in each and says here how it went.
-            TellChannel("/v1/undo", new { app = "unity", window = ChPaths.ProjectName, request, skip_own = true }, "다른 창을 되돌리지 못했습니다");
+            TellChannel("/v1/undo", new { app = "unity", window = ChPaths.ProjectName, request, skip_own = true }, T("다른 창을 되돌리지 못했습니다"));
             GUIUtility.ExitGUI();
         }
 
@@ -737,11 +747,11 @@ namespace ClaudeHand.Editor
         private static string FileLines(ChCheckpoint.Mark mark)
         {
             var plan = ChCheckpoint.Plan(mark);
-            return (plan.restore > 0 ? $"\n이 요청이 바꾼 파일 {plan.restore}개는 이전 것으로 돌아갑니다." : "") +
-                   (plan.remove > 0 ? $"\n이 요청으로 생긴 에셋 {plan.remove}개는 프로젝트에서 빠집니다({ChCheckpoint.RemovedFolder}에 보관)." : "") +
-                   (plan.putBack > 0 ? $"\n이 요청이 지운 에셋 {plan.putBack}개는 되살아납니다." : "") +
-                   (plan.moveBack > 0 ? $"\n이 요청이 옮기거나 이름을 바꾼 에셋 {plan.moveBack}개는 원래 자리로 갑니다." : "") +
-                   (plan.unkept.Count > 0 ? $"\n이전 내용이 보관되지 않은 파일 {plan.unkept.Count}개는 그대로 남습니다({ChCheckpoint.Few(plan.unkept)})." : "");
+            return (plan.restore > 0 ? T("\n이 요청이 바꾼 파일 {0}개는 이전 것으로 돌아갑니다.", plan.restore) : "") +
+                   (plan.remove > 0 ? T("\n이 요청으로 생긴 에셋 {0}개는 프로젝트에서 빠집니다({1}에 보관).", plan.remove, ChCheckpoint.RemovedFolder) : "") +
+                   (plan.putBack > 0 ? T("\n이 요청이 지운 에셋 {0}개는 되살아납니다.", plan.putBack) : "") +
+                   (plan.moveBack > 0 ? T("\n이 요청이 옮기거나 이름을 바꾼 에셋 {0}개는 원래 자리로 갑니다.", plan.moveBack) : "") +
+                   (plan.unkept.Count > 0 ? T("\n이전 내용이 보관되지 않은 파일 {0}개는 그대로 남습니다({1}).", plan.unkept.Count, ChCheckpoint.Few(plan.unkept)) : "");
         }
 
         /// <summary>Undoes this window's newest point and says so, here and (with the next message) to the supervisor.</summary>
@@ -750,8 +760,8 @@ namespace ClaudeHand.Editor
             var undone = ChCheckpoint.UndoLast();
             if (undone == null) return null;
             var done = undone.report?.Summary();
-            _entries.Add(new Entry { Kind = "notice", Text = $"되돌렸어요: '{undone.label}' ({undone.time}) 이후의 변경." + (done != null ? " " + done : "") });
-            NoteForClaude($"[사용자가 채팅창에서 '{undone.label}' ({undone.time}) 요청 이후의 Unity 변경을 Undo로 되돌렸음" +
+            _entries.Add(new Entry { Kind = "notice", Text = T("되돌렸어요: '{0}' ({1}) 이후의 변경.", undone.label, undone.time) + (done != null ? " " + done : "") });
+            NoteForClaude(T("[사용자가 채팅창에서 '{0}' ({1}) 요청 이후의 Unity 변경을 Undo로 되돌렸음", undone.label, undone.time) +
                           (done != null ? ". " + done : "") + "]");
             _followNewest = true;
             _scroll.y = float.MaxValue;
@@ -766,7 +776,7 @@ namespace ClaudeHand.Editor
             try
             {
                 var result = await Call(server, HttpMethod.Post, path, body, CancellationToken.None);
-                if (failed != null && result.Value<bool?>("ok") != true) SetStatus($"{failed}: " + (result.Value<string>("error") ?? "Claude Hand가 받지 않았습니다"));
+                if (failed != null && result.Value<bool?>("ok") != true) SetStatus($"{failed}: " + (result.Value<string>("error") ?? T("Claude Hand가 받지 않았습니다")));
             }
             catch (Exception ex)
             {
@@ -798,7 +808,7 @@ namespace ClaudeHand.Editor
         private void DrawOthers()
         {
             if (_others.Count == 0) return;
-            _showOthers = EditorGUILayout.Foldout(_showOthers, $"다른 창 ({_others.Count})", true);
+            _showOthers = EditorGUILayout.Foldout(_showOthers, T("다른 창 ({0})", _others.Count), true);
             if (!_showOthers) return;
             foreach (var line in _others) EditorGUILayout.LabelField(line, EditorStyles.wordWrappedMiniLabel);
         }
@@ -818,13 +828,13 @@ namespace ClaudeHand.Editor
             int actions = _progress.Value<int?>("actions") ?? 0;
             double elapsed = (_progress.Value<double?>("elapsed") ?? 0) + EditorApplication.timeSinceStartup - _progressReceivedAt;
             bool stopping = _progress.Value<bool?>("stopping") ?? false;
-            var parts = new List<string> { $"{(stopping ? "중지하는 중" : "작업 중")} · {(int)elapsed}초" };
+            var parts = new List<string> { T("{0} · {1}초", (stopping ? T("중지하는 중") : T("작업 중")), (int)elapsed) };
             var tool = _progress.Value<string>("tool");
             if (!string.IsNullOrEmpty(tool)) parts.Add($"{tool} {_progress.Value<string>("detail")}".Trim());
-            if (actions > 0) parts.Add($"{actions}번째 동작");
+            if (actions > 0) parts.Add(T("{0}번째 동작", actions));
             GUILayout.BeginHorizontal();
             EditorGUILayout.LabelField(string.Join(" · ", parts), EditorStyles.wordWrappedMiniLabel);
-            if (!stopping && GUILayout.Button("중지", EditorStyles.miniButton, GUILayout.Width(44))) RequestStop();
+            if (!stopping && GUILayout.Button(T("중지"), EditorStyles.miniButton, GUILayout.Width(44))) RequestStop();
             GUILayout.EndHorizontal();
         }
 
@@ -839,11 +849,11 @@ namespace ClaudeHand.Editor
             try
             {
                 var result = await Call(server, HttpMethod.Post, "/v1/stop", new { app = "unity", window = ChPaths.ProjectName }, CancellationToken.None);
-                if (result.Value<bool?>("ok") != true) SetStatus("중지를 보내지 못했습니다: " + (result.Value<string>("error") ?? "알 수 없는 오류"));
+                if (result.Value<bool?>("ok") != true) SetStatus(T("중지를 보내지 못했습니다: ") + (result.Value<string>("error") ?? T("알 수 없는 오류")));
             }
             catch (Exception ex)
             {
-                SetStatus("중지를 보내지 못했습니다: " + ex.Message);
+                SetStatus(T("중지를 보내지 못했습니다: ") + ex.Message);
             }
         }
 
@@ -853,11 +863,11 @@ namespace ClaudeHand.Editor
         /// </summary>
         private void DrawImage(Entry entry)
         {
-            EditorGUILayout.LabelField(entry.Caption ?? "결과 미리보기", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField(entry.Caption ?? T("결과 미리보기"), EditorStyles.boldLabel);
             var texture = LoadImage(entry.ImagePath);
             if (texture == null)
             {
-                EditorGUILayout.LabelField("(그림 파일이 지워졌습니다)", EditorStyles.miniLabel);
+                EditorGUILayout.LabelField(T("(그림 파일이 지워졌습니다)"), EditorStyles.miniLabel);
                 return;
             }
             float width = Mathf.Min(texture.width, position.width - 30);
@@ -875,7 +885,7 @@ namespace ClaudeHand.Editor
                 EditorUtility.OpenWithDefaultApp(entry.ImagePath);
                 Event.current.Use();
             }
-            EditorGUILayout.LabelField("누르면 크게 봅니다", EditorStyles.miniLabel);
+            EditorGUILayout.LabelField(T("누르면 크게 봅니다"), EditorStyles.miniLabel);
         }
 
         private Texture2D LoadImage(string path)
@@ -903,8 +913,8 @@ namespace ClaudeHand.Editor
             EditorGUILayout.LabelField(Shorten(text, ShownChars), EditorStyles.wordWrappedLabel);
             if (text.Length <= ShownChars) return;
             GUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField($"…{text.Length - ShownChars}자 더 있음", EditorStyles.miniLabel);
-            if (GUILayout.Button("전체 복사", EditorStyles.miniButton, GUILayout.Width(70))) GUIUtility.systemCopyBuffer = copy;
+            EditorGUILayout.LabelField(T("…{0}자 더 있음", text.Length - ShownChars), EditorStyles.miniLabel);
+            if (GUILayout.Button(T("전체 복사"), EditorStyles.miniButton, GUILayout.Width(70))) GUIUtility.systemCopyBuffer = copy;
             GUILayout.EndHorizontal();
         }
 
@@ -915,9 +925,9 @@ namespace ClaudeHand.Editor
 
         private static readonly Dictionary<string, string> ProtectModeLines = new Dictionary<string, string>
         {
-            { "open", "Claude가 이 프로젝트를 바꿀 수 있습니다. 아래 규칙이 가리키는 것만 빼고요." },
-            { "look", "보기만: Claude는 이 프로젝트를 읽기만 합니다." },
-            { "locked", "잠금: Claude는 이 프로젝트에서 아무 일도 하지 않습니다." },
+            { "open", N("Claude가 이 프로젝트를 바꿀 수 있습니다. 아래 규칙이 가리키는 것만 빼고요.") },
+            { "look", N("보기만: Claude는 이 프로젝트를 읽기만 합니다.") },
+            { "locked", N("잠금: Claude는 이 프로젝트에서 아무 일도 하지 않습니다.") },
         };
 
         /// <summary>
@@ -927,20 +937,20 @@ namespace ClaudeHand.Editor
         private void DrawProtect()
         {
             var rules = ChProtect.Current;
-            var title = rules.rows.Count == 0 ? "보호 [열림] 규칙 없음"
-                : $"보호 [잠김] {(rules.window != "open" ? ChProtect.ModeWords[rules.window] + " · " : "")}규칙 {rules.rows.Count}개";
-            if (rules.problems.Count > 0) title += " · 읽지 못한 파일 있음";
+            var title = rules.rows.Count == 0 ? T("보호 [열림] 규칙 없음")
+                : T("보호 [잠김] {0}규칙 {1}개", (rules.window != "open" ? T(ChProtect.ModeWords[rules.window]) + " · " : ""), rules.rows.Count);
+            if (rules.problems.Count > 0) title += T(" · 읽지 못한 파일 있음");
             _showProtect = EditorGUILayout.Foldout(_showProtect, title, true);
             if (!_showProtect) return;
-            EditorGUILayout.LabelField(ProtectModeLines[rules.window], EditorStyles.wordWrappedMiniLabel);
+            EditorGUILayout.LabelField(T(ProtectModeLines[rules.window]), EditorStyles.wordWrappedMiniLabel);
             foreach (var row in rules.rows)
             {
                 GUILayout.BeginHorizontal();
                 EditorGUILayout.LabelField(ChProtect.Label(row), EditorStyles.miniLabel);
-                bool loosen = GUILayout.Button("풀기", EditorStyles.miniButton, GUILayout.Width(44));
+                bool loosen = GUILayout.Button(T("풀기"), EditorStyles.miniButton, GUILayout.ExpandWidth(false));
                 GUILayout.EndHorizontal();
                 if (!loosen) continue;
-                if (EditorUtility.DisplayDialog("보호 규칙 풀기", $"'{ChProtect.Label(row)}' 규칙을 풉니다. Claude가 다시 바꿀 수 있게 됩니다.", "풀기", "취소"))
+                if (EditorUtility.DisplayDialog(T("보호 규칙 풀기"), T("'{0}' 규칙을 풉니다. Claude가 다시 바꿀 수 있게 됩니다.", ChProtect.Label(row)), T("풀기"), T("취소")))
                 {
                     var problem = ChProtect.Remove(row.kind, row.value, row.lasting);
                     if (problem != null) SetStatus(problem);
@@ -949,21 +959,29 @@ namespace ClaudeHand.Editor
             }
             foreach (var problem in rules.problems)
             {
-                EditorGUILayout.HelpBox("읽지 못한 규칙 파일(고칠 때까지 Claude의 바꾸는 호출을 막습니다): " + problem, MessageType.Warning);
+                EditorGUILayout.HelpBox(T("읽지 못한 규칙 파일(고칠 때까지 Claude의 바꾸는 호출을 막습니다): ") + problem, MessageType.Warning);
             }
-            _protectSession = EditorGUILayout.ToggleLeft("이번만 (Claude Hand를 끌 때까지)", _protectSession);
+            _protectSession = EditorGUILayout.ToggleLeft(T("이번만 (Claude Hand를 끌 때까지)"), _protectSession);
+            // One row where the four fit (they do in Korean); two where the window is narrower than their words.
+            var names = new[] { T("선택한 것 보호"), T("이 창 보기만"), T("이 창 잠금"), T("동작 금지") };
+            bool twoRows = names.Sum(name => EditorStyles.miniButton.CalcSize(new GUIContent(name)).x + 4) + 16 > EditorGUIUtility.currentViewWidth - 8;
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button("선택한 것 보호", EditorStyles.miniButton)) ProtectSelection();
-            if (rules.window != "look" && GUILayout.Button("이 창 보기만", EditorStyles.miniButton)) AddRule("window", "look");
-            if (rules.window != "locked" && GUILayout.Button("이 창 잠금", EditorStyles.miniButton)) AddRule("window", "locked");
+            if (GUILayout.Button(names[0], EditorStyles.miniButton)) ProtectSelection();
+            if (rules.window != "look" && GUILayout.Button(names[1], EditorStyles.miniButton)) AddRule("window", "look");
+            if (twoRows)
+            {
+                GUILayout.EndHorizontal();
+                GUILayout.BeginHorizontal();
+            }
+            if (rules.window != "locked" && GUILayout.Button(names[2], EditorStyles.miniButton)) AddRule("window", "locked");
             var open = ChProtect.ActionWords.Where(a => !rules.actions.Contains(a.Key)).ToList();
-            if (open.Count > 0 && EditorGUILayout.DropdownButton(new GUIContent("동작 금지"), FocusType.Passive, EditorStyles.miniButton))
+            if (open.Count > 0 && EditorGUILayout.DropdownButton(new GUIContent(names[3]), FocusType.Passive, EditorStyles.miniButton))
             {
                 var menu = new GenericMenu();
                 foreach (var action in open)
                 {
                     var name = action.Key;
-                    menu.AddItem(new GUIContent(action.Value + " 금지"), false, () => AddRule("action", name));
+                    menu.AddItem(new GUIContent(T("{0} 금지", T(action.Value))), false, () => AddRule("action", name));
                 }
                 menu.ShowAsContext();
             }
@@ -989,7 +1007,7 @@ namespace ClaudeHand.Editor
                 .Where(path => !string.IsNullOrEmpty(path) && path.StartsWith("Assets/", StringComparison.Ordinal)).Distinct().ToList();
             if (objects.Count + paths.Count == 0)
             {
-                SetStatus("보호할 오브젝트(Hierarchy)나 에셋(Project)을 먼저 고르세요.");
+                SetStatus(T("보호할 오브젝트(Hierarchy)나 에셋(Project)을 먼저 고르세요."));
                 return;
             }
             foreach (var value in objects) AddRule("object", value);
@@ -999,15 +1017,15 @@ namespace ClaudeHand.Editor
         /// <summary>A rule Claude proposed (the supervisor's propose_protection). It holds only once the user presses [추가] here.</summary>
         private void DrawOffer(Entry entry)
         {
-            EditorGUILayout.HelpBox("Claude가 제안한 보호 규칙\n" + entry.Text, MessageType.Info);
+            EditorGUILayout.HelpBox(T("Claude가 제안한 보호 규칙\n") + entry.Text, MessageType.Info);
             if (entry.Behavior != null)
             {
-                EditorGUILayout.LabelField(entry.Behavior == "added" ? "→ 규칙에 더함" : "→ 더하지 않음", EditorStyles.miniLabel);
+                EditorGUILayout.LabelField(entry.Behavior == "added" ? T("→ 규칙에 더함") : T("→ 더하지 않음"), EditorStyles.miniLabel);
                 return;
             }
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button("추가")) AnswerOffer(entry, "added");
-            if (GUILayout.Button("취소")) AnswerOffer(entry, "declined");
+            if (GUILayout.Button(T("추가"))) AnswerOffer(entry, "added");
+            if (GUILayout.Button(T("취소"))) AnswerOffer(entry, "declined");
             GUILayout.EndHorizontal();
         }
 
@@ -1048,17 +1066,17 @@ namespace ClaudeHand.Editor
 
         private void DrawPermission(Entry entry)
         {
-            var body = $"Claude가 '{entry.ToolName}' 실행 허락을 요청합니다.\n{entry.Description}";
+            var body = T("Claude가 '{0}' 실행 허락을 요청합니다.\n{1}", entry.ToolName, entry.Description);
             if (!string.IsNullOrEmpty(entry.Preview)) body += "\n" + entry.Preview;
             EditorGUILayout.HelpBox(body, MessageType.Warning);
             if (entry.Behavior != null)
             {
-                EditorGUILayout.LabelField(entry.Behavior == "allow" ? "→ 허용됨" : "→ 거부됨", EditorStyles.miniLabel);
+                EditorGUILayout.LabelField(entry.Behavior == "allow" ? T("→ 허용됨") : T("→ 거부됨"), EditorStyles.miniLabel);
                 return;
             }
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button("허용")) AnswerPermission(entry, "allow");
-            if (GUILayout.Button("거부")) AnswerPermission(entry, "deny");
+            if (GUILayout.Button(T("허용"))) AnswerPermission(entry, "allow");
+            if (GUILayout.Button(T("거부"))) AnswerPermission(entry, "deny");
             GUILayout.EndHorizontal();
         }
     }
